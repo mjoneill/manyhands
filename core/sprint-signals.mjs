@@ -37,7 +37,7 @@
  *                              of a surface is a CLAIM about what it does not have.
  *                              (The replica is different: it drops entity.shortId and
  *                              needs a join — same name, two surfaces, #891.)
- *   ⛔ signal 2's NUMERATOR     needs work objects; no store ⇒ structurally 0
+ *   ⛔ signal 2                 RETIRED with the work ledger (#1763): it answers `retired`
  *   ⛔ signal 1's BID COUNT     bids are PROSE. See below.
  *   ⛔ signal 3                 human-supplied by construction
  *
@@ -45,8 +45,6 @@
  *   this runs rather than discovered on the closing day.
  */
 
-import { stateAt, STATES } from './work-auction.mjs';
-import { ENFORCED_OPS, UNSCOPABLE_OPS, holdsOpenWindow } from './work-gate.mjs';
 
 /**
  * The board-mediated actions a work gate can reach (#755's railable list).
@@ -55,7 +53,9 @@ import { ENFORCED_OPS, UNSCOPABLE_OPS, holdsOpenWindow } from './work-gate.mjs';
  * a protocol that covered speech would deadlock its own negotiation, since
  * answering a bid would breach the window the bid opened.
  */
-export const COVERED_OPS = ENFORCED_OPS;
+// #1763 — the work gate is RETIRED, so no board action is gated any more.
+export const COVERED_OPS = Object.freeze([]);
+export const WORK_LEDGER_RETIRED = Object.freeze({ since: '2026-08-18', card: '#1763' });
 
 const unmeasurable = (missingInput, extra = {}) => ({ status: 'unmeasurable', missingInput, fires: false, ...extra });
 
@@ -103,111 +103,12 @@ export function signalOneContestedBids({ bidRecords }) {
 }
 
 /**
- * SIGNAL 2 (v2) — "from the moment the adapter is LIVE: any covered action by
- * a seat holding an open work object, taken without a recorded grant.
- * Denominator: covered actions in the same period."
- *
- * ⚠️ Human actions are EXCLUDED. The gate measures seats; the owner's browser
- * edits would dilute the rate and make the rail look better-obeyed than it is.
- * The excluded count is returned so the filter is auditable rather than a
- * silent narrowing — an instrument's reach must be visible in its output.
+ * SIGNAL 2 — RETIRED with the work ledger (#1763, owner 2026-10-27: "let it go"). It measured whether seats honoured the
+ * #755 work gate's windows; the gate and its ledger are gone (no transition since 2026-08-18), so there is nothing to
+ * measure. It answers `retired`, never fires, and reads no ledger — whatever is passed in.
  */
-export function signalTwoUngrantedActions({ events, workObjects, seats, enforcedOps = ENFORCED_OPS }) {
-  // ⚠️ NULL AND EMPTY ARE DIFFERENT FACTS, and they mean opposite things about
-  // the evidence:
-  //   null → no store is configured. The instrument does not exist and the
-  //          zero is meaningless.
-  //   []   → the store exists and has recorded nothing, which is expected
-  //          while the flag is off, and becomes a REAL zero over a real
-  //          denominator once it is armed.
-  //
-  // The first version branched on `length === 0` and printed "there is no
-  // work-object store" for both. It said that the morning AFTER the store
-  // landed — a stale caveat about a condition that had ended, inside the
-  // instrument built to stop exactly that.
-  const storeConfigured = Array.isArray(workObjects);
-  const objects = storeConfigured ? workObjects : [];
-  const seatSet = new Set(seats);
-  const covered = events.filter((e) => enforcedOps.includes(e.op));
-  const bySeat = covered.filter((e) => e.actor && seatSet.has(e.actor));
-  const excludedNonSeat = covered.length - bySeat.length;
-
-  if (bySeat.length === 0) {
-    return unmeasurable('no covered actions by a known seat in this period', { excludedNonSeat, countedOps: [...enforcedOps] });
-  }
-
-  // ⛔⛔ #890 R4 — AN INSTRUMENT THAT CANNOT REPRODUCE THE RULE MUST SAY SO.
-  //
-  // If every op we count is one the gate structurally cannot scope, then no
-  // action in this denominator CAN be a violation, and a 0/N here would read as
-  // compliance when it means "the population cannot contain a violation". That
-  // is the same defect `scored()` refuses one function up: an empty denominator
-  // is unmeasurable, not zero.
-  //
-  // ⚠️ Today ENFORCED_OPS is ['create'] and create is unscopable, so this fires
-  // in production. That is not a bug in this signal — it is #889 showing through
-  // the instrument, which is exactly what an instrument is for.
-  const scopable = [...enforcedOps].filter((op) => !UNSCOPABLE_OPS.includes(op));
-  if (scopable.length === 0) {
-    return unmeasurable(
-      `every enforced op (${[...enforcedOps].join(', ')}) is one the gate cannot scope to a card, `
-      + 'so no counted action can be a violation and a zero here would mean nothing. See #889.',
-      { excludedNonSeat, countedOps: [...enforcedOps], unscopableOps: [...UNSCOPABLE_OPS] },
-    );
-  }
-
-  const numerator = bySeat.filter((e) => {
-    // ⛔⛔ #890 — AN UNSCOPABLE OP CANNOT BE A VIOLATION, PER EVENT.
-    //
-    // Caught by this card's own boundary test, and it is the whole defect in
-    // miniature. A `create` event RECORDS the shortId of the card it brought
-    // into existence, so after the fact it looks exactly like an action
-    // targeting that card — and if the actor held a window on it, the
-    // instrument would score a violation the gate COULD NOT HAVE REFUSED,
-    // because at decision time no card existed to compare.
-    //
-    // ⇒ The per-list R4 check above is not enough on its own: it only fires
-    //   when EVERY enforced op is unscopable. This is the same rule applied
-    //   where a single mixed event set would otherwise slip through.
-    //
-    // ⚠️ It stays in the DENOMINATOR. It was a real action by a real seat; it
-    // simply cannot be a bypass. Dropping it from both would flatter the rate.
-    if (UNSCOPABLE_OPS.includes(e.op)) return false;
-
-    // ⭐⭐⭐ #890 — THE RULE IS ASKED OF THE MODULE THAT ENFORCES IT.
-    //
-    // This used to be a hand-written copy that matched on the actor alone. It
-    // agreed with the gate until #886 scoped the gate to the declared card, and
-    // then this instrument spent an afternoon reporting 10/10 violations of a
-    // rule the gate no longer implemented — every one of them permitted.
-    //
-    // ⚠️ The test built to catch that divergence (COVERED_OPS deepEqual
-    // ENFORCED_OPS) was green the whole time, because the previous instance was
-    // two LISTS and this one was the PREDICATE. Sharing a constant is not
-    // sharing a rule.
-    //
-    // `e.entity?.shortId` is the raw log's own field, the same identifier space
-    // `wo.card` holds — no join, no resolution. A `post` event has no shortId
-    // and correctly matches NO window rather than every one.
-    return holdsOpenWindow({
-      actor: e.actor,
-      card: e.entity?.shortId ?? null,
-      workObjects: objects,
-      now: e.occurred_at,
-    }) !== null;
-  }).length;
-
-  // ⚠️ A structural zero is the worst cell on this report: it looks like "no
-  // bypasses" and means "no instrument". Say WHICH one it is, in the output —
-  // and there are two different ones.
-  let caveat;
-  if (!storeConfigured) {
-    caveat = 'STRUCTURAL ZERO: no work-object store is configured, so no action CAN be counted as ungranted. This is not evidence of compliance.';
-  } else if (objects.length === 0) {
-    caveat = 'STRUCTURAL ZERO: the work-object store is configured and EMPTY — nothing has been recorded, which is expected while the gate is unarmed. This is not evidence of compliance.';
-  }
-
-  return scored(numerator, bySeat.length, { excludedNonSeat, caveat, countedOps: [...enforcedOps] });
+export function signalTwoUngrantedActions() {
+  return { status: 'retired', fires: false, ...WORK_LEDGER_RETIRED, reason: 'the work ledger and its gate are retired' };
 }
 
 /**
@@ -235,6 +136,7 @@ export function signalThreeOutOfBand({ humanSuppliedCount }) {
 
 /** One line per signal. An unmeasurable line carries no ratio to misread. */
 export function renderSignal(label, s) {
+  if (s.status === 'retired') return `${label}: RETIRED since ${s.since} (${s.card}) — ${s.reason}`;
   if (s.status === 'unmeasurable') {
     // ⚠️ #890 — THE DIAGNOSTICS SURVIVE UNMEASURABLE, the SCORE does not.
     //

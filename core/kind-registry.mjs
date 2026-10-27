@@ -192,6 +192,18 @@ export const KIND_DECLARATIONS = Object.freeze([
       + 'holder is the OPEN interval, never the newest node by date.',
   },
   {
+    name: 'scrum:RosterSeat', eventKind: null, collection: null,
+    createdBy: 'POST /api/roster (Settings → people), and once at boot from roster.json (#1764)',
+    definition: 'A configured seat in the room, a person or a seat they set up, with its name, colour, glyph, aliases, kind and '
+      + 'position. With the agents\' invited seats it is the whole roster; roster.json is its export for the history gate.',
+  },
+  {
+    name: 'scrum:RosterRoles', eventKind: null, collection: null,
+    createdBy: 'POST /api/roster with roles (#1368, #1764)',
+    definition: 'The roster\'s role grants, as one node beside its seats: which configured seat holds the Product Owner role '
+      + '(roles.po, #1368). Saved with the roster; a save that names no roles keeps the current grant.',
+  },
+  {
     name: 'scrum:ChannelConfig', eventKind: null, collection: null,
     createdBy: 'POST /api/config (Settings → channel delivery, #263/#1784), and once at boot from channel-config.json',
     definition: 'The channel delivery settings as one node: the mode (soft, hard, off, token-ring), its timings, the seats that join '
@@ -317,7 +329,7 @@ export const KIND_DECLARATIONS = Object.freeze([
   },
   {
     name: 'scrum:WorkObject', eventKind: null, collection: null,
-    createdBy: 'work_declare / work_bid / work_grant',
+    createdBy: 'no longer created: the #755 work ledger is retired (#1763, 2026-10-27); the 17 that exist are history (the tools were work_declare / work_bid / work_grant)',
     definition: 'A bid-and-reply object for coordinating who takes a piece of work: it carries '
       + '`scrum:declaredBy`, one or more `scrum:required` people, a `scrum:replyBy` deadline and a '
       + 'shortId of the card it concerns. NOT a claim — a claim is first-write-wins on the card '

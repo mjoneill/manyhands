@@ -8,9 +8,12 @@
 // #1762 S1 (review) — with native history ON, a card or collection write that carries NO history is refused before it is
 // sent: a path that forgot to compute it would otherwise commit changes no history records. Named migrations are exempt
 // (an import or backfill is history being brought in, not a change being made).
-const HISTORY_EXEMPT_OPS = [/^urn:ex:op\/collection\/import\//, /^urn:ex:op\/cutover\//, /^urn:ex:op\/backfill\//, /^urn:ex:op\/migrate-/];
-export function lacksRequiredHistory(i, on = process.env.SCRUM_HISTORY_NATIVE === '1') {
-  if (!on || !i || typeof i.opId !== 'string' || HISTORY_EXEMPT_OPS.some((re) => re.test(i.opId))) return false;
+// #1762 S1b — any op with an `/import` segment (collection, card, model-call and delivery imports) is a migration too.
+const HISTORY_EXEMPT_OPS = [/^urn:ex:op\/[^/]+\/import(\/|$)/, /^urn:ex:op\/delivery\/[^/]+\/import$/, /^urn:ex:op\/cutover\//, /^urn:ex:op\/backfill\//, /^urn:ex:op\/migrate-/];
+export const isHistoryExemptOp = (opId) => typeof opId === 'string' && HISTORY_EXEMPT_OPS.some((re) => re.test(opId));
+export const historyNativeOn = () => process.env.SCRUM_HISTORY_NATIVE === '1';
+export function lacksRequiredHistory(i, on = historyNativeOn()) {
+  if (!on || !i || typeof i.opId !== 'string' || isHistoryExemptOp(i.opId)) return false;
   const parts = i.kind === 'card.write' ? [...(i.parts || []), ...(i.collections || [])]
     : i.kind === 'entity.put' && i.entity?.kind === 'collection' ? (i.entity.parts || []) : [];
   return parts.some((p) => !p || !p.history);

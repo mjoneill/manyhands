@@ -390,12 +390,12 @@ test('#1690 (G5) FAILS CLOSED: a receipt missing its sha or manifest hash, or un
 
 // ------------------------------------------------------------------- the real manifest and the real workflow
 
-test('#1690 (W1) the checked-in manifest lists exactly the six platform-only tests, each with a reason, in a file that exists and names it', () => {
+test('#1690 (W1) the checked-in manifest lists exactly the seven platform-only tests, each with a reason, in a file that exists and names it', () => {
   assert.ok(fs.existsSync(REAL_MANIFEST), 'tests/platform-only-manifest.json must exist');
   const m = JSON.parse(fs.readFileSync(REAL_MANIFEST, 'utf8'));
-  assert.equal(m.length, 6, 'six entries today: I1 to I5 and RL');
+  assert.equal(m.length, 7, 'seven entries today: I1 to I5, RL and #1764 B3');
   const ids = m.map((e) => e.name.split(' ')[0]).sort();
-  assert.deepEqual(ids, ['I1', 'I2', 'I3', 'I4', 'I5', 'RL']);
+  assert.deepEqual(ids, ['#1764', 'I1', 'I2', 'I3', 'I4', 'I5', 'RL']);
   for (const e of m) {
     assert.ok(e.reason && /\S/.test(e.reason), `${e.name}: a reason`);
     const file = path.join(REPO, e.file);

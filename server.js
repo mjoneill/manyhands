@@ -42,6 +42,8 @@ import { validateCompare, evaluateCompareAsync } from './core/check-compare.mjs'
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { countLegacy, setLegacyContext, installStructuredCloneCounter, legacyCounters } from './core/legacy-counters.mjs';
 import { createGraphSlice } from './core/graph-slice-routes.mjs';
+import { historyNativeOn } from './core/durable-update.mjs';   // #1762 S1b
+import { refusalIntention, refusalSeat, routeTemplate, adapterRoute, createRefusalAuditMeter, UNLISTED as REFUSAL_UNLISTED } from './core/refusal-record.mjs';   // #1762 S2
 // #1561 — the log-born unit (memory, decision, seat-state) on the graph executor, behind
 // SCRUM_GRAPH_UNIT_LOGBORN=1. The folds live there now; with the flag OFF they are the only part used.
 import {
@@ -94,7 +96,8 @@ import { roleSectionFor, heldRoleKey } from './core/role-section.mjs';   // #137
 import { validateDeclaration, seatState, tendingEligibility, declarationsFromRows, UNKNOWN as SEAT_UNKNOWN } from './core/seat-state.mjs';
 import { readConfig, writeConfig, validateConfig, configFilePath, LIMITS } from './channel-config.mjs';
 import { channelConfigEntity, channelConfigFrom, channelConfigInGraph, CHANNEL_CONFIG_IRI } from './core/channel-config-graph.mjs';   // #1784
-import { droppedAgentSeats, loadRoster, writeRoster, rosterFilePath, loadRosterRoles } from './core/roster-config.mjs';
+import { droppedAgentSeats, loadRoster, writeRoster, rosterFilePath, loadRosterRoles, validateRoster, validateRoles } from './core/roster-config.mjs';
+import { rosterEntities, seatsFrom, rolesFrom, rosterInGraph, supersetSeats } from './core/roster-graph.mjs';   // #1764
 import { extractMentions as extractMentionsFromRoster } from './core/people.mjs';
 // #868 — the graph modules are imported LAZILY, at the bottom of this file's
 // graph section, and deliberately NOT here. They reach `oxigraph`, an npm
@@ -366,21 +369,42 @@ function agentSeats(data) {
 let _rosterCache = { key: null, seats: null };
 let _rosterComputing = false;   // re-entrancy guard: readBoard → mentions → roster → readBoard
 function fileKey(file) { if (file === BOARD_DATA_FILE) countLegacy('boardStat'); try { const st = fs.statSync(file); return `${st.mtimeMs}:${st.size}`; } catch { return 'absent'; } }   // #1563 — a stat of the board file is a touch, counted
+// #1764 — with the collections unit holding `rosterSeats`, the CONFIGURED seats and roles are graph state; roster.json is a
+// one-time import and then an export for the pre-push history gate only (core/roster-graph.mjs). Unit off: the file, as before.
+const rosterHeld = () => !!(COLLECTIONS && COLLECTIONS.keys.includes('rosterSeats'));
+function configuredSeats(onWarn, ents = null) {
+  if (rosterHeld()) {
+    const e = ents ?? COLLECTIONS.snapshot().rosterSeats ?? [];
+    if (rosterInGraph(e)) return seatsFrom(e);
+  }
+  return loadRoster(undefined, onWarn) || {};   // unit off, or a graph with no roster yet: the file (or the shipped example)
+}
+function configuredRoles(ents = null) {
+  if (rosterHeld()) {
+    const e = ents ?? COLLECTIONS.snapshot().rosterSeats ?? [];
+    if (rosterInGraph(e)) return rolesFrom(e);
+  }
+  return loadRosterRoles();
+}
+/** #1764 — the history gate's copy (severance-check reads roster.json). Throws when it cannot be written. */
+// The export may hold up to twice the save limit: mid-save it is the superset of the old and new rosters (#1764 C1).
+const writeRosterExport = (seats, roles) => writeRoster({ seats, roles }, rosterFilePath(), { maxSeats: 128 });
+
 function currentRoster(data = null) {
   if (!data) {
     const key = `${DOCUMENT_READS ? fileKey(BOARD_DATA_FILE) : `collections-${COLLECTIONS?.generation ?? 0}`}|${fileKey(rosterFilePath())}`;   // #1563 — invalidated by the agents collection, not the file
     if (_rosterCache.key === key && _rosterCache.seats) return configureIdentities(_rosterCache.seats);
-    if (_rosterComputing) return configureIdentities(loadRoster(undefined, warnRosterOnce));   // never recurse into readBoard
+    if (_rosterComputing) return configureIdentities(configuredSeats(warnRosterOnce));   // never recurse into readBoard
     let board = null;
     _rosterComputing = true;
     try { board = readBoard(); } catch (e) { warnRosterOnce(`board unreadable for agent seats: ${e.message}`); } finally { _rosterComputing = false; }
-    const fileSeats = loadRoster(undefined, warnRosterOnce) || {};
+    const fileSeats = configuredSeats(warnRosterOnce, board?.rosterSeats ?? null);   // #1764
     const merged = mergeSeats(fileSeats, agentSeats(board));
     const seats = Object.keys(merged).length ? merged : null;
     _rosterCache = { key, seats };
     return configureIdentities(seats);
   }
-  const fileSeats = loadRoster(undefined, warnRosterOnce) || {};
+  const fileSeats = configuredSeats(warnRosterOnce, data.rosterSeats ?? null);   // #1764
   const merged = mergeSeats(fileSeats, agentSeats(data));
   return configureIdentities(Object.keys(merged).length ? merged : null);
 }
@@ -976,6 +1000,18 @@ function logRefused(req, statusCode, data) {
     let tail = rawTail;
     try { tail = decodeURIComponent(rawTail); } catch { /* malformed escape — the raw form is the only id it has */ }
     const actor = (request && (request.by || request.author || request.createdBy || request.decidedBy)) || null;
+    // #1762 S2 — with native history on, the refusal is ONE content-free graph record and nothing goes to the event log.
+    if (historyNativeOn()) {
+      if (req._noRefusalAudit) return;   // the audit write of a refusal report failed: that failure is counted, not recorded
+      const mr = meterRoute.getStore();
+      const facts = {
+        route: mr && mr.path === url ? routeTemplate(req.method, mr.route) : REFUSAL_UNLISTED, status: statusCode,
+        code: data && data.code, rule: null, entityKind: kindEntry ? kindEntry[1] : 'request', entityId: tail || null,
+        requestId: request && request.requestId, authSeat: req.auth && req.auth.seat, declared: actor,
+      };
+      setImmediate(() => { recordRefusal(facts); });   // v2.2 §3: after the response is handed on, never on its path
+      return;
+    }
     // #1574 W39/W40 — A REFUSED POST LEAVES NO COPY OF WHAT IT SAID. This log is append-only and redaction never reaches
     // it, so a refused conversation write (a retry of a redacted post above all) would put the post's text back into a
     // retained store. Its audit keeps the outcome and the identifiers: who, which requestId, which status and code. Not the
@@ -1010,6 +1046,25 @@ function logRefused(req, statusCode, data) {
   }
 }
 
+// #1762 S2 — the refusal audit's writer and its health counter. Fire-and-forget from the response path (a refusal goes
+// out unchanged whatever happens here); awaited by POST /api/refusals, which answers with what the graph holds.
+const REFUSAL_AUDIT = createRefusalAuditMeter();
+const rosterKeysOrEmpty = () => { try { return new Set(Object.keys(currentRoster() || {})); } catch { return new Set(); } };
+// v2.2 §2/§6: only APPLIED is "recorded" (an identical retry replays its APPLIED receipt). An intent-collision (the same
+// scope and id with CHANGED facts), a failed precondition, UNKNOWN or REJECTED is an audit failure: counted, never assumed.
+async function recordRefusal({ authSeat, declared, ...facts }) {
+  return REFUSAL_AUDIT.run(async () => {
+    try {
+      if (!ANNOUNCE_EXECUTOR) { REFUSAL_AUDIT.unavailable('no graph executor is configured'); return false; }
+      const i = refusalIntention({ actor: graphActor('board'), ...facts, seat: refusalSeat({ authSeat, declared, rosterKeys: rosterKeysOrEmpty() }) });
+      const r = await ANNOUNCE_EXECUTOR.update(i);
+      if (r.outcome === 'APPLIED') return true;
+      REFUSAL_AUDIT.unavailable(`${r.outcome}${r.reason ? `: ${r.reason}` : ''}`);
+      return false;
+    } catch (e) { REFUSAL_AUDIT.unavailable(e?.message || 'error'); return false; }
+  });
+}
+
 /**
  * #1167 — POST /api/refusals: record a refusal the SERVER did not produce.
  *
@@ -1033,6 +1088,17 @@ async function handleReportRefusal(req, res) {
     if (typeof reason !== 'string' || !reason) return sendJSON(res, 400, { error: 'reason is required — what the caller was told' });
     if (!entity || typeof entity !== 'object' || !entity.kind) return sendJSON(res, 400, { error: 'entity {kind, id} is required — what the refused action was about' });
     if (!ENTITY_KINDS.has(entity.kind)) return sendJSON(res, 400, { error: `unknown entity.kind "${entity.kind}" — vocabulary is ${[...ENTITY_KINDS].join('|')}` });
+    if (historyNativeOn()) {
+      // #1762 S2 — the adapter's refusal as ONE content-free record: its rule (registered, else unlisted), never its reason
+      // or request. A record that could not be written is a 503 that is itself NOT audited (no recursion).
+      const ok = await recordRefusal({
+        route: adapterRoute(body.route), status: 403, code: null, rule, entityKind: entity.kind,
+        entityId: entity.id != null && entity.id !== '' ? String(entity.id) : null,
+        requestId: request && typeof request === 'object' ? request.requestId : null, authSeat: req.auth && req.auth.seat, declared: actor,
+      });
+      if (!ok) { req._noRefusalAudit = true; return sendJSON(res, 503, { error: 'the refusal could not be recorded: the graph executor did not accept it', code: 'GRAPH_UNAVAILABLE' }); }
+      return sendJSON(res, 201, { recorded: true });
+    }
     const stored = appendEvent(EVENT_LOG_DIR, {
       op: 'refused',
       entity: { kind: entity.kind, id: entity.id != null && entity.id !== '' ? String(entity.id) : rule },
@@ -1550,7 +1616,6 @@ function writeWatermark() {
   return { generation: _graphGeneration, projectedThrough: _graphProjectedThrough };
 }
 // #1112 item 3 — one warning per boot when the ledger cannot be projected here.
-let _workStoreWarned = false;
 const GRAPH_QUERY_LOG = path.join(DATA_DIR, 'graph-query-log.jsonl');   // #1788
 // ── #1086 item 13 — QUERY → CARD retrieval, as a feature ──────────────────────
 // The embedder is CONFIGURED, never assumed: an unset URL/model answers
@@ -1749,7 +1814,7 @@ async function warmGraphStore() {
 
 async function warmGraphStoreOnce() {
   countLegacy('graphReplicaSync');
-  const { buildGraphStore, syncGraphStoreChunked, verifyHashCache, projectActivities, projectLabelAliases, projectWorkLedger } = await loadGraphModules();
+  const { buildGraphStore, syncGraphStoreChunked, verifyHashCache, projectActivities, projectLabelAliases } = await loadGraphModules();
   let rebuiltMs = null;
   if (_graphDirty || !_graphStore) {
     // #714 — INCREMENTAL. The old path threw the store away and re-projected
@@ -1872,26 +1937,7 @@ async function warmGraphStoreOnce() {
       console.error(`${new Date().toISOString()} graph-replica: ACTIVITIES NOT PROJECTED (${e?.message}) — traversal is unaffected, but prov:Activity is incomplete past seq ${_activitySeq}`);
     }
 
-    // #1112 item 3 — the WORK LEDGER is part of the graph (Decision 3956b66b).
-    // Same wiring lesson as the block above: projectWorkLedger existed for zero
-    // minutes before this call site, on purpose. The store is small (53 rows on
-    // 2026-08-30) and the projection is idempotent by (id, seq), so it re-runs
-    // whole on every sync — no cursor to hold. An UNSET env is a named absence,
-    // once per boot, not a silent zero: this server historically did not carry
-    // SCRUM_WORK_STORE (only the MCP process did), and a deploy that forgets
-    // the plist line must be discoverable from the log.
-    try {
-      const workDir = process.env.SCRUM_WORK_STORE;
-      if (workDir) {
-        const { readWorkObjectRows } = await import('./core/work-store.mjs');
-        projectWorkLedger(_graphStore, readWorkObjectRows(workDir));
-      } else if (!_workStoreWarned) {
-        _workStoreWarned = true;
-        console.error(`${new Date().toISOString()} graph-replica: WORK LEDGER NOT PROJECTED — SCRUM_WORK_STORE is unset on this process, so schema:Action answers zero for a protocol that has rows elsewhere`);
-      }
-    } catch (e) {
-      console.error(`${new Date().toISOString()} graph-replica: WORK LEDGER NOT PROJECTED (${e?.message}) — traversal is unaffected, but schema:Action is incomplete`);
-    }
+    // #1763 — the work ledger is RETIRED; its 53 transitions are already executor nodes, so nothing is projected here.
 
     // #949 — recorded from the stamp of the bytes we actually projected, NOT
     // from the log's head at this instant. If a write landed during the awaited
@@ -3287,7 +3333,10 @@ async function updateMemoryOnGraph(req, res, id, body, flags) {
     if (cur.rev == null) return sendJSON(res, 500, { error: `memory ${id} has no write revision (urn:ex:ver) in the graph store: it was not written by this unit or its migration` });
     actor ??= logbornActor(req, res, 'memory.revise');
     if (!actor) return;
-    const r = await LOGBORN.write(memoryReviseIntention({ actor, identity: composed.identity, newVersions: composed.added, expectedRev: cur.rev }));
+    // #1762 S1b — the activity's versionAfter is the version REST will answer with, which a title-only revise does not carry
+    const versionAfter = Math.max(0, ...[...cur.versions, ...composed.added].map((v) => Number(v['scrum:version']) || 0));
+    const r = await LOGBORN.write({ ...memoryReviseIntention({ actor, identity: composed.identity, newVersions: composed.added, expectedRev: cur.rev }),
+      ...(historyNativeOn() && versionAfter > 0 ? { history: { versionAfter } } : {}) });
     if (r.outcome === 'PRECONDITION_FAILED') continue;
     if (r.outcome !== 'APPLIED') return logbornWriteFailed(res, r);
     let after;
@@ -7210,7 +7259,7 @@ const STANDING_CHECKS = [
     claim: 'the roster\'s `board` and `wiki` seats carry `kind: system` — the mark the history gate exempts '
       + 'them by; without it their names become guarded words and every push is refused (#600, #1380)',
     run: () => {
-      const seats = loadRoster(undefined, () => {}) || {};
+      const seats = configuredSeats(() => {});   // #1764
       return ['board', 'wiki']
         .filter((k) => Object.prototype.hasOwnProperty.call(seats, k))
         .filter((k) => !(seats[k] && seats[k].kind === 'system'))
@@ -7444,6 +7493,8 @@ async function handleHealth(req, res) {
     // #1574 attempt 3 — the read gate, visible: running/lost/waiting from the gate itself. null when the conversations
     // unit is off (there is no gate), never a fabricated zero.
     readGate: READ_GATE ? READ_GATE.stats() : null,
+    // #1762 S2 — refusals the graph could not record (native history on): {count, since}; since is null at 0
+    refusalAuditUnavailable: REFUSAL_AUDIT.stats(),
     // #1563 — the board file's touches since boot, from #1558's always-on counters: what `read-off`/`off` must keep at 0.
     // attemptedOpens = every load, shared load and save of the document, plus every stat of it.
     document: (() => { const c = legacyCounters(); return { mode: BOARD_DOCUMENT, attemptedOpens: (c.loadDomain || 0) + (c.loadDomainShared || 0) + (c.saveDomain || 0) + (c.boardStat || 0), counters: { loadDomain: c.loadDomain || 0, loadDomainShared: c.loadDomainShared || 0, saveDomain: c.saveDomain || 0, boardStat: c.boardStat || 0 } }; })(),
@@ -9519,7 +9570,7 @@ function handleGetBoard(req, res) {
 // matters when someone is trying to work out why their colours didn't take.
 function handleGetRoster(req, res) {
   const seats = currentRoster();
-  sendJSON(res, 200, { seats, roles: loadRosterRoles(), usingDefaults: usingDefaultRoster() });   // #1368 — roles.po: the PO seat, read not hardcoded
+  sendJSON(res, 200, { seats, roles: configuredRoles(), usingDefaults: rosterHeld() && rosterInGraph(COLLECTIONS.snapshot().rosterSeats ?? []) ? false : usingDefaultRoster() });   // #1764   // #1368 — roles.po: the PO seat, read not hardcoded
 }
 
 // ── POST /api/roster (#506) — a human edits their own room, no agent required.
@@ -9536,15 +9587,56 @@ async function handleSetRoster(req, res) {
   try {
     const body = JSON.parse(await readBody(req));
     let clean;
-    try {
-      clean = writeRoster(body);
-    } catch (ve) {
-      return sendJSON(res, 400, { error: ve.message });
+    let savedRoles = null;
+    if (rosterHeld()) {
+      // #1764 — the graph is the roster. Under the write lock: the export as a SUPERSET of the old and new seats, the graph
+      // commit, then (below, once the commit is in) the export as exactly the new seats. At every instant the file's seats
+      // ⊇ the graph's, so the history gate can over-guard after a crash but never miss a seat (#600's forbidden direction).
+      let rolesGiven;
+      try {
+        clean = validateRoster(body);
+        rolesGiven = body && typeof body === 'object' && Object.prototype.hasOwnProperty.call(body, 'roles');
+        if (rolesGiven) savedRoles = validateRoles(body.roles, clean);
+      } catch (ve) {
+        return sendJSON(res, 400, { error: ve.message });
+      }
+      await withWriteLock(async () => {
+        const data = readBoard();
+        const prevEnts = data.rosterSeats ?? [];
+        const prev = rosterInGraph(prevEnts) ? seatsFrom(prevEnts) : {};
+        if (!rolesGiven) { const r = rolesFrom(prevEnts); savedRoles = r.po && clean[r.po] ? r : {}; }   // a save that names no roles keeps them
+        writeRosterExport(supersetSeats(prev, clean), savedRoles);   // throws: nothing is committed
+        data.rosterSeats = rosterEntities(clean, savedRoles);
+        writeBoard(data, [{ op: 'update', actor: body.by || null, entity: { kind: 'board-meta', id: 'roster' }, state: { seats: Object.keys(clean), roles: savedRoles } }]);
+      });
+      try {
+        // TEST-ONLY seam (#1764 builder row): fail ONLY the narrowing write, after the graph commit. Unset, a no-op.
+        if (process.env.SCRUM_TEST_FAIL_ROSTER_EXPORT_NARROW === '1') throw new Error('injected: the narrowing export write failed');
+        // TEST-ONLY seam: hold a save that names this seat key between its commit and its narrowing, so a LATER save commits
+        // in between (the interleaving the narrowing must survive). Unset, a no-op.
+        if (process.env.SCRUM_TEST_DELAY_ROSTER_NARROW_FOR && clean[process.env.SCRUM_TEST_DELAY_ROSTER_NARROW_FOR]) await new Promise((r) => setTimeout(r, 1500));
+        // UNDER THE LOCK, and from the graph's CURRENT roster, never this save's own `clean`: a concurrent save may have
+        // committed after ours, and narrowing the file to ours would then leave its seats unguarded (the PR #140 review's
+        // concurrent-save case). Whatever order saves finish in, the last narrowing writes exactly what the graph holds.
+        await withWriteLock(async () => {
+          const ents = COLLECTIONS.snapshot().rosterSeats ?? [];
+          writeRosterExport(seatsFrom(ents), rolesFrom(ents));
+        });
+      } catch (e) {
+        console.error(`#1764 roster saved to the graph, but its export could not be narrowed to the new seats (it still lists a superset, which the history gate over-guards): ${e.message}`);
+        return sendJSON(res, 500, { error: `the roster was saved, but roster.json (the history gate's copy) could not be updated: ${e.message}` });
+      }
+    } else {
+      try {
+        clean = writeRoster(body);
+      } catch (ve) {
+        return sendJSON(res, 400, { error: ve.message });
+      }
     }
     // #1380 — a client that sends the merged read back gets told which seats
     // were agent records and were not written, rather than finding out later.
     const dropped = droppedAgentSeats(body);
-    sendJSON(res, 200, { seats: clean, roles: loadRosterRoles(), file: rosterFilePath(), appliesOnRestart: true, ...(dropped.length ? { dropped } : {}) });
+    sendJSON(res, 200, { seats: clean, roles: savedRoles ?? loadRosterRoles(), file: rosterFilePath(), appliesOnRestart: !rosterHeld(), ...(dropped.length ? { dropped } : {}) });
   } catch (e) {
     console.error('POST /api/roster:', e.message);
     sendJSON(res, 500, { error: 'Failed to save roster' });
@@ -14381,6 +14473,32 @@ try {
   console.error(`#1786 carrying the legacy send window FAILED — refusing to serve (the window could be sent twice): ${e.message}`);
   process.exit(1);
 }
+
+// #1764 — the roster, at boot, under the write lock and before listen(): the ONE-TIME import of roster.json when the graph
+// holds no configured roster (a roster saved from Settings is never overwritten by a file), then, ALWAYS, the export
+// rewritten from the graph. That rewrite is the recovery: a crash mid-save leaves the export a SUPERSET (safe for the
+// history gate), and this narrows it. A failure refuses to serve: a stale or missing export could stop guarding a seat.
+if (rosterHeld()) {
+  try {
+    await withWriteLock(async () => {
+      const data = readBoard();
+      if (!rosterInGraph(data.rosterSeats ?? []) && fs.existsSync(rosterFilePath())) {
+        const parsed = JSON.parse(fs.readFileSync(rosterFilePath(), 'utf8'));
+        const seats = validateRoster(parsed);
+        const roles = validateRoles(parsed.roles ?? null, seats);
+        data.rosterSeats = rosterEntities(seats, roles);
+        writeBoard(data, [{ op: 'create', actor: 'board', entity: { kind: 'board-meta', id: 'roster' }, state: { seats: Object.keys(seats), roles, importedFrom: path.basename(rosterFilePath()) } }]);
+        console.error(`${new Date().toISOString()} #1764 roster imported into the graph from ${path.basename(rosterFilePath())}: ${Object.keys(seats).length} seat(s), in order`);
+      }
+    });
+    const ents = COLLECTIONS.snapshot().rosterSeats ?? [];
+    if (rosterInGraph(ents)) writeRosterExport(seatsFrom(ents), rolesFrom(ents));
+  } catch (e) {
+    console.error(`#1764 roster import/export FAILED — refusing to serve (the history gate's roster.json must not fall behind the graph): ${e.message}`);
+    process.exit(1);
+  }
+}
+
 // #1785 — ONE-TIME import of the file's switch and threshold onto TendingState, stamped (scrum:configImportedAt) so it never
 // runs twice and a later file edit can never override the graph. A malformed file imports OFF (readTendingConfig fails closed).
 // UNDER THE WRITE LOCK and awaited before listen(): with the collections unit on, a collection write outside the lock THROWS

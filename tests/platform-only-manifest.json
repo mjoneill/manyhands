@@ -28,5 +28,10 @@
     "file": "tests/tmpstore-leak-1672.test.mjs",
     "name": "RL the runner cannot inspect processes: the run fails, the suite folder is retained and named, and the output says why",
     "reason": "UNAVAILABLE: inspection failure can only be injected through `ps` on macOS; on Linux the runner reads /proc"
+  },
+  {
+    "file": "tests/roster-graph-1764.test.mjs",
+    "name": "#1764 B3 — the real severance gate still REFUSES the old name after a refused same-key rename and a refused person→system change",
+    "reason": "UNAVAILABLE: SEVERANCE_CHECK is not set to a severance-check script (the gate is private; a skip is not a pass)"
   }
 ]

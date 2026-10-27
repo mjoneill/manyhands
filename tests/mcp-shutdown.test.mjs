@@ -311,11 +311,13 @@ test('#787 ⭐ a POST that FITS the grace still gets its ACK — the write is no
   // The benefit itself. A post lands upstream, SIGTERM arrives while the ACK is
   // still in flight, and the caller must still learn that it happened.
   const rest = await slowRest(400);
-  const mcp = await startMcpServer({
+  // cleanup FIRST: a start that fails (the harness's readiness wait) must not leak the stub and hold the runner open
+  let mcp = null;
+  t.after(async () => { await mcp?.stop(); await rest.close(); });
+  mcp = await startMcpServer({
     restApiBase: rest.baseUrl,
     env: { MCP_SHUTDOWN_GRACE_MS: '2500', MCP_SHUTDOWN_FLOOR_MS: '9000' },
   });
-  t.after(async () => { await mcp.stop(); await rest.close(); });
 
   const s = await mcpSession(mcp.mcpUrl);
   const inFlight = settled(s.callTool('conversation_post', { body: 'fits the grace', author: 'wren' }), 6000);
@@ -345,11 +347,13 @@ test('#787 ⭐ a POST that OUTLIVES the grace is truncated, and the floor is not
   // every hung upstream would tax every restart by the full floor.
   const GRACE = 800, FLOOR = 4000;
   const rest = await slowRest(15000);      // will not finish, by construction
-  const mcp = await startMcpServer({
+  // cleanup FIRST: a start that fails (the harness's readiness wait) must not leak the stub and hold the runner open
+  let mcp = null;
+  t.after(async () => { await mcp?.stop(); await rest.close(); });
+  mcp = await startMcpServer({
     restApiBase: rest.baseUrl,
     env: { MCP_SHUTDOWN_GRACE_MS: String(GRACE), MCP_SHUTDOWN_FLOOR_MS: String(FLOOR) },
   });
-  t.after(async () => { await mcp.stop(); await rest.close(); });
 
   const s = await mcpSession(mcp.mcpUrl);
   const inFlight = settled(s.callTool('conversation_post', { body: 'outlives the grace', author: 'wren' }), 20000);
@@ -377,4 +381,26 @@ test('#787 ⭐ a POST that OUTLIVES the grace is truncated, and the floor is not
   assert.equal(rest.posts().length, 1,
     'the side effect is upstream even though the ACK was destroyed — this is the '
     + 'at-least-once boundary, and the grace bounds how often it is reached');
+});
+
+test('#787 CONTROL a start that FAILS its readiness wait still releases the stub REST (cleanup registered before the start)', async (t) => {
+  // #1764 (#140): two sequential 5 s pre-listen reads outlasted the harness's readiness wait, the start threw, and the
+  // stub's cleanup (registered after the start) never ran: the runner hung for minutes and the run leaked tmp entries.
+  // Here the start is MADE to fail: both pre-listen reads get 20 s deadlines against a REST that never answers in time.
+  const rest = await slowRest(60000);
+  let mcp = null; let closed = false;
+  const cleanup = async () => { if (closed) return; closed = true; await mcp?.stop(); await rest.close(); };
+  t.after(cleanup);
+  let startError = null;
+  try {
+    mcp = await startMcpServer({ restApiBase: rest.baseUrl, env: { MCP_ROSTER_TIMEOUT_MS: '20000', MCP_CHANNEL_CONFIG_TIMEOUT_MS: '20000' } });
+  } catch (e) { startError = e; }
+  assert.ok(startError, 'PRECONDITION: the start failed its readiness wait');
+  await cleanup();
+  const probe = await new Promise((resolve) => {
+    const req = http.get(rest.baseUrl + '/api/health', () => resolve('answered'));
+    req.on('error', (e) => resolve(e.code || 'error'));
+    req.setTimeout(2000, () => { req.destroy(); resolve('timeout'); });
+  });
+  assert.equal(probe, 'ECONNREFUSED', `the stub REST is released after a failed start (probe: ${probe})`);
 });
