@@ -15,7 +15,7 @@
  * (scrum:logRecordedAt) for a legacy row and the write's own time for a native one, both in the log's ISO form.
  */
 import { NS, BK } from './graph-vocab.mjs';
-import { isoAt } from './logborn-feed.mjs';
+import { isoAtFull, instantKey } from './instant.mjs';
 
 // The namespaces as graph-replica.mjs IRI spells them. Not imported from there: graph-replica pulls in `oxigraph`, and
 // server.js must boot with no npm dependency in its static import graph (#868).
@@ -32,11 +32,22 @@ const P = {
 const KEEP = Object.values(P).map((p) => `<${p}>`).join(', ');
 
 /** S1's native ops → the log's vocabulary (contract v2 §2): the public `op` is mapped, `graph.nativeOp` keeps the raw one. */
+export { instantKey };
+
 export const NATIVE_TO_LOG_OP = Object.freeze({
   create: 'create', update: 'update', move: 'update', claim: 'update', release: 'update', reproject: 'update', delete: 'delete',
 });
 
-const dt = (iso) => `${JSON.stringify(new Date(Date.parse(iso)).toISOString())}^^<${XSD}dateTime>`;
+// a cutoff literal at FULL precision (isoAtFull keeps every digit the caller gave); the store compares instants exactly
+const dt = (iso) => `${JSON.stringify(isoAtFull(iso))}^^<${XSD}dateTime>`;
+/** every query also reads the store's commit high-water, so the handler can prove all of a page came from one snapshot */
+const MARKER_HW = `UNION { GRAPH ${BK} { <${NS}dataset> <${NS}commitSeq> ?hw } }`;
+/** the commit high-water a query's bindings carry (exactly one value), or a thrown unavailable */
+export function markerOf(bindings) {
+  const v = [...new Set(bindings.filter((b) => b.hw).map((b) => b.hw.value))];
+  if (v.length !== 1 || !/^\d+$/.test(v[0])) throw Object.assign(new Error(`the store's commit marker is not one value (${v.join(', ') || 'none'})`), { code: 'GRAPH_EXECUTOR_UNAVAILABLE' });
+  return Number(v[0]);
+}
 
 /**
  * The legacy seq-nodes a request can see: N ≤ F.logSeq, not a conversation, and inside the window — by INSTANT
@@ -46,24 +57,59 @@ export function legacyQuery({ logSeqMax, sinceIso = null, afterSeq = null }) {
   const seqExpr = `xsd:integer(STRAFTER(STR(?a), ${JSON.stringify(`${ACT}seq-`)}))`;
   const window = sinceIso != null ? `FILTER(?lat >= ${dt(sinceIso)})` : `FILTER(${seqExpr} > ${Number(afterSeq)})`;
   return `PREFIX xsd: <${XSD}>
-SELECT ?a ?p ?o WHERE {
-  ?a <${P.logRecordedAt}> ?lat .
+SELECT ?a ?p ?o ?hw WHERE {
+  { ?a <${P.logRecordedAt}> ?lat .
   FILTER(STRSTARTS(STR(?a), ${JSON.stringify(`${ACT}seq-`)}))
   FILTER(${seqExpr} <= ${Number(logSeqMax)})
   ${window}
   FILTER NOT EXISTS { ?a <${P.entityKind}> "conversation" }
-  ?a ?p ?o . FILTER(?p IN (${KEEP}))
+  ?a ?p ?o . FILTER(?p IN (${KEEP})) }
+  ${MARKER_HW}
 }`;
 }
 
 /** The native ChangeActivities committed after F and at or before `through` (the receipt feed's high-water: one cut). */
 export function nativeQuery({ afterCommitSeq, through }) {
-  return `SELECT ?a ?p ?o ?opId ?seq WHERE {
-  ?a a <${RS}ChangeActivity> ; <${P.recordedBy}> ?opId .
+  return `SELECT ?a ?p ?o ?opId ?seq ?hw WHERE {
+  { ?a a <${RS}ChangeActivity> ; <${P.recordedBy}> ?opId .
   GRAPH ${BK} { ?opId <${NS}outcome> <${NS}APPLIED> ; <${NS}commitSeq> ?seq }
   FILTER(?seq > ${Number(afterCommitSeq)} && ?seq <= ${Number(through)})
-  ?a ?p ?o . FILTER(?p IN (${KEEP}))
+  ?a ?p ?o . FILTER(?p IN (${KEEP})) }
+  ${MARKER_HW}
 }`;
+}
+
+/**
+ * S2's content-free refusal records committed after F (contract v2 §2: served from the RECORD, never as a ChangeActivity).
+ * Their recordedBy edge and receipt are bookkeeping; the record's own terms are in the default graph.
+ */
+const RF = { type: `${RS}RefusalRecord`, route: `${RS}route`, action: `${RS}refusedAction`, status: `${RS}status`, code: `${RS}code`, rule: `${RS}rule`,
+  entityKind: `${RS}entityKind`, entityId: `${RS}entityId`, actor: `${PROV}wasAssociatedWith`, at: `${PROV}startedAtTime` };
+export function refusalQuery({ afterCommitSeq, through }) {
+  return `SELECT ?a ?p ?o ?opId ?seq ?hw WHERE {
+  { ?a a <${RF.type}> .
+  GRAPH ${BK} { ?a <${NS}recordedBy> ?opId . ?opId <${NS}outcome> <${NS}APPLIED> ; <${NS}commitSeq> ?seq }
+  FILTER(?seq > ${Number(afterCommitSeq)} && ?seq <= ${Number(through)})
+  ?a ?p ?o . FILTER(?p IN (${Object.values(RF).map((x) => `<${x}>`).join(', ')})) }
+  ${MARKER_HW}
+}`;
+}
+const tokOf = (t) => (t == null ? null : t.type === 'uri' && t.value === `${RS}unlisted` ? 'unlisted' : t.value);
+/** refusal-record bindings → refused rows, in commit order; the refusal's own fields, none invented */
+export function refusalRowsFromBindings(bindings) {
+  const rows = [];
+  for (const n of group(bindings.filter((b) => b.a), (node, b) => { node.opId = b.opId.value; node.commitSeq = Number(b.seq.value); })) {
+    const status = first(n, RF.status);
+    rows.push({
+      kind: first(n, RF.entityKind)?.value ?? null, op: 'refused', seq: null, id: first(n, RF.entityId)?.value ?? null, shortId: null, title: null,
+      column: null, by: seatOf(first(n, RF.actor)), at: isoAtFull(first(n, RF.at)?.value),
+      graph: { opId: n.opId, commitSeq: n.commitSeq, version: null, part: 0, nativeOp: 'refused' },
+      reason: tokOf(first(n, RF.code)), status: status && /^\d+$/.test(status.value) ? Number(status.value) : null,
+      route: tokOf(first(n, RF.route)), request: null, response: null, rule: tokOf(first(n, RF.rule)),
+      unknown: ['shortId', 'request', 'response'],   // a refusal record holds no content (S2): these were never kept
+    });
+  }
+  return rows.sort((a, b) => a.graph.commitSeq - b.graph.commitSeq);
 }
 
 function group(bindings, extra = () => {}) {
@@ -100,11 +146,11 @@ const withUnknown = (row, unknown) => (unknown.length ? { ...row, unknown } : ro
 /** LEGACY bindings → synthetic, seq-ascending events whose `historyRow` is the finished public row. */
 export function legacyEventsFromBindings(bindings) {
   const out = [];
-  for (const n of group(bindings)) {
+  for (const n of group(bindings.filter((b) => b.a))) {
     const seq = Number(n.iri.slice(`${ACT}seq-`.length));
     const kind = first(n, P.entityKind)?.value ?? null;
     const op = first(n, P.op)?.value ?? null;
-    const at = isoAt(first(n, P.logRecordedAt).value);
+    const at = isoAtFull(first(n, P.logRecordedAt).value);
     const unknown = [];
     const base = { kind, op, seq, id: idOf(first(n, P.used)), shortId: null, title: null, column: null, by: seatOf(first(n, P.actor)), at, graph: null };
     let row;
@@ -127,14 +173,14 @@ export function legacyEventsFromBindings(bindings) {
 /** NATIVE bindings → graph rows, in (commitSeq, part) order. */
 export function nativeRowsFromBindings(bindings) {
   const rows = [];
-  for (const n of group(bindings, (node, b) => { node.opId = b.opId.value; node.commitSeq = Number(b.seq.value); })) {
+  for (const n of group(bindings.filter((b) => b.a), (node, b) => { node.opId = b.opId.value; node.commitSeq = Number(b.seq.value); })) {
     const nativeOp = first(n, P.op)?.value ?? null;
     const kind = first(n, P.entityKind)?.value ?? null;
     const unknown = [];
     const v = first(n, P.versionAfter);
     const graph = { opId: n.opId, commitSeq: n.commitSeq, version: v && /^\d+$/.test(v.value) ? Number(v.value) : null, part: Number(first(n, P.part)?.value ?? 0), nativeOp };
     if (graph.version == null) unknown.push('version');
-    const base = { kind, op: NATIVE_TO_LOG_OP[nativeOp] ?? nativeOp, seq: null, id: idOf(first(n, P.used)), shortId: null, title: null, column: null, by: seatOf(first(n, P.actor)), at: isoAt(first(n, P.startedAt)?.value), graph };
+    const base = { kind, op: NATIVE_TO_LOG_OP[nativeOp] ?? nativeOp, seq: null, id: idOf(first(n, P.used)), shortId: null, title: null, column: null, by: seatOf(first(n, P.actor)), at: isoAtFull(first(n, P.startedAt)?.value), graph };
     let row;
     if (kind === 'card') {
       base.shortId = shortIdOf(n, unknown);

@@ -16,6 +16,8 @@
  *       whole design exists to kill
  */
 
+import { compareInstants } from './instant.mjs';   // #1762 S3
+
 const DEFAULT_QUOTA = Object.freeze({ cards: 50, posts: 50 });
 const QUOTA_CEILING = 500;
 
@@ -245,7 +247,7 @@ export function mergeSources(logItems, graphItems) {
   while (i < logItems.length || j < graphItems.length) {
     if (j >= graphItems.length) out.push(logItems[i++]);
     else if (i >= logItems.length) out.push(graphItems[j++]);
-    else if (itemAt(graphItems[j]) < itemAt(logItems[i])) out.push(graphItems[j++]);
+    else if (compareInstants(itemAt(graphItems[j]), itemAt(logItems[i])) < 0) out.push(graphItems[j++]);   // #1762 S3 — by instant, at full precision
     else out.push(logItems[i++]);   // tie → the log row first
   }
   return out;
@@ -263,6 +265,7 @@ export function queryChangesFromLog(events, {
   since, oldestRetained, limit, history = false, entity, actor, before,
   graphRows = null, logThrough = null, graphThrough = null, oldestRetainedSeq = null,
   graphEpoch = null, graphEpochBase = null, graphIncarnation = null, graphIncarnationFrom = null,
+  windowFiltered = false,   // #1762 S3 — the caller already applied the ISO window at full precision: do not re-filter by text
   redactedPostIds = null,   // #1574 C4 — posts the graph holds as tombstones: a LOG row naming one is served without its text
 } = {}) {
   if (since == null || since === '') {
@@ -323,7 +326,7 @@ export function queryChangesFromLog(events, {
 
   let logEvs = from.cursor
     ? events.filter((ev) => ev.seq > from.log)
-    : events.filter((ev) => typeof ev.recorded_at === 'string' && ev.recorded_at >= since);
+    : windowFiltered ? events : events.filter((ev) => typeof ev.recorded_at === 'string' && ev.recorded_at >= since);
   // #1561 ROLLBACK — a forward cursor minted while the unit was ON says the caller has
   // seen every executor receipt up to `from.graph`. With the graph source gone (flag
   // OFF), those writes now live in the log as reverse-exported events carrying their
@@ -346,7 +349,7 @@ export function queryChangesFromLog(events, {
   // #1574 — does the graph source carry posts at all (the conversations unit)? Decided on the WHOLE source, never on one
   // page's leftovers, so a backward walk keeps one meaning for its token from the first page to the last.
   const graphHasPosts = (graphRows || []).some((r) => r.kind === 'conversation');
-  let gRows = (graphRows || []).filter((r) => (from.cursor ? r.graph.commitSeq > from.graph : r.at >= since));
+  let gRows = (graphRows || []).filter((r) => (from.cursor ? r.graph.commitSeq > from.graph : windowFiltered || r.at >= since));
   if (entity != null) { logEvs = logEvs.filter((ev) => ev.entity?.shortId === Number(entity)); gRows = gRows.filter((r) => r.shortId === Number(entity)); }
   if (actor != null) { logEvs = logEvs.filter((ev) => ev.actor === actor); gRows = gRows.filter((r) => r.by === actor); }
   // #1762 S3 — a commit can hold several parts (one row each): they stay in part order, so a page never reorders a commit
@@ -403,6 +406,7 @@ export function queryChangesFromLog(events, {
       // write) nor be hidden by it (the refusal is the row the seat is looking
       // for). It rides along as its own row, outside the last-write-wins map.
       if (it.src === 'log' && it.ev.op === 'refused') { kept.add(it); continue; }
+      if (it.src === 'graph' && it.row.op === 'refused') { kept.add(it); continue; }   // #1762 S3 — an S2 refusal record, the same rule
       const key = it.src === 'log' ? `${it.ev.entity?.kind}|${it.ev.entity?.id}` : `${it.row.kind}|${it.row.id}`;
       latest.set(key, it); // rows are in presentation order: last write wins
     }

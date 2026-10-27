@@ -30,7 +30,10 @@ export const FRONTIER_QUERY = `SELECT ?src ?p ?o WHERE {
 }`;
 
 const hex = (s) => String(s).replace(/-/g, '').toLowerCase();
-const isInt = (b) => b && b.type !== 'uri' && b.datatype === `${XSD}integer` && /^-?\d+$/.test(b.value);
+// an integer that is SAFE: 9007199254740993 parses to ...992 in JavaScript, and a rounded position is a wrong one
+const safeInt = (text) => /^-?\d+$/.test(text) && Number.isSafeInteger(Number(text)) && String(Number(text)) === String(BigInt(text));
+const isInt = (b) => b && b.type !== 'uri' && b.datatype === `${XSD}integer` && safeInt(b.value);
+const unavailable = (why) => Object.assign(new Error(`the store's dataset marker is not readable: ${why}`), { code: 'GRAPH_EXECUTOR_UNAVAILABLE' });
 
 /** Classify the bindings of FRONTIER_QUERY. Pure: the caller runs the query. */
 export function classifyFrontier(bindings) {
@@ -41,8 +44,13 @@ export function classifyFrontier(bindings) {
     if (src === 'bk') { (f[p] ||= []).push(b.o); continue; }
     elsewhere++;   // F in the default graph or another named graph
   }
+  // the marker is read in every outcome, "absent" included: a store whose identity cannot be read cannot confirm anything
+  const mOne = (p) => { const v = marker[p] || []; if (v.length !== 1) throw unavailable(`${p} has ${v.length} values`); return v[0].value; };
+  const mk = { epoch: mOne('urn:ex:epoch'), incarnation: mOne('urn:ex:incarnation'), commitSeq: mOne('urn:ex:commitSeq') };
+  if (!safeInt(mk.epoch) || !safeInt(mk.commitSeq)) throw unavailable(`epoch ${mk.epoch} / commitSeq ${mk.commitSeq} are not safe integers`);
+  mk.commitSeq = Number(mk.commitSeq);
   const fTriples = Object.values(f).reduce((n, v) => n + v.length, 0);
-  if (!fTriples && !elsewhere) return { state: 'absent' };
+  if (!fTriples && !elsewhere) return { state: 'absent', marker: mk };
   if (elsewhere) return { state: 'invalid', reason: 'the frontier also appears outside the bookkeeping graph (two frontiers)' };
   const one = (k) => {
     const v = f[FRONTIER_PREDICATES[k]] || [];
@@ -59,10 +67,8 @@ export function classifyFrontier(bindings) {
     if (incarnation.type === 'uri' || !/^[0-9a-f]{32}$/.test(incarnation.value)) throw new Error('frontierIncarnation must be 32 lowercase hex');
     fr = { logSeq: Number(logSeq.value), commitSeq: Number(commitSeq.value), recordedAt: recordedAt.value, epoch: Number(epoch.value), incarnation: incarnation.value };
   } catch (e) { return { state: 'invalid', reason: e.message }; }
-  const m = (p) => marker[p]?.[0]?.value ?? null;
-  const mk = { epoch: m('urn:ex:epoch'), incarnation: m('urn:ex:incarnation'), commitSeq: m('urn:ex:commitSeq') };
-  if (mk.epoch == null || String(fr.epoch) !== String(Number(mk.epoch))) return { state: 'mismatch', reason: `the frontier's epoch ${fr.epoch} is not the store's (${mk.epoch})` };
-  if (mk.incarnation == null || fr.incarnation !== hex(mk.incarnation)) return { state: 'mismatch', reason: 'the frontier names another store incarnation' };
-  if (mk.commitSeq != null && fr.commitSeq > Number(mk.commitSeq)) return { state: 'invalid', reason: `frontierCommitSeq ${fr.commitSeq} is beyond the store's commitSeq ${mk.commitSeq}` };
+  if (String(fr.epoch) !== String(Number(mk.epoch))) return { state: 'mismatch', reason: `the frontier's epoch ${fr.epoch} is not the store's (${mk.epoch})` };
+  if (fr.incarnation !== hex(mk.incarnation)) return { state: 'mismatch', reason: 'the frontier names another store incarnation' };
+  if (fr.commitSeq > mk.commitSeq) return { state: 'invalid', reason: `frontierCommitSeq ${fr.commitSeq} is beyond the store's commitSeq ${mk.commitSeq}` };
   return { state: 'valid', frontier: fr, marker: mk };
 }

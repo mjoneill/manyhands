@@ -113,7 +113,7 @@ import { similarCards } from './core/similar-cards.mjs';
 import { queryChangesFromLog, parseSince, EPOCH_CHANGED } from './core/changes-log-query.mjs';
 import { feedQuery, feedRowsFromBindings, postFeedQuery, postFeedRows, REDACTED_IDS_QUERY, redactedIdsFrom } from './core/logborn-feed.mjs';   // #1561 — the unit's writes in the change feed
 import { FRONTIER_QUERY, classifyFrontier } from './core/history-frontier.mjs';   // #1762 S3 — card history from the graph past F
-import { legacyQuery, legacyEventsFromBindings, nativeQuery, nativeRowsFromBindings } from './core/history-graph-read.mjs';
+import { legacyQuery, legacyEventsFromBindings, nativeQuery, nativeRowsFromBindings, refusalQuery, refusalRowsFromBindings, markerOf, instantKey } from './core/history-graph-read.mjs';
 import { readEvents, nextSeq, oldestRetainedAt, seqAsOf, seqOfEntityEvent, activityReadWindow, advanceActivityCursor } from './core/event-log.mjs';
 import { writeSnapshot, readSnapshot, sweepSnapshotTemps, snapshotPaths } from './core/graph-snapshot.mjs';   // #884 · #1386 reads the sidecar
 import { staleClaims, STALE_CLAIM_HOURS } from './core/stale-claims.mjs';   // #455
@@ -9194,7 +9194,7 @@ async function handleChanges(req, res) {
       try { fr = classifyFrontier(await histQuery(FRONTIER_QUERY)); } catch (e) { if (graphRefused(res, e)) return; throw e; }
       if (fr.state === 'invalid') return sendJSON(res, 503, { error: `the history frontier is invalid: ${fr.reason}`, code: 'HISTORY_FRONTIER_INVALID' });
       if (fr.state === 'mismatch') return sendJSON(res, 503, { error: `the history frontier belongs to another store: ${fr.reason}`, code: 'HISTORY_FRONTIER_STORE_MISMATCH' });
-      if (fr.state === 'valid') return await handleChangesFromGraph(res, { q, from, F: fr.frontier, histQuery, convQuery, unsupported });
+      if (fr.state === 'valid') return await handleChangesFromGraph(res, { q, from, F: fr.frontier, marker: fr.marker, histQuery, convQuery, unsupported });
     }
     const events = from.cursor
       ? readEvents(EVENT_LOG_DIR, { sinceSeq: from.log })
@@ -9294,50 +9294,68 @@ async function handleChanges(req, res) {
  * ChangeActivities past F.commitSeq. Posts and log-born receipts come from the same graph feed as today. NO event-log file
  * is opened on this path (the no-log-access recorder pins it), and the envelope, cursors and paging are today's code.
  */
-async function handleChangesFromGraph(res, { q, from, F, histQuery, convQuery, unsupported }) {
+async function handleChangesFromGraph(res, { q, from, F, marker, histQuery, convQuery, unsupported }) {
   // posts live with the conversations unit; without it a graph-only answer cannot include them, so it is refused, never partial
   if (!convQuery) return sendJSON(res, 503, { error: 'a history frontier is present but the conversations unit is off: posts cannot be served from the graph, and the log is not read past F', code: 'HISTORY_CONFIG_UNSUPPORTED' });
   if (from.cursor && from.log > F.logSeq) {
     return sendJSON(res, 409, { error: `this cursor's log half (${from.log}) is past the history frontier (${F.logSeq}): no board minted it`, code: 'CURSOR_BEYOND_FRONTIER' });
   }
-  let sinceIso = null;
-  if (!from.cursor && q.since != null && q.since !== '') {   // a missing since is today's MISSING_SINCE, raised by the query below
-    const t = Date.parse(q.since);
-    if (!Number.isFinite(t)) return sendJSON(res, 400, { error: `since must be an ISO timestamp or a cursor (got ${JSON.stringify(String(q.since ?? '').slice(0, 80))})` });
-    sinceIso = new Date(t).toISOString();   // windows compare INSTANTS: one canonical form on both sides
-  }
-  let graph, redactedPostIds, legacy, native;
-  try {
-    if (!from.cursor && sinceIso == null) return queryChangesFromLog([], { since: q.since });   // throws MISSING_SINCE (400), as today
-    legacy = legacyEventsFromBindings(await histQuery(legacyQuery({ logSeqMax: F.logSeq, sinceIso, afterSeq: from.cursor ? from.log : null })));
+  if (!from.cursor && (q.since == null || q.since === '')) return queryChangesFromLog([], { since: q.since });   // throws MISSING_SINCE (400), as today
+  // the window compares INSTANTS at full precision (Date.parse would round .0005Z to .000Z and move a row across the cutoff)
+  const sinceKey = from.cursor ? null : instantKey(q.since);
+  if (!from.cursor && sinceKey == null) return sendJSON(res, 400, { error: `since must be an ISO timestamp or a cursor (got ${JSON.stringify(String(q.since).slice(0, 80))})` });
+  const history = q.history === 'true';
+  const inWindow = (at) => from.cursor || (instantKey(at) ?? '') >= sinceKey;
+
+  // ONE PAGE, ONE SNAPSHOT (contract v2 §1). The reads are separate queries, so every one also reads the store's commit
+  // high-water, and F and the marker are re-read at the end. The page is served only if all of them saw the snapshot the
+  // first frontier read saw. Otherwise it is read again ONCE, and refused on a second miss; rows that never coexisted are never served.
+  const readPage = async (expectHw) => {
+    const legacyB = await histQuery(legacyQuery({ logSeqMax: F.logSeq, sinceIso: from.cursor ? null : q.since, afterSeq: from.cursor ? from.log : null }));
     const after = from.cursor ? from.graph : 0;
-    graph = feedRowsFromBindings(await (LOGBORN ? logbornFeedQuery(feedQuery(after)) : convQuery(feedQuery(after))));
+    const graph = feedRowsFromBindings(await (LOGBORN ? logbornFeedQuery(feedQuery(after)) : convQuery(feedQuery(after))));
     graph.rows = [...graph.rows, ...postFeedRows(await convQuery(postFeedQuery(after)), graph.through)];
-    redactedPostIds = redactedIdsFrom(await convQuery(REDACTED_IDS_QUERY));
-    native = nativeRowsFromBindings(await histQuery(nativeQuery({ afterCommitSeq: F.commitSeq, through: graph.through })));
-    // the reads above are separate queries: F must be exactly the one this answer started from, or nothing is served
+    const redactedPostIds = redactedIdsFrom(await convQuery(REDACTED_IDS_QUERY));
+    const nativeB = await histQuery(nativeQuery({ afterCommitSeq: F.commitSeq, through: graph.through }));
+    const refusalB = await histQuery(refusalQuery({ afterCommitSeq: F.commitSeq, through: graph.through }));
     const again = classifyFrontier(await histQuery(FRONTIER_QUERY));
-    if (again.state !== 'valid' || JSON.stringify(again.frontier) !== JSON.stringify(F)) {
-      return sendJSON(res, 503, { error: 'the history frontier changed while this answer was being read; ask again', code: 'HISTORY_FRONTIER_INVALID' });
+    const hws = [markerOf(legacyB), graph.through, markerOf(nativeB), markerOf(refusalB), again.marker?.commitSeq];
+    const same = again.state === 'valid' && JSON.stringify(again.frontier) === JSON.stringify(F) && hws.every((h) => Number(h) === expectHw);
+    return same ? { legacy: legacyEventsFromBindings(legacyB), graph, redactedPostIds, native: nativeRowsFromBindings(nativeB), refusals: refusalRowsFromBindings(refusalB) } : null;
+  };
+  let page;
+  try {
+    page = await readPage(marker.commitSeq);
+    if (!page) {
+      const fr = classifyFrontier(await histQuery(FRONTIER_QUERY));
+      if (fr.state === 'valid' && JSON.stringify(fr.frontier) === JSON.stringify(F)) page = await readPage(fr.marker.commitSeq);
     }
+    if (!page) return sendJSON(res, 503, { error: 'the store moved while this answer was being read, twice; nothing is served from mixed snapshots — ask again', code: 'HISTORY_FRONTIER_INVALID' });
   } catch (e) {
     if (graphRefused(res, e)) return;
     throw e;
   }
+  let { native } = page;
   // a reproject part is DERIVED (a re-written namer): history:true serves it; the default latest view neither shows nor counts it
-  const history = q.history === 'true';
   if (!history) native = native.filter((r) => r.graph.nativeOp !== 'reproject');
+  // ONE ROW PER (opId, part): a log-born write records both a receipt (the feed row) and its native activity; the native part
+  // carries the provenance, so the receipt row for an opId that has native parts is not served again. Different parts stay.
+  const nativeOps = new Set(native.map((r) => r.graph.opId));
+  const feed = page.graph.rows.filter((r) => !(r.graph && nativeOps.has(r.graph.opId)));
+  const graphRows = [...feed, ...native, ...page.refusals].filter((r) => inWindow(r.at));
+  const legacy = page.legacy.filter((ev) => inWindow(ev.recorded_at));
   const result = queryChangesFromLog(legacy, {
-    redactedPostIds,
-    graphRows: [...graph.rows, ...native],
-    graphThrough: graph.through,
-    graphEpoch: graph.epoch,
-    graphEpochBase: graph.epochBase,
-    graphIncarnation: graph.incarnation,
-    graphIncarnationFrom: graph.incarnationFrom,
+    redactedPostIds: page.redactedPostIds,
+    graphRows,
+    graphThrough: page.graph.through,
+    graphEpoch: page.graph.epoch,
+    graphEpochBase: page.graph.epochBase,
+    graphIncarnation: page.graph.incarnation,
+    graphIncarnationFrom: page.graph.incarnationFrom,
     logThrough: F.logSeq,          // the log half stops at F: nothing past it is log history
     oldestRetainedSeq: null,       // the graph keeps every pre-F row; there is no retention floor to refuse at
-    since: from.cursor ? q.since : sinceIso,
+    since: q.since,
+    windowFiltered: !from.cursor,  // the window was applied above, at full precision
     before: q.before,
     oldestRetained: null,
     history,
