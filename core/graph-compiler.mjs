@@ -594,6 +594,45 @@ const RECORD_FIELDS = {
   'origin.prepare': ['origin', 'plan'],     // #1629 s2 — the Prepared record of one origin: its descriptor and its frozen business plan
 };
 
+// #1762 S1b — the record kinds whose write records ONE ChangeActivity (part 0) when the intention carries `history`. The
+// compiler DERIVES op, entityKind and prov:used from the record itself, so a caller cannot misname what it wrote; a caller
+// supplies only `versionAfter`, and only where REST shows a version the record does not carry (a memory revise that adds
+// no version). Imports are migrations, never history; a collection entity.put carries its history per part (S1).
+const maxVersion = (versions) => {
+  const ns = (versions || []).map((x) => x.version).filter((x) => x != null).map(BigInt);
+  return ns.length ? String(ns.reduce((a, b) => (b > a ? b : a))) : 'unknown';
+};
+const RECORD_HISTORY = Object.freeze({
+  'memory.create': (R) => ({ op: 'create', entityKind: 'memory', used: R.memory.iri, versionAfter: maxVersion(R.versions) }),
+  'memory.revise': (R) => ({ op: 'update', entityKind: 'memory', used: R.target.iri, versionAfter: maxVersion(R.versions) }),
+  'decision.create': (R) => ({ op: 'create', entityKind: 'decision', used: R.decision.iri }),
+  'decision.relate': (R) => ({ op: 'update', entityKind: 'decision', used: R.target }),
+  'seat.declare': (R) => ({ op: 'update', entityKind: 'seat-state', used: R.declaration.iri }),
+  'seat.clear': (R) => ({ op: 'delete', entityKind: 'seat-state', used: R.ends }),
+  'post.create': (R) => ({ op: 'post', entityKind: 'conversation', used: R.post.iri }),
+  'post.write': (R) => ({ op: 'post', entityKind: 'conversation', used: R.post.iri }),
+  'post.redact': (R) => ({ op: 'redact', entityKind: 'conversation', used: R.post.iri }),
+  'delivery.create': (R) => ({ op: 'create', entityKind: 'delivery', used: R.delivery.iri }),
+  'delivery.step': (R) => ({ op: 'update', entityKind: 'delivery', used: R.target.iri }),
+  'modelcall.create': (R) => ({ op: 'create', entityKind: 'model-call', used: R.call.iri }),
+  'entity.put': (R) => (R.entity.kind === 'wake' ? { op: 'create', entityKind: 'wake', used: R.entity.iri } : null),
+});
+export const RECORD_HISTORY_KINDS = Object.freeze(Object.keys(RECORD_HISTORY));
+/** `history: true`, or `{ versionAfter }`, in canonical form: the derived facts, or null when the intention carries none. */
+function canonRecordHistory(i, record) {
+  if (i.history === undefined) return null;
+  const h = RECORD_HISTORY[i.kind]?.(record);
+  if (!h) fail(`history is not recorded for ${i.kind}${i.kind === 'entity.put' ? ` (${record.entity?.kind})` : ''}`);
+  let versionAfter = h.versionAfter ?? 'unknown';
+  if (i.history !== true) {
+    obj(i.history, ['versionAfter'], 'history');
+    const given = i.history.versionAfter === 'unknown' ? 'unknown' : intLit(i.history.versionAfter, 'history.versionAfter');
+    if (versionAfter !== 'unknown' && given !== versionAfter) fail(`history.versionAfter ${given} contradicts the record's own version ${versionAfter}`);
+    versionAfter = given;
+  }
+  return { op: h.op, entityKind: h.entityKind, used: checkIri(h.used, 'history.used'), versionAfter };
+}
+
 const SAFE_CH = /^[A-Za-z0-9 _.,:/@#+=*!~%&$-]$/;
 /** A plain string literal in the record kinds' canonical form (see the header). */
 export function recLit(s) {
@@ -660,7 +699,7 @@ function canonStep(s, what) {
 }
 
 function canonicalizeRecord(i) {
-  const allowed = ['kind', 'opId', 'actor', 'evidence', 'people', ...RECORD_FIELDS[i.kind]];
+  const allowed = ['kind', 'opId', 'actor', 'evidence', 'people', ...RECORD_FIELDS[i.kind], ...(RECORD_HISTORY[i.kind] ? ['history'] : [])];   // #1762 S1b
   for (const k of Object.keys(i)) if (!allowed.includes(k)) fail(`unknown field ${k} for kind ${i.kind}`);
   const opId = checkIri(i.opId, 'opId');
   if (!opId.startsWith(`${NS}op/`)) fail(`opId must be under ${NS}op/`);
@@ -795,6 +834,7 @@ function canonicalizeRecord(i) {
     if (i.entity && i.entity.kind === 'collection') {
       // #1624 — the MUTABLE families (review 08:37Z): one or more collection entities in ONE guarded update, through the
       // same allowlisted entity.put (no second generic write API). See canonCollectionWrite.
+      if (i.history !== undefined) fail('a collection entity.put carries its history on each part, not on the intention');   // #1762 S1b
       record = { entity: canonCollectionWrite(i.entity) };
       if (people.length) record.people = people;
       return { kind: i.kind, opId, actor, evidence, record, targets: [], newAssertion: null, authority: null, grant: null, rule: null };
@@ -845,6 +885,10 @@ function canonicalizeRecord(i) {
   // them: a replay under the same opId with different Person effects is an
   // intent-collision. Absent when empty, so a Person-less intention's digest is unchanged.
   if (people.length) record.people = people;
+  // #1762 S1b — the activity facts ride the record, so the digest binds them; absent when the intention carries none, so a
+  // history-less intention's digest is unchanged.
+  const history = canonRecordHistory(i, record);
+  if (history) record.history = history;
   return { kind: i.kind, opId, actor, evidence, record, targets: [], newAssertion: null, authority: null, grant: null, rule: null };
 }
 
@@ -1217,6 +1261,12 @@ function compileRecord(c) {
   });
   // #1638 — route each planned triple by the one definition of bookkeeping (ver, recordedBy, entityJson… go to the bk graph)
   for (const [s, p, o] of plan.ins) (isBookkeeping(s, p) ? bIns : dIns).push(`  ${v(ref(s))} ${ref(p)} ${v(o)} .`);
+  // #1762 S1b — the record's ONE activity (part 0), in the same ok-guarded data INSERT as the record: APPLIED commits both,
+  // a refused or replayed write inserts neither. No card-only facts: entityKind is set.
+  if (c.record.history) {
+    const { used, ...H } = c.record.history;
+    historyActivityQuads(c, { iri: used, history: H }, 0).forEach((t) => dIns.push(`  ${v(t[0])} ${v(t[1])} ${t[2] === '?n_at' ? '?n_at' : v(t[2])} .`));
+  }
 
   pre.push(`    BIND(true AS ?ok)`);
   where.push(`  OPTIONAL {`, ...pre, `  }`);
@@ -1665,13 +1715,16 @@ function doneMoveClauses(R) {
 const SCRUM_NS = 'https://scrumboard.local/ns#', PROV_NS = 'http://www.w3.org/ns/prov#', ACTIVITY_NS = 'https://scrumboard.local/activity/';
 const PERSON_NS = 'https://scrumboard.local/person/';
 export const changeActivityIri = (opId, k) => `${ACTIVITY_NS}op-${createHash('sha256').update(opId).digest('hex').slice(0, 32)}-${k}`;
+// #1762 S1b — the activity names a PERSON: the log-born kinds' actor is the slice's authenticated seat IRI (urn:ex:seat/<key>),
+// the same seat as person/<key>; every other actor already is a person IRI.
+const activityAgent = (actor) => (actor.startsWith('urn:ex:seat/') ? `${PERSON_NS}${actor.slice('urn:ex:seat/'.length)}` : actor);
 function historyActivityQuads(c, P, k) {
   const H = P.history, A = ref(changeActivityIri(c.opId, k)), S = (n) => ref(SCRUM_NS + n), PR = (n) => ref(PROV_NS + n);
   const term = (x) => (x === 'unknown' ? S('unknown') : x === null ? S('none') : null);
   const out = [
     [A, ref(CW.rdfType), PR('Activity')], [A, ref(CW.rdfType), S('ChangeActivity')],
     [A, S('op'), recLit(H.op)], [A, S('entityKind'), recLit(H.entityKind ?? 'card')], [A, PR('used'), ref(P.iri)],
-    [A, PR('wasAssociatedWith'), ref(c.actor)], [A, PR('startedAtTime'), '?n_at'],
+    [A, PR('wasAssociatedWith'), ref(activityAgent(c.actor))], [A, PR('startedAtTime'), '?n_at'],
     [A, S('part'), String(k)], [A, S('recordedBy'), ref(c.opId)],
     [A, S('versionAfter'), H.versionAfter === 'unknown' ? S('unknown') : H.versionAfter],
   ];

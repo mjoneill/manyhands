@@ -42,6 +42,7 @@ import { validateCompare, evaluateCompareAsync } from './core/check-compare.mjs'
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { countLegacy, setLegacyContext, installStructuredCloneCounter, legacyCounters } from './core/legacy-counters.mjs';
 import { createGraphSlice } from './core/graph-slice-routes.mjs';
+import { historyNativeOn } from './core/durable-update.mjs';   // #1762 S1b
 // #1561 — the log-born unit (memory, decision, seat-state) on the graph executor, behind
 // SCRUM_GRAPH_UNIT_LOGBORN=1. The folds live there now; with the flag OFF they are the only part used.
 import {
@@ -3267,7 +3268,10 @@ async function updateMemoryOnGraph(req, res, id, body, flags) {
     if (cur.rev == null) return sendJSON(res, 500, { error: `memory ${id} has no write revision (urn:ex:ver) in the graph store: it was not written by this unit or its migration` });
     actor ??= logbornActor(req, res, 'memory.revise');
     if (!actor) return;
-    const r = await LOGBORN.write(memoryReviseIntention({ actor, identity: composed.identity, newVersions: composed.added, expectedRev: cur.rev }));
+    // #1762 S1b — the activity's versionAfter is the version REST will answer with, which a title-only revise does not carry
+    const versionAfter = Math.max(0, ...[...cur.versions, ...composed.added].map((v) => Number(v['scrum:version']) || 0));
+    const r = await LOGBORN.write({ ...memoryReviseIntention({ actor, identity: composed.identity, newVersions: composed.added, expectedRev: cur.rev }),
+      ...(historyNativeOn() && versionAfter > 0 ? { history: { versionAfter } } : {}) });
     if (r.outcome === 'PRECONDITION_FAILED') continue;
     if (r.outcome !== 'APPLIED') return logbornWriteFailed(res, r);
     let after;
