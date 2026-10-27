@@ -20,7 +20,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { makeBoardFixture, withBrowserServer, startMcpServer, mcpSession, openChannelStream, freePort } from './helpers/harness.mjs';
+import { makeBoardFixture, withBrowserServer, startMcpServer, mcpSession, openChannelStream, freePort, retryOnPortContention } from './helpers/harness.mjs';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ring-settings-1396-'));
 const tmpFile = (name, obj) => { const p = path.join(dir, name); fs.writeFileSync(p, JSON.stringify(obj)); return p; };
@@ -31,9 +31,13 @@ test('#1396 s2 — a terminal seat is ticked into the ring from Settings, joins 
   const tokens = tmpFile('seat-tokens.json', { tokens: { 'tok-alpha': { seat: 'alpha' } } });
   const cfg = tmpFile('channel-config.json', { mode: 'off', soft: { minMs: 60000, maxMs: 120000 }, hard: { timeoutMs: 300000 }, tokenRing: { timeoutMs: 90000 } });
   const roster = tmpFile('roster.json', { seats: { alpha: { name: 'Alpha', color: '#7cc4a0' }, ada: { name: 'Ada', color: '#c47c7c' }, wiki: { name: 'Wiki', color: '#999', kind: 'system' } } });
-  const mcpPort = await freePort();
-  let mcp = null;
   try {
+    // #1796 — the MCP port is chosen BEFORE REST and Chrome boot (REST needs its notify URL) and bound AFTER, so a stranger can take it in
+    // between and the harness will not retry an explicit port. The whole start runs again, with a fresh port, only on that error.
+    await retryOnPortContention(async () => {
+    const mcpPort = await freePort();
+    let mcp = null;
+    try {
     await withBrowserServer(async ({ server, browser }) => {
       // The harness hands REST an ISOLATED config file (server.configFile), which REST reads live (unit off). #1784 — the MCP
       // reads the config from REST on a short refresh, never a file of its own, so the page's save reaches it within one refresh.
@@ -94,7 +98,9 @@ test('#1396 s2 — a terminal seat is ticked into the ring from Settings, joins 
       assert.ok(st, 'unlisted again ⇒ not in the ring');
       stream3.close();
     }, { server: { board: makeBoardFixture({ cards: [] }), mcpNotifyUrl: `http://127.0.0.1:${mcpPort}/internal/notify`, env: { SCRUM_ROSTER_FILE: roster } }, launch: { headless: 'new' } });
-  } finally { if (mcp) await mcp.stop(); fs.rmSync(dir, { recursive: true, force: true }); }
+    } finally { if (mcp) await mcp.stop(); }
+    });
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 // #1411 slice 2 — the residents' PAIR CAP is the owner's number, and it lives
