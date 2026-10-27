@@ -43,6 +43,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { countLegacy, setLegacyContext, installStructuredCloneCounter, legacyCounters } from './core/legacy-counters.mjs';
 import { createGraphSlice } from './core/graph-slice-routes.mjs';
 import { historyNativeOn } from './core/durable-update.mjs';   // #1762 S1b
+import { refusalIntention, refusalSeat, routeTemplate, adapterRoute, createRefusalAuditMeter, UNLISTED as REFUSAL_UNLISTED } from './core/refusal-record.mjs';   // #1762 S2
 // #1561 — the log-born unit (memory, decision, seat-state) on the graph executor, behind
 // SCRUM_GRAPH_UNIT_LOGBORN=1. The folds live there now; with the flag OFF they are the only part used.
 import {
@@ -999,6 +1000,18 @@ function logRefused(req, statusCode, data) {
     let tail = rawTail;
     try { tail = decodeURIComponent(rawTail); } catch { /* malformed escape — the raw form is the only id it has */ }
     const actor = (request && (request.by || request.author || request.createdBy || request.decidedBy)) || null;
+    // #1762 S2 — with native history on, the refusal is ONE content-free graph record and nothing goes to the event log.
+    if (historyNativeOn()) {
+      if (req._noRefusalAudit) return;   // the audit write of a refusal report failed: that failure is counted, not recorded
+      const mr = meterRoute.getStore();
+      const facts = {
+        route: mr && mr.path === url ? routeTemplate(req.method, mr.route) : REFUSAL_UNLISTED, status: statusCode,
+        code: data && data.code, rule: null, entityKind: kindEntry ? kindEntry[1] : 'request', entityId: tail || null,
+        requestId: request && request.requestId, authSeat: req.auth && req.auth.seat, declared: actor,
+      };
+      setImmediate(() => { recordRefusal(facts); });   // v2.2 §3: after the response is handed on, never on its path
+      return;
+    }
     // #1574 W39/W40 — A REFUSED POST LEAVES NO COPY OF WHAT IT SAID. This log is append-only and redaction never reaches
     // it, so a refused conversation write (a retry of a redacted post above all) would put the post's text back into a
     // retained store. Its audit keeps the outcome and the identifiers: who, which requestId, which status and code. Not the
@@ -1033,6 +1046,25 @@ function logRefused(req, statusCode, data) {
   }
 }
 
+// #1762 S2 — the refusal audit's writer and its health counter. Fire-and-forget from the response path (a refusal goes
+// out unchanged whatever happens here); awaited by POST /api/refusals, which answers with what the graph holds.
+const REFUSAL_AUDIT = createRefusalAuditMeter();
+const rosterKeysOrEmpty = () => { try { return new Set(Object.keys(currentRoster() || {})); } catch { return new Set(); } };
+// v2.2 §2/§6: only APPLIED is "recorded" (an identical retry replays its APPLIED receipt). An intent-collision (the same
+// scope and id with CHANGED facts), a failed precondition, UNKNOWN or REJECTED is an audit failure: counted, never assumed.
+async function recordRefusal({ authSeat, declared, ...facts }) {
+  return REFUSAL_AUDIT.run(async () => {
+    try {
+      if (!ANNOUNCE_EXECUTOR) { REFUSAL_AUDIT.unavailable('no graph executor is configured'); return false; }
+      const i = refusalIntention({ actor: graphActor('board'), ...facts, seat: refusalSeat({ authSeat, declared, rosterKeys: rosterKeysOrEmpty() }) });
+      const r = await ANNOUNCE_EXECUTOR.update(i);
+      if (r.outcome === 'APPLIED') return true;
+      REFUSAL_AUDIT.unavailable(`${r.outcome}${r.reason ? `: ${r.reason}` : ''}`);
+      return false;
+    } catch (e) { REFUSAL_AUDIT.unavailable(e?.message || 'error'); return false; }
+  });
+}
+
 /**
  * #1167 — POST /api/refusals: record a refusal the SERVER did not produce.
  *
@@ -1056,6 +1088,17 @@ async function handleReportRefusal(req, res) {
     if (typeof reason !== 'string' || !reason) return sendJSON(res, 400, { error: 'reason is required — what the caller was told' });
     if (!entity || typeof entity !== 'object' || !entity.kind) return sendJSON(res, 400, { error: 'entity {kind, id} is required — what the refused action was about' });
     if (!ENTITY_KINDS.has(entity.kind)) return sendJSON(res, 400, { error: `unknown entity.kind "${entity.kind}" — vocabulary is ${[...ENTITY_KINDS].join('|')}` });
+    if (historyNativeOn()) {
+      // #1762 S2 — the adapter's refusal as ONE content-free record: its rule (registered, else unlisted), never its reason
+      // or request. A record that could not be written is a 503 that is itself NOT audited (no recursion).
+      const ok = await recordRefusal({
+        route: adapterRoute(body.route), status: 403, code: null, rule, entityKind: entity.kind,
+        entityId: entity.id != null && entity.id !== '' ? String(entity.id) : null,
+        requestId: request && typeof request === 'object' ? request.requestId : null, authSeat: req.auth && req.auth.seat, declared: actor,
+      });
+      if (!ok) { req._noRefusalAudit = true; return sendJSON(res, 503, { error: 'the refusal could not be recorded: the graph executor did not accept it', code: 'GRAPH_UNAVAILABLE' }); }
+      return sendJSON(res, 201, { recorded: true });
+    }
     const stored = appendEvent(EVENT_LOG_DIR, {
       op: 'refused',
       entity: { kind: entity.kind, id: entity.id != null && entity.id !== '' ? String(entity.id) : rule },
@@ -7450,6 +7493,8 @@ async function handleHealth(req, res) {
     // #1574 attempt 3 — the read gate, visible: running/lost/waiting from the gate itself. null when the conversations
     // unit is off (there is no gate), never a fabricated zero.
     readGate: READ_GATE ? READ_GATE.stats() : null,
+    // #1762 S2 — refusals the graph could not record (native history on): {count, since}; since is null at 0
+    refusalAuditUnavailable: REFUSAL_AUDIT.stats(),
     // #1563 — the board file's touches since boot, from #1558's always-on counters: what `read-off`/`off` must keep at 0.
     // attemptedOpens = every load, shared load and save of the document, plus every stat of it.
     document: (() => { const c = legacyCounters(); return { mode: BOARD_DOCUMENT, attemptedOpens: (c.loadDomain || 0) + (c.loadDomainShared || 0) + (c.saveDomain || 0) + (c.boardStat || 0), counters: { loadDomain: c.loadDomain || 0, loadDomainShared: c.loadDomainShared || 0, saveDomain: c.saveDomain || 0, boardStat: c.boardStat || 0 } }; })(),

@@ -96,7 +96,7 @@ const RX = { outcome: 'urn:ex:outcome', commitSeq: 'urn:ex:commitSeq', at: 'urn:
 // by COMPILER kind: entity.put is S1's (columns, collections); a wake also rides entity.put, through its own branch, and its row lives in the S1b file
 const S1_KINDS = ['card.write', 'entity.put'];
 const S1B_KINDS = ['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'post.create', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'modelcall.create'];
-const NOT_HISTORY = ['person.import', 'post.import', 'delivery.import', 'origin.prepare'];   // migrations (the projected past), and the two-phase prepare (the origin COMMIT's activity is its card.write's)
+const NOT_HISTORY = ['person.import', 'post.import', 'delivery.import', 'origin.prepare', 'refusal.record'];   // migrations (the projected past), the two-phase prepare (the origin COMMIT's activity is its card.write's), and a refusal's audit record (S2: content-free, never a ChangeActivity; its rows are in refusal-record-s2-1762)
 
 const UNITS = { SCRUM_GRAPH_UNIT_CARDS: '1', SCRUM_GRAPH_UNIT_COLUMNS: '1', SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_GRAPH_UNIT_LOGBORN: '1', SCRUM_GRAPH_UNIT_SMALLKINDS: '1', SCRUM_GRAPH_UNIT_DELIVERIES: '1' };
 const SOURCES = { SCRUM_GRAPH_QUERY_SOURCE: 'executor', SCRUM_GRAPH_READY_SOURCE: 'executor', SCRUM_GRAPH_CHECKS_SOURCE: 'executor', SCRUM_GRAPH_NEIGHBORS_SOURCE: 'executor' };

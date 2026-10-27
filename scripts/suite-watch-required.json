@@ -146,6 +146,7 @@
   "tests/record-files-restore-1648.test.mjs",
   "tests/recovery-hold-1749.test.mjs",
   "tests/references-guard-graph-r2.test.mjs",
+  "tests/refusal-record-s2-1762.test.mjs",
   "tests/replay-lane-rollback-1561.test.mjs",
   "tests/replay-pull-logborn-1571.test.mjs",
   "tests/resident-context-changes-c2.test.mjs",
