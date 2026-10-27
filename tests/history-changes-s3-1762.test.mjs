@@ -16,6 +16,7 @@
  *   CH3  a pre-F refusal keeps its reason and status, is served as op "refused", and names what the graph never held (route, request, response,
  *        rule) in `unknown`
  *   CH4  a BACKDATED event (occurred before the cutoff, recorded after it) is in a `since` window by its RECORDED time, from the graph
+ *   CH10 (v2.3) five non-card kinds are served from the graph with the same {kind,op,id,shortId,by,at} as the log path, as instants
  *   CH5  no row twice and none missing across the log/graph boundary
  *   CH6  F is VALID or the request is refused, with no log fallback and no cursor: every missing field, a duplicated value, a wrong datatype, an
  *        out-of-range logSeq, an invalid recordedAt, a commitSeq beyond the marker's, a non-hex incarnation, F also in the default graph
@@ -66,7 +67,7 @@ const SOURCES = { SCRUM_GRAPH_QUERY_SOURCE: 'executor', SCRUM_GRAPH_READY_SOURCE
 
 // ── the hand-built log ──
 const cardEv = (seq, op, id, shortId, state, at, extra = {}) => ({ seq, op, actor: 'ada', recorded_at: at, ...extra, entity: { kind: 'card', id, shortId }, state: { id, shortId, ...state } });
-const T0 = (n) => `2026-10-20T10:0${n}:00.000Z`;
+const T0 = (n) => `2026-10-20T10:${String(n).padStart(2, '0')}:00.000Z`;
 const EVENTS = [
   cardEv(1, 'create', 'uuid-a', 101, { column: 'backlog', claimedBy: null, title: 'Title one' }, T0(1)),
   cardEv(2, 'update', 'uuid-a', 101, { column: 'in-progress', claimedBy: 'ada', title: 'Title one' }, T0(2)),
@@ -76,7 +77,13 @@ const EVENTS = [
   { seq: 6, op: 'refused', actor: 'ada', recorded_at: T0(6), entity: { kind: 'card', id: 'uuid-c' }, state: null, reason: 'REFUSED-REASON-FIXTURE', status: 409 },
   cardEv(7, 'update', 'uuid-e', 105, { column: 'backlog', claimedBy: 'ada', title: 'Title five' }, T0(7)),          // no earlier event: the holder before is UNKNOWN
   cardEv(8, 'update', 'uuid-d', 104, { column: 'review', claimedBy: null, title: 'Title four' }, '2026-10-26T12:00:00.000Z', { occurred_at: '2026-10-20T08:00:00.000Z' }),   // BACKDATED
+  // five NON-CARD kinds (contract v2.3: today's log path puts every non-conversation kind in the cards bucket, so S3 must serve them from the graph too)
+  ...['delivery', 'board-meta', 'model-call', 'memory', 'seat-state'].map((kind, i) => ({
+    seq: 9 + i, op: 'create', actor: i === 3 ? 'bob' : 'ada', recorded_at: T0(9 + i), ...(i === 2 ? { occurred_at: '2026-10-20T07:00:00.000Z' } : {}),
+    entity: { kind, id: `${kind}-1` }, state: { id: `${kind}-1`, title: `Event-time title of ${kind}` },   // the log path serves this title; a graph row must not
+  })),
 ];
+const NONCARD_SEQS = [9, 10, 11, 12, 13];
 const K = EVENTS.length;
 /** what the backfill's facts say per card seq-node (the holder is BEFORE the write) */
 const FACTS = { 1: ['backlog', NONE], 2: ['in-progress', NONE], 3: ['planned', NONE], 4: ['done', `${PERSON}ada`], 5: ['planned', NONE], 7: ['backlog', UNKNOWN], 8: ['review', NONE] };
@@ -245,6 +252,24 @@ test('#1762 S3 CH4 — a BACKDATED event (occurred before the cutoff, recorded a
   assert.deepEqual(cards.map((r) => r.seq), [8], 'exactly the backdated card event: a window keyed on occurrence time would drop it, one keyed on nothing would return all of them');
   assert.equal(cards[0].title, null, 'and it was served from the graph, not the log (the log row would carry its title)');
   assert.equal(instant(cards[0].at), instant('2026-10-26T12:00:00.000Z'), 'its `at` is the recorded time, not 2026-10-20T08:00');
+});
+
+// ── CH10 (contract v2.3, approved) ──
+test('#1762 S3 CH10 — the NON-CARD kinds (delivery, board-meta, model-call, memory, seat-state) are served from the graph with the same {kind, op, id, shortId, by, at} the log path gives, compared as instants', T, async () => {
+  await W.clearFrontier();
+  const today = (await changesOf()).changes.filter((r) => NONCARD_SEQS.includes(r.seq));
+  await W.plantFrontier();
+  const graph = (await changesOf()).changes.filter((r) => NONCARD_SEQS.includes(r.seq));
+  assert.deepEqual(today.map((r) => r.seq), NONCARD_SEQS, 'PRECONDITION: the log path serves all five (today\'s behaviour, the thing that must be preserved)');
+  assert.deepEqual(graph.map((r) => r.seq), NONCARD_SEQS, 'with F present all five are STILL served: the whole non-post bucket, not only card, column and collection');
+  const proj = (r) => ({ kind: r.kind, op: r.op, id: r.id, shortId: r.shortId ?? null, by: r.by, at: new Date(r.at).toISOString() });
+  assert.deepEqual(graph.map(proj), today.map(proj), 'and they are the same facts, with `at` compared as an instant (the memory event occurred at 07:00 and was recorded at its own time: `at` is the recorded time)');
+  for (const r of graph) {
+    assert.equal(r.title, null, `${r.kind}: served from the graph, so title is null (disclosed); the log path gave '${today.find((t) => t.seq === r.seq).title}'`);
+    assert.equal(r.column, null, `${r.kind}: a non-card row has no column`);
+    assert.ok(!('holder' in r), `${r.kind}: and no holder key`);
+    for (const k of ['kind', 'op', 'seq', 'id', 'shortId', 'title', 'column', 'by', 'at']) assert.ok(k in r, `${r.kind}: today's key \`${k}\` is still there`);
+  }
 });
 
 // ── CH5 ──
