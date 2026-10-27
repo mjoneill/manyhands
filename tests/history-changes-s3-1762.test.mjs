@@ -28,6 +28,10 @@
  *        op mapped, holder before the write, title null, each exactly once; a delete needs no live entity; default latest-per-entity vs history:true
  *   CH14 a multi-part commit is served WHOLE past the page limit (parts in order, `oversizedCommit`, `returned` above the limit)
  *   CH17 a KNOWN lane keeps its cursor when F appears, and /api/changes reads with F present never move it (a control: S3 changes no lane)
+ *   CH18 a write that lands between the page's reads never yields a MIXED answer (one snapshot, or a 503); CH19 a post-F S2 refusal record is served, two of one
+ *         entity are two rows; CH20 a receipt and its native activity are ONE row; CH21 the `since` cutoff compares the full instant; CH22 a frontierLogSeq past the
+ *         safe integers, and a marker with no commitSeq or two, are refused 503 (a marker fault: HISTORY_FRONTIER_INVALID or GRAPH_EXECUTOR_UNAVAILABLE, not pinned); CH23 the F read failing after the cards guard passed is
+ *         503 GRAPH_EXECUTOR_UNAVAILABLE (CH18-CH22 are the integration review's reproductions at e32b0c2; CH9 now runs LAST because it kills the executor)
  *   CH16 reproject: derived, history-only (never latest, not counted by default; op update / nativeOp reproject with history:true, counted)
  *   CH15 walking backward: every native row exactly once, no commit split across pages
  *   CH12 the no-log-access recorder: an F-present request opens nothing under the event-log dir; positive control: the no-F request does, and nothing reads it in the background
@@ -606,6 +610,165 @@ test('#1762 S3 CH13 — with F present and the conversations unit OFF the reques
   } finally { await r3.stop(); }
 });
 
+
+// ══ the integration review's reader findings (e32b0c2): rows the first 33 lacked ══
+/** an HTTP interposer between a REST server and the executor: `intercept(query, state)` may answer instead of forwarding ({status, body}); `rewrite(query, buffer)` may return a replacement
+ *  response body; `afterForward(query, state)` runs after the executor answered and BEFORE REST sees the answer. `state` counts what it did, so a row can prove its interleave fired. */
+async function interpose({ intercept = async () => null, rewrite = null, afterForward = async () => {} } = {}) {
+  const { createServer } = await import('node:http');
+  const state = { queries: 0, intercepted: 0, rewritten: 0 };
+  const srv = createServer(async (req, res) => {
+    try {
+      const chunks = []; for await (const c of req) chunks.push(c);
+      const body = Buffer.concat(chunks); const text = body.toString(); state.queries++;
+      const early = await intercept(text, state);
+      if (early) { state.intercepted++; res.writeHead(early.status, { 'content-type': 'application/json' }); res.end(early.body ?? '{}'); return; }
+      const headers = { ...req.headers }; for (const h of ['host', 'connection', 'content-length']) delete headers[h];
+      const up = await fetch(`${W.exec.baseUrl}${req.url}`, { method: req.method, headers, ...(body.length ? { body } : {}) });
+      let buf = Buffer.from(await up.arrayBuffer());
+      if (rewrite) { const out = await rewrite(text, buf); if (out) { buf = out; state.rewritten++; } }
+      await afterForward(text, state);
+      const h = Object.fromEntries(up.headers); for (const k of ['content-length', 'content-encoding', 'transfer-encoding']) delete h[k];
+      res.writeHead(up.status, h); res.end(buf);
+    } catch (e) { res.writeHead(500); res.end(String(e)); }
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  return { url: `http://127.0.0.1:${srv.address().port}`, state, close: () => new Promise((r) => srv.close(r)) };
+}
+const FRONTIER_READ = (q) => q.includes('BIND("marker" AS ?src)');      // the one query that reads F and the store's marker together
+const LEGACY_READ = (q) => q.includes(`${ACT}seq-`);                   // the query that reads the legacy activity nodes
+
+// ── CH18 one snapshot ──
+test('#1762 S3 CH18 — a write that lands BETWEEN the page\'s reads never yields a MIXED answer: either one snapshot (200, rows and cursor from the same store state) or a refusal (503); never old rows under a newer cursor', T, async () => {
+  await W.plantFrontier();
+  let armed = false, changed = false, createdId = null;
+  const proxy = await interpose({
+    afterForward: async (q) => {
+      if (!armed || changed || !LEGACY_READ(q)) return;
+      changed = true;                                                  // the legacy rows have been read; now the store moves under the page
+      await W.update(`DELETE { <${node(1)}> <${COLUMN_AFTER}> ?v } INSERT { <${node(1)}> <${COLUMN_AFTER}> "review-changed" } WHERE { <${node(1)}> <${COLUMN_AFTER}> ?v }`);
+      const written = await W.send('POST', '/api/cards', { title: 'snapshot companion', createdBy: 'ada' });
+      assert.equal(written.status, 201, `PRECONDITION: the interleaved write applied (${written.status} ${written.text.slice(0, 200)})`);
+      createdId = written.json.id;
+    },
+  });
+  let server = null;
+  try {
+    server = await W.startRest({ SCRUM_GRAPH_EXECUTOR_URL: proxy.url });
+    armed = true;
+    const before = Number((await W.health()).commitSeq);
+    const r = await server.get(`/api/changes?since=${SINCE_ALL}&history=true`);
+    const after = Number((await W.health()).commitSeq);
+    assert.ok(changed && after > before, `PRECONDITION: a write landed between the page's reads (fired ${changed}; commitSeq ${before} -> ${after})`);
+    if (r.status === 503) return;                                      // refusing is allowed: the contract's retry-once-or-refuse
+    assert.equal(r.status, 200, `a page is a snapshot or a refusal (got ${r.status}: ${r.text.slice(0, 200)})`);
+    const col = r.json.changes.find((x) => x.seq === 1)?.column;
+    const hasNew = r.json.changes.some((x) => x.id === createdId);
+    const cursorCommit = Number(String(r.json.cursor).split('.')[4]);
+    const oldWorld = col === 'backlog' && !hasNew && cursorCommit === before;
+    const newWorld = col === 'review-changed' && hasNew && cursorCommit >= before + 1;
+    assert.ok(oldWorld || newWorld, `one store state, not a mix: seq 1 column ${col}, the new card served ${hasNew}, cursor at commit ${cursorCommit} (the store was at ${before}, then ${after})`);
+  } finally {
+    await W.update(`DELETE { <${node(1)}> <${COLUMN_AFTER}> ?v } INSERT { <${node(1)}> <${COLUMN_AFTER}> "backlog" } WHERE { <${node(1)}> <${COLUMN_AFTER}> ?v }`).catch(() => {});
+    if (server) await server.stop(); await proxy.close();
+  }
+});
+
+// ── CH19 post-F refusal records ──
+test('#1762 S3 CH19 — after F, a S2 refusal record is SERVED: op refused, no log seq, its status, rule, route, actor, entity and recorded time; two refusals of one entity are two rows (never collapsed)', T, async () => {
+  await W.plantFrontier();
+  const t0 = Date.now() - 2000;
+  const entity = { kind: 'card', id: `uuid-ch19-${crypto.randomUUID().slice(0, 8)}` };
+  for (const n of [1, 2]) {
+    const r = await W.send('POST', '/api/refusals', { actor: 'ada', rule: '#755 work gate', reason: `refused ${n}`, entity, route: 'mcp card_create' });
+    assert.equal(r.status, 201, `PRECONDITION: the refusal is recorded (${r.status} ${r.text.slice(0, 200)})`);
+  }
+  const records = await W.q(`SELECT DISTINCT ?s WHERE { ?s a <${RS}RefusalRecord> }`);
+  assert.ok(records.length >= 2, `PRECONDITION: the store holds the S2 records (${records.length})`);
+  const rows = (await changesOf()).changes.filter((r) => r.op === 'refused' && String(r.id ?? '').endsWith(entity.id));   // a bare id or the entity IRI: the row's id form for a record is not pinned
+  assert.equal(rows.length, 2, `each record is a row, and two refusals of one entity are not collapsed (got ${JSON.stringify(rows)})`);
+  for (const r of rows) {
+    assert.equal(r.seq, null, 'a post-F refusal has no log seq');
+    assert.equal(r.kind, 'card'); assert.equal(r.by, 'ada');
+    assert.equal(Number(r.status), 403, 'its status');
+    assert.ok(String(r.rule).includes('#755'), `its rule (got ${JSON.stringify(r.rule)})`);
+    assert.equal(r.route, 'mcp card_create', 'its trusted route');
+    assert.ok(Date.parse(r.at) >= t0 && Date.parse(r.at) <= Date.now() + 2000, `its recorded time (got ${r.at})`);
+  }
+});
+
+// ── CH20 one row per (opId, part) ──
+test('#1762 S3 CH20 — a write that has BOTH a log-born receipt and a native activity is served ONCE: no two rows share (opId, part), and the native part metadata is kept', T, async () => {
+  await W.plantFrontier();
+  const t0 = new Date(Date.now() - 2000).toISOString();
+  const written = await W.send('POST', '/api/memories', { owner: 'ada', title: 'dedupe row', body: 'once' });
+  assert.equal(written.status, 201, `PRECONDITION: the memory is written (${written.status} ${written.text.slice(0, 200)})`);
+  const all = (await changesOf(`since=${encodeURIComponent(t0)}&history=true`)).changes;
+  const mine = all.filter((x) => x.kind === 'memory' && String(x.id).endsWith(written.json.id));
+  assert.equal(mine.length, 1, `one write, one row, not the receipt plus the activity (got ${JSON.stringify(mine)})`);
+  assert.ok(mine[0].graph && mine[0].graph.opId && Number.isInteger(mine[0].graph.part) && mine[0].graph.commitSeq != null, `the row keeps the native provenance (got ${JSON.stringify(mine[0].graph)})`);
+  const keys = all.filter((x) => x.graph?.opId != null).map((x) => `${x.graph.opId}/${x.graph.part}`);
+  assert.equal(new Set(keys).size, keys.length, 'and across the whole window no (opId, part) is served twice');
+});
+
+// ── CH21 cutoff precision ──
+test('#1762 S3 CH21 — the `since` cutoff compares the FULL instant: .0005Z excludes an event recorded at .000Z, an instant a sub-millisecond BEFORE it includes it, and the instant itself includes it', T, async () => {
+  await W.plantFrontier();
+  const seqsAt = async (since) => new Set((await changesOf(`since=${encodeURIComponent(since)}&history=true`)).changes.filter((r) => r.seq != null).map((r) => r.seq));
+  assert.ok((await seqsAt('2026-10-20T10:01:00.000Z')).has(1), 'CONTROL: the cutoff at the event\'s own instant includes it');
+  assert.ok((await seqsAt('2026-10-20T10:00:59.9995Z')).has(1), 'a cutoff half a millisecond BEFORE it includes it');
+  const after = await seqsAt('2026-10-20T10:01:00.0005Z');
+  assert.ok(!after.has(1), 'a cutoff half a millisecond AFTER it excludes it: millisecond rounding is not the same instant');
+  assert.ok(after.has(2), 'CONTROL: the window is not simply empty (seq 2, recorded a minute later, is in)');
+});
+
+// ── CH22 the validator, at the endpoint ──
+test('#1762 S3 CH22a — a frontierLogSeq beyond the safe integers (9007199254740993, which a double rounds to ...992) is refused 503 HISTORY_FRONTIER_INVALID, never served rounded', T, async () => {
+  await W.plantFrontier({ logSeq: `"9007199254740993"^^<${XSD}integer>` });
+  const r = await W.get(`/api/changes?since=${SINCE_ALL}&history=true`);
+  assert.equal(r.status, 503, `(got ${r.status}: ${r.text.slice(0, 200)})`);
+  assert.equal(r.json?.code, 'HISTORY_FRONTIER_INVALID');
+  assert.equal(r.json?.changes, undefined);
+});
+const MARKER_COMMIT = 'urn:ex:commitSeq';
+for (const [label, rewrite] of [
+  ['the marker answers with NO commitSeq', (b) => b.filter((x) => !(x.src?.value === 'marker' && x.p?.value === MARKER_COMMIT))],
+  ['the marker answers with TWO contradictory commitSeq values', (b) => [...b, { src: { type: 'literal', value: 'marker' }, p: { type: 'uri', value: MARKER_COMMIT }, o: { type: 'literal', datatype: `${XSD}integer`, value: '0' } }]],
+]) {
+  test(`#1762 S3 CH22b — F present and ${label}: a 503, never a served page (the marker is part of what a valid frontier is checked against)`, T, async () => {
+    await W.plantFrontier();
+    const proxy = await interpose({ rewrite: async (q, buf) => { if (!FRONTIER_READ(q)) return null; const j = JSON.parse(buf.toString()); j.results.bindings = rewrite(j.results.bindings); return Buffer.from(JSON.stringify(j)); } });
+    let server = null;
+    try {
+      server = await W.startRest({ SCRUM_GRAPH_EXECUTOR_URL: proxy.url });
+      proxy.state.rewritten = 0;
+      const r = await server.get(`/api/changes?since=${SINCE_ALL}&history=true`);
+      assert.ok(proxy.state.rewritten >= 1, `PRECONDITION: the interposer rewrote the frontier read (${proxy.state.rewritten})`);
+      assert.equal(r.status, 503, `(got ${r.status}: ${r.text.slice(0, 200)})`);
+      // WHICH code a malformed MARKER gets is not pinned: it is not a fault of F (HISTORY_FRONTIER_INVALID) but of the store's own answer (GRAPH_EXECUTOR_UNAVAILABLE); both name a refusal
+      assert.ok(['HISTORY_FRONTIER_INVALID', 'GRAPH_EXECUTOR_UNAVAILABLE'].includes(r.json?.code), `named, not a 200 and not a bare 500 (got ${r.json?.code})`);
+      assert.equal(r.json?.changes, undefined);
+    } finally { if (server) await server.stop(); await proxy.close(); }
+  });
+}
+
+// ── CH23 the post-guard seam ──
+test('#1762 S3 CH23 — the executor answers everything EXCEPT the frontier read (the cards guard has passed): 503 GRAPH_EXECUTOR_UNAVAILABLE, never a log-only answer and never CARDS_UNAVAILABLE', T, async () => {
+  await W.plantFrontier();
+  const proxy = await interpose({ intercept: async (q) => (FRONTIER_READ(q) ? { status: 500, body: JSON.stringify({ error: 'injected: the frontier read failed' }) } : null) });
+  let server = null;
+  try {
+    server = await W.startRest({ SCRUM_GRAPH_EXECUTOR_URL: proxy.url });
+    proxy.state.intercepted = 0;
+    const r = await server.get(`/api/changes?since=${SINCE_ALL}&history=true`);
+    assert.ok(proxy.state.intercepted >= 1, `PRECONDITION: the frontier read was made to fail (${proxy.state.intercepted})`);
+    assert.equal(r.status, 503, `(got ${r.status}: ${r.text.slice(0, 200)})`);
+    assert.equal(r.json?.code, 'GRAPH_EXECUTOR_UNAVAILABLE', `the F read failing is named for what it is, not as the cards guard (got ${r.json?.code})`);
+    assert.equal(r.json?.changes, undefined, 'and not a log-only answer');
+  } finally { if (server) await server.stop(); await proxy.close(); }
+});
+
+// CH9 runs LAST: it kills the shared executor, so every row after it would fail for that reason alone
 // ── CH9 ──
 test('#1762 S3 CH9 CONTROL — the executor unreachable is a 503, never a log-only answer (A3: already true today with the graph units on; the code is measured below)', T, async () => {
   await W.plantFrontier();
