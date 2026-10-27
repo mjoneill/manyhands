@@ -592,8 +592,13 @@
       let total = null;
       for (let i = 0; i < 20; i++) {           // hard bound: 20 pages = 10,000 cards
         const q = '/api/cards?limit=500' + (before != null ? '&before=' + encodeURIComponent(before) : '');
-        const res = await (await fetch(q)).json();
-        const page = Array.isArray(res) ? res : (res && Array.isArray(res.cards) ? res.cards : []);
+        // #1795 (#144 review) — a refused page is an ERROR, never an empty page: an empty answer ends the paging and reads
+        // as "no cards", which left the Raised-hands panel loaded with no card high-water, so its next tick re-read the corpus.
+        const r = await fetch(q);
+        if (!r.ok) throw new Error(`cards ${r.status}`);
+        const res = await r.json();
+        if (!Array.isArray(res) && !(res && Array.isArray(res.cards))) throw new Error('cards: unexpected reply shape');
+        const page = Array.isArray(res) ? res : res.cards;
         if (total == null && res && typeof res.cardsTotal === 'number') total = res.cardsTotal;
         if (!page.length) break;
         all.push(...page);
@@ -669,25 +674,39 @@
       try {
         let changed = false;
         if (!blocked.loaded || !blocked.convoSince || !blocked.cardSince) {
+          const bootAt = new Date(Date.now() - 60_000).toISOString();   // #1795 — a minute's margin for clock skew
           if (useFeed) blocked.convoCursor = await feedTip();   // the tip FIRST, then the full read
-          const [convos, cards] = await Promise.all([
+          // #1795 (#144 review) — allSettled, not all: Promise.all rejects on the FIRST failure while the other read is still
+          // running, so the guard would be released with a whole-corpus read still in flight and the next refresh could start
+          // a second. The guard is held until BOTH have settled; then any failure is thrown (and backs off).
+          const [convosR, cardsR] = await Promise.allSettled([
             fetch('/api/conversations').then((r) => { if (!r.ok) throw new Error(`conversations ${r.status}`); return r.json(); }),
             fetchCardSummaries(),
           ]);
+          if (convosR.status === 'rejected') throw convosR.reason;
+          if (cardsR.status === 'rejected') throw cardsR.reason;
+          const convos = convosR.value, cards = cardsR.value;
           const rows = Array.isArray(convos) ? convos : [];
           for (const m of rows) if (raiseRow(m)) blocked.convos.set(m.id, m);
           for (const c of (Array.isArray(cards) ? cards : [])) blocked.cards.set(c.id, c);
-          blocked.convoSince = maxStamp(blocked.convoSince, rows, 'createdAt');
-          blocked.cardSince = maxStamp(blocked.cardSince, [...blocked.cards.values()], 'updatedAt');
+          // #1795 — a boot that SUCCEEDED but found nothing (no posts, or no cards) must still set its high-water: a null one
+          // is read as "not loaded" and forced a whole-corpus read on every 8 s tick. The boot's start time is the high-water.
+          blocked.convoSince = maxStamp(blocked.convoSince, rows, 'createdAt') || bootAt;
+          blocked.cardSince = maxStamp(blocked.cardSince, [...blocked.cards.values()], 'updatedAt') || bootAt;
           blocked.loaded = true;
           changed = true;
         } else {
-          const [convos, res] = await Promise.all([
+          // the same rule for the deltas: hold the guard until both settle, and a refused read is an error, not an empty delta
+          const okJson = (r) => { if (!r.ok) throw new Error(`delta ${r.status}`); return r.json(); };
+          const [convosR, resR] = await Promise.allSettled([
             blocked.convoCursor
               ? feedSince()
-              : fetch('/api/conversations?since=' + encodeURIComponent(blocked.convoSince)).then((r) => r.json()),
-            fetch('/api/cards?limit=500&updatedSince=' + encodeURIComponent(blocked.cardSince)).then((r) => r.json()),
+              : fetch('/api/conversations?since=' + encodeURIComponent(blocked.convoSince)).then(okJson),
+            fetch('/api/cards?limit=500&updatedSince=' + encodeURIComponent(blocked.cardSince)).then(okJson),
           ]);
+          if (convosR.status === 'rejected') throw convosR.reason;
+          if (resR.status === 'rejected') throw resR.reason;
+          const convos = convosR.value, res = resR.value;
           if (convos === null) { blocked.loaded = false; return; }   // 409: another store; re-boot on the next tick
           const cards = res && Array.isArray(res.cards) ? res.cards : [];
           for (const m of (Array.isArray(convos) ? convos : [])) {

@@ -59,3 +59,57 @@ test('#1795 F2 a HANGING boot read is never overlapped by another full read', { 
     assert.equal(full.length, 1, `one refresh at a time: while the boot read is outstanding no second one starts — saw ${full.length}`);
   }, { server: { board }, launch: { headless: 'new' } });
 });
+
+// ── #144 review: the two interleavings the first rows did not cover ──────────────────────────────────────────────────
+const isCards = (u) => u.pathname === '/api/cards' && !u.searchParams.has('updatedSince');
+
+test('#1795 F3 MIXED FAILURE: a card read that fails while the whole-corpus read HANGS never lets a second corpus read start, even after the backoff', { timeout: 120000 }, async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await browser.newPage();
+    const full = [];
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const u = new URL(req.url());
+      if (isFull(u)) { full.push(Date.now()); return; }   // the corpus read hangs (an executor query still running)
+      if (isCards(u)) return req.abort('failed');        // the card read fails at the network
+      req.continue();
+    });
+    await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'domcontentloaded' });
+    await sleep(40_000);   // past the first 16 s backoff and several 8 s ticks
+    assert.equal(full.length, 1, `the guard is held until BOTH reads settle: one corpus read only — saw ${full.length}`);
+  }, { server: { board }, launch: { headless: 'new' } });
+});
+
+test('#1795 F3-CONTROL a healthy boot: cards and conversations both answer, one corpus read, then deltas', { timeout: 120000 }, async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await browser.newPage();
+    const full = []; const delta = [];
+    await page.setRequestInterception(true);
+    page.on('request', (req) => { const u = new URL(req.url()); if (isFull(u)) full.push(Date.now()); if (isDelta(u)) delta.push(Date.now()); req.continue(); });
+    await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'domcontentloaded' });
+    await sleep(20_000);
+    assert.equal(full.length, 1, `one corpus read — saw ${full.length}`);
+    assert.ok(delta.length >= 1, `then since= deltas (saw ${delta.length})`);
+  }, { server: { board }, launch: { headless: 'new' } });
+});
+
+test('#1795 F4 a card read answered 503 is a FAILURE, never "no cards": the panel backs off and RETRIES the boot read, and settles once cards answer', { timeout: 120000 }, async () => {
+  // A 503 accepted as an empty card page would mark the panel loaded with no cards, and it would then see only cards
+  // changed AFTER boot, a silent wrong state. So the observable is the retry: one failed boot, ONE more after the backoff
+  // (never one per 8 s tick), and none after that once cards answer.
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await browser.newPage();
+    const full = []; let cardsDown = true;
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const u = new URL(req.url());
+      if (isFull(u)) full.push(Date.now());
+      if (isCards(u) && cardsDown) return req.respond({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'cards are unavailable', code: 'CARDS_UNAVAILABLE' }) });
+      req.continue();
+    });
+    await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'domcontentloaded' });
+    await sleep(6_000); cardsDown = false;   // the cards come back before the first backoff (16 s) ends
+    await sleep(34_000);                     // past the backoff and several ticks
+    assert.equal(full.length, 2, `a failed card read is retried exactly once after its backoff, then deltas: saw ${full.length} corpus read(s)`);
+  }, { server: { board }, launch: { headless: 'new' } });
+});
