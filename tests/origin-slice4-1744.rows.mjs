@@ -1090,12 +1090,14 @@ async function doneColumn(s, orders) {
   // #1778 — each move into done publishes a "✅ #N done" announcement that the server does NOT await ("the publish never holds the PATCH"). Left to land on its
   // own it can arrive AFTER a row's no-effect baseline, which reads as a refused write that added a post: measured under load, `posts: 3` where 2 were expected,
   // the new post `✅ #4 done — what's the next pull?` recorded by an origin that was neither the row's control nor its forged submission, i.e. this setup's own
-  // move. So every row's baseline is taken only once its setup's announcements have landed (bounded: an announcement that never comes must not hang the row).
+  // move. So every row's baseline is taken only once its setup's announcements have landed; after 20 s the row FAILS NAMING THIS, rather than going on to the race (a failure there would read as E7 again).
   const t0 = Date.now();
   for (const n of shorts) {
     for (;;) {
       const found = (await s.q(`SELECT ?s WHERE { ?s <https://schema.org/text> ?t FILTER(STRSTARTS(STR(?t), "✅ #${n} done")) }`)).length;
-      if (found > 0 || Date.now() - t0 > 20000) break;
+      if (found > 0) break;
+      // at the bound the row would otherwise go on to the very baseline race this wait exists to remove, and a failure there would read as E7 again: name it here
+      assert.ok(Date.now() - t0 <= 20000, `PRECONDITION: the "✅ #${n} done" announcement for the setup's move into done never landed within 20 s (#1778), so this row's baseline would race it`);
       await new Promise((r) => setTimeout(r, 25));
     }
   }
