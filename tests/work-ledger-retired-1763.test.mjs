@@ -30,7 +30,7 @@
  * scrum:requiredRaw holds task descriptions (the owner's one-line question); cursors.json (kept, and mis-registered under
  * SCRUM_WORK_STORE, which the contract corrects; no row yet).
  */
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -47,6 +47,12 @@ const ROOT = path.join(HERE, '..');
 const WORK_TOOLS = ['work_declare', 'work_bid', 'work_nobid', 'work_grant', 'work_withdraw', 'work_contest', 'work_list'];
 const payload = (res) => JSON.parse(res.result.content[0].text);
 
+// every temp folder this file makes is recorded here and removed by the `after` hook, so a failing row cannot leave one behind
+// (the suite's temp-leak ratchet fails a run on a NEW leftover; the first version of this file left 12 entries)
+const owned = [];
+const mk = (prefix) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); owned.push(d); return d; };
+after(() => { for (const d of owned) { try { fs.chmodSync(path.join(d, 'work-objects.jsonl'), 0o644); } catch { /* no file, or already readable */ } fs.rmSync(d, { recursive: true, force: true }); } });
+
 const board = () => makeBoardFixture({
   cards: [
     { id: 'u-1', shortId: 1, title: 'the declared card', description: '', type: 'task', labels: [], assignees: [], column: 'backlog', order: 1, createdAt: '2026-08-01T00:00:00.000Z', relationships: {} },
@@ -57,7 +63,7 @@ const board = () => makeBoardFixture({
 
 /** a store OUTSIDE the repo, holding a work-objects.jsonl with an OPEN window by ada on card #1 (the on-disk line format, read from the live file) */
 function storeWithOpenWindow() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'work-retired-1763-'));
+  const dir = mk('work-retired-1763-');
   const at = new Date().toISOString();
   const replyBy = new Date(Date.now() + 3600_000).toISOString();
   const base = { id: 'w-1763-fixture', replyBy, required: ['ada', 'bo'], declaredBy: 'ada', sourceMessageId: null, card: 1 };
@@ -207,7 +213,7 @@ for (const withWork of [false, true]) {
   test(`#1763 D${withWork ? '2' : '1'} — the activity projector ${withWork ? 'WITH' : 'WITHOUT'} --work runs to completion and writes NO Action${withWork ? ', saying that --work is ignored' : ''}`, TX, async () => {
     await withExecutor(async ({ exec, counts }) => {
       const { dir } = storeWithOpenWindow();
-      const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wl-1763-log-'));
+      const logDir = mk('wl-1763-log-');
       const before = await counts();
       const r = await runProjector(['--log', logDir, ...(withWork ? ['--work', dir] : []), '--executor', exec.baseUrl, '--once']);
       assert.equal(r.status, 0, `D: the projector ${withWork ? 'accepts' : 'no longer requires'} --work and exits 0 (exit ${r.status}: ${(r.err || r.out).slice(-200)})`);
@@ -226,7 +232,7 @@ const runReview = (args) => new Promise((resolve) => {
 });
 for (const withStore of [false, true]) {
   test(`#1763 E2${withStore ? 'b' : 'a'} — the sprint review ${withStore ? 'WITH' : 'WITHOUT'} --work-store exits 0 and reports signal 2 as RETIRED${withStore ? ', saying --work-store is ignored' : ''}; retired is never counted as measured`, async () => {
-    const events = fs.mkdtempSync(path.join(os.tmpdir(), 'wl-1763-events-'));
+    const events = mk('wl-1763-events-');
     const store = withStore ? storeWithOpenWindow().dir : null;
     const since = new Date(Date.now() - 7 * 86400_000).toISOString();
     const r = await runReview(['--since', since, '--events', events, '--seats', 'ada,bo', ...(withStore ? ['--work-store', store] : [])]);
