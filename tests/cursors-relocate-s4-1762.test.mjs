@@ -24,6 +24,11 @@
  *   RC9   --from and --to that name the SAME directory (spelled differently, or through a symlink) are refused before any write: the one cursors.json is never
  *         renamed onto its own archive (found by the integration review: it exited 0 and the destination no longer existed)
  *   RC10  an archive (cursors.json.migrated) that already exists with DIFFERENT bytes is never overwritten: apply refuses, both directories untouched
+ *   RC12  with the owner CONFIGURED (SCRUM_CURSORS_FILE), a CORRUPT owner file refuses pull, ack and register (503 CURSOR_STATE_INVALID naming it) even though a valid
+ *         old cursors.json sits in the event-log directory: nothing falls back, nothing is rewritten
+ *   RC13  with the owner configured and valid, it is the ONLY state: a lane that exists only in the old file is not registered, a lane in the owner is served from it
+ *         (cursor_file names it), an ack advances it, and the old file's bytes are untouched
+ *   RC14  with the owner configured but MISSING (nothing relocated yet), a valid old file is not a fallback: refuse 503 CURSOR_STATE_INVALID, and no file is created
  *   RC11  ownership survives the event-log directory's retirement: relocate, archive the old directory (S6's action) and leave a fresh empty one at its path, and
  *         with the post-migration owner CONFIGURED (SCRUM_CURSORS_FILE = the destination file), losing that file makes pull, ack and register refuse 503
  *         CURSOR_STATE_INVALID and nothing starts fresh at head. Control: with the file present the same restart serves the lane. The v1.1 A3 check read `.migrated`
@@ -305,11 +310,72 @@ test('#1762 S4 RC11 — with the owner CONFIGURED (SCRUM_CURSORS_FILE), after th
     const srv = await w.startRest(); owned.servers.push(srv); const call = w.mk(srv);
     const pull = await call('GET', `/api/cursors/pull?identity=${encodeURIComponent(lane)}&limit=2`);
     assert.equal(pull.status, 503, `a known lane whose state file is gone must not be served from an empty state (got ${pull.status}: ${pull.text.slice(0, 200)})`);
+    // the configured file is MISSING, so it has no realpath: its directory's realpath and its name are the path (macOS /var vs /private/var)
+    const named = (j) => path.join(real(path.dirname(j.file)), path.basename(j.file));
+    const want = path.join(real(path.dirname(w.newFile)), path.basename(w.newFile));
     assert.equal(pull.json?.code, 'CURSOR_STATE_INVALID', `named (got ${pull.text.slice(0, 200)})`);
+    assert.equal(named(pull.json), want, 'naming the CONFIGURED path');
     const ack = await call('POST', '/api/cursors/ack', { identity: lane, token: 'x' });
-    assert.equal(ack.json?.code, 'CURSOR_STATE_INVALID', `ack refuses the same way (got ${ack.status}: ${ack.text.slice(0, 200)})`);
+    assert.equal(ack.status, 503, `ack refuses too (got ${ack.status}: ${ack.text.slice(0, 200)})`);
+    assert.equal(ack.json?.code, 'CURSOR_STATE_INVALID'); assert.equal(named(ack.json), want, 'ack names the configured path');
     const reg = await call('POST', '/api/cursors/register', { registrySeatId: 'rc.new' });
-    assert.equal(reg.json?.code, 'CURSOR_STATE_INVALID', `and register: nothing starts fresh (got ${reg.status}: ${reg.text.slice(0, 200)})`);
-    assert.ok(!fs.existsSync(w.newFile) && !fs.existsSync(path.join(w.evdir, 'cursors.json')), 'and no state file was created in either place');
+    assert.equal(reg.status, 503, `and register: nothing starts fresh (got ${reg.status}: ${reg.text.slice(0, 200)})`);
+    assert.equal(reg.json?.code, 'CURSOR_STATE_INVALID'); assert.equal(named(reg.json), want, 'register names the configured path');
+    assert.ok(!fs.existsSync(w.newFile) && !fs.existsSync(path.join(w.evdir, 'cursors.json')), 'and no state file was created, at the configured path or in the fresh event-log directory');
+  });
+});
+
+// ── RC12-RC14 configured ownership (the builder's correction to v1.1 A3, pending its amendment) ──
+test('#1762 S4 RC12 — with the owner CONFIGURED, a CORRUPT owner file refuses pull, ack and register (503 CURSOR_STATE_INVALID naming it) though a valid old file exists: no fallback, nothing rewritten', async () => {
+  await world(async (w) => {
+    const owner = path.join(tmp('cr1762-owner-'), 'lanes.json');
+    fs.writeFileSync(owner, '{ this is not json');
+    w.env.SCRUM_CURSORS_FILE = owner;
+    const before = [sha(fs.readFileSync(w.oldFile)), sha(fs.readFileSync(owner))];
+    const srv = await w.startRest(); owned.servers.push(srv); const call = w.mk(srv);
+    const pull = await call('GET', `/api/cursors/pull?identity=${encodeURIComponent(w.lane('rc.a'))}`);
+    assert.equal(pull.status, 503, `pull is refused, not served from the old file (got ${pull.status}: ${pull.text.slice(0, 200)})`);
+    assert.equal(pull.json?.code, 'CURSOR_STATE_INVALID');
+    assert.equal(real(pull.json.file), real(owner), 'and names the owner file');
+    assert.equal((await call('POST', '/api/cursors/ack', { identity: w.lane('rc.a'), token: 'x' })).json?.code, 'CURSOR_STATE_INVALID', 'ack refuses the same way');
+    assert.equal((await call('POST', '/api/cursors/register', { registrySeatId: 'rc.brand-new' })).json?.code, 'CURSOR_STATE_INVALID', 'and register: nothing starts fresh');
+    await srv.stop(); owned.servers = owned.servers.filter((x) => x !== srv);
+    assert.deepEqual([sha(fs.readFileSync(w.oldFile)), sha(fs.readFileSync(owner))], before, 'neither file was rewritten');
+  });
+});
+test('#1762 S4 RC13 — with the owner CONFIGURED and valid it is the ONLY state: a lane only the old file knows is not registered, a lane in the owner is served from it, an ack advances it, the old file is untouched', async () => {
+  await world(async (w) => {
+    const owner = path.join(tmp('cr1762-owner-'), 'lanes.json');
+    const only = { version: 1, seats: { [w.lane('rc.a')]: w.OLD.seats[w.lane('rc.a')] } };                       // the owner holds lane A only; the old file holds A and B
+    fs.writeFileSync(owner, `${JSON.stringify(only, null, 2)}\n`);
+    w.env.SCRUM_CURSORS_FILE = owner;
+    const oldBefore = fs.readFileSync(w.oldFile);
+    const srv = await w.startRest(); owned.servers.push(srv); const call = w.mk(srv);
+    const pullB = await call('GET', `/api/cursors/pull?identity=${encodeURIComponent(w.lane('rc.b'))}&limit=3`);
+    assert.equal(pullB.status, 404, `lane B exists only in the old file, which is not consulted (got ${pullB.status}: ${pullB.text.slice(0, 200)})`);
+    const reg = await call('POST', '/api/cursors/register', { registrySeatId: 'rc.a' });
+    assert.equal(reg.status, 200, `(got ${reg.status}: ${reg.text.slice(0, 200)})`);
+    assert.equal(reg.json.fresh, false, 'lane A is known to the owner');
+    assert.equal(real(reg.json.envelope.cursor_file), real(owner), 'and is served from it (A3)');
+    const pull = await call('GET', `/api/cursors/pull?identity=${encodeURIComponent(w.lane('rc.a'))}&limit=10`);
+    assert.equal((await call('POST', '/api/cursors/ack', { identity: w.lane('rc.a'), token: pull.json.ack_token })).status, 200, 'an ack is accepted');
+    assert.ok(JSON.parse(fs.readFileSync(owner, 'utf8')).seats[w.lane('rc.a')].acked >= 5, 'the OWNER advanced');
+    assert.deepEqual(fs.readFileSync(w.oldFile), oldBefore, 'and the old file was not touched');
+  });
+});
+test('#1762 S4 RC14 — with the owner CONFIGURED but MISSING, a valid old file is not a fallback: pull, ack and register refuse 503 CURSOR_STATE_INVALID and no file is created', async () => {
+  await world(async (w) => {
+    const ownerDir = tmp('cr1762-owner-'); const owner = path.join(ownerDir, 'lanes.json');
+    w.env.SCRUM_CURSORS_FILE = owner;
+    const before = snap(w.evdir);
+    const srv = await w.startRest(); owned.servers.push(srv); const call = w.mk(srv);
+    const pull = await call('GET', `/api/cursors/pull?identity=${encodeURIComponent(w.lane('rc.a'))}&limit=2`);
+    assert.equal(pull.status, 503, `a configured owner that is missing refuses, whatever else exists (got ${pull.status}: ${pull.text.slice(0, 200)})`);
+    assert.equal(pull.json?.code, 'CURSOR_STATE_INVALID');
+    assert.equal((await call('POST', '/api/cursors/ack', { identity: w.lane('rc.a'), token: 'x' })).json?.code, 'CURSOR_STATE_INVALID');
+    assert.equal((await call('POST', '/api/cursors/register', { registrySeatId: 'rc.new' })).json?.code, 'CURSOR_STATE_INVALID');
+    await srv.stop(); owned.servers = owned.servers.filter((x) => x !== srv);
+    assert.deepEqual(fs.readdirSync(ownerDir), [], 'no owner file was created');
+    assert.equal(sha(fs.readFileSync(w.oldFile)), before['cursors.json'], 'and the old file is exactly as it was');
   });
 });
