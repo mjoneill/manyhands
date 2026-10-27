@@ -190,7 +190,7 @@ export async function tendingTick({
 
   let prompt;
   try {
-    prompt = mint({ now });
+    prompt = await mint({ now });   // #1786 — the mint reserves its window in the graph, so it may be async
   } catch (e) {
     onError(`[#804] tending mint failed: ${e?.message ?? e}`);
     return { minted: false, delivered: false, reason: 'mint-threw' };

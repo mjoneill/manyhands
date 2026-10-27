@@ -466,6 +466,12 @@ export const KIND_DECLARATIONS = Object.freeze([
       + 'active, and what the quiet window is.',
   },
   {
+    name: 'scrum:TendingWindowReservation', eventKind: null, collection: null,
+    createdBy: 'POST /api/tending/windows, by the tending scheduler before it sends (#1786)',
+    definition: 'One window reserved for a send: the board sends at most one tending prompt per window, and this node is '
+      + 'how every process knows the window is taken. Not a firing: a reservation whose send failed leaves no TendingMint.',
+  },
+  {
     name: 'scrum:TendingMint', eventKind: null, collection: null,
     createdBy: 'the tending scheduler, on each firing',
     definition: 'One firing of a tending prompt, recorded with who was reachable at that moment. '
