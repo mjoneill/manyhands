@@ -33,7 +33,7 @@
  * only the client saying what it got is. `recordInbound` is now liveness only.
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, chmodSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 
 /** Reachability, from INBOUND evidence only. See `reachability`. */
@@ -69,13 +69,52 @@ const DEFAULTS = Object.freeze({
 
 const emptyState = () => ({ version: 1, seats: {} });
 
-export function cursorsPath(eventDir) {
-  return join(eventDir, 'cursors.json');
+// ── #1762 S4 — the RELOCATED cursor state (S4 CONTRACT v1 §5) ──
+//
+// The event-log directory is archived at S6, so the lanes' state moves to the data folder
+// (scripts/cursors-relocate-1762.mjs, an explicit step). Once <data dir>/cursors.json exists it is THE state, and it is held
+// to a stricter rule than the old file: unreadable, or contradicted by an old file that was never archived, REFUSES with
+// CURSOR_STATE_INVALID naming the file. It never reads as empty: an empty state silently restarts every lane at head.
+// With no relocated file the old path and its lenient rule below are exactly as before.
+let relocatedDir = null;
+export const CURSOR_STATE_INVALID = 'CURSOR_STATE_INVALID';
+/** The data folder the relocated state lives in (server.js sets it at boot from SCRUM_DATA_DIR). null = not relocatable. */
+export function setCursorsDataDir(dir) { relocatedDir = dir || null; }
+const stateInvalid = (file, why) => Object.assign(new Error(`cursor state ${file} is not usable: ${why} — nothing is served, acked or registered until it is repaired`), { code: CURSOR_STATE_INVALID, file });
+const strictSeats = (p) => {
+  let j;
+  try { j = JSON.parse(readFileSync(p, 'utf8')); } catch (e) { throw stateInvalid(p, `unreadable (${e.code || 'not JSON'})`); }
+  if (!j || typeof j !== 'object' || !j.seats || typeof j.seats !== 'object' || Array.isArray(j.seats)) throw stateInvalid(p, 'it has no seats object');
+  return j.seats;
+};
+const sameSeats = (a, b) => JSON.stringify(Object.entries(a).sort(([x], [y]) => (x < y ? -1 : 1))) === JSON.stringify(Object.entries(b).sort(([x], [y]) => (x < y ? -1 : 1)));
+/** The relocated file when it is in use (validated), else null. Throws CURSOR_STATE_INVALID. */
+function relocatedFile(eventDir) {
+  if (!relocatedDir) return null;
+  const p = join(relocatedDir, 'cursors.json');
+  const old = join(eventDir, 'cursors.json');
+  if (p === old || !existsSync(p)) return null;
+  const seats = strictSeats(p);
+  // the old file still in place means the relocation was not finished: the two must agree lane for lane, or nobody can say which is true
+  if (existsSync(old)) {
+    let oldSeats;
+    try { oldSeats = strictSeats(old); } catch { throw stateInvalid(old, `it sits beside the relocated ${p} unarchived and cannot be read`); }
+    if (!sameSeats(seats, oldSeats)) throw stateInvalid(p, `it disagrees with ${old}, which was never archived; finish or repair the relocation`);
+  }
+  return p;
 }
 
-/** Missing/corrupt cursor state is EMPTY, never an error: a fresh board has none. */
+export function cursorsPath(eventDir) {
+  return relocatedFile(eventDir) ?? join(eventDir, 'cursors.json');
+}
+/** #1762 S4 — the relocated file the state is served from, or null when the old path is in use (envelope.cursor_file). */
+export function relocatedCursorFile(eventDir) { return relocatedFile(eventDir); }
+
+/** Missing/corrupt cursor state is EMPTY, never an error: a fresh board has none. (#1762 S4: the RELOCATED file refuses instead.) */
 export function loadCursors(eventDir) {
-  const p = cursorsPath(eventDir);
+  const r = relocatedFile(eventDir);
+  if (r) return { version: 1, seats: strictSeats(r) };
+  const p = join(eventDir, 'cursors.json');
   if (!existsSync(p)) return emptyState();
   try {
     const parsed = JSON.parse(readFileSync(p, 'utf8'));
@@ -92,10 +131,12 @@ export function loadCursors(eventDir) {
  * ceremony this slice retires.
  */
 export function saveCursors(eventDir, state) {
-  if (!existsSync(eventDir)) mkdirSync(eventDir, { recursive: true });
-  const p = cursorsPath(eventDir);
+  const p = cursorsPath(eventDir);   // #1762 S4 — the relocated file when it is in use (and valid), else the old path
+  if (!existsSync(dirname(p))) mkdirSync(dirname(p), { recursive: true });
   const tmp = join(dirname(p), `.cursors.${process.pid}.tmp`);
   writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+  // #1762 S4 — the relocated state keeps its (access-restricted) mode across every save
+  if (relocatedDir && p.startsWith(relocatedDir) && existsSync(p)) chmodSync(tmp, statSync(p).mode & 0o777);
   renameSync(tmp, p);   // rename is atomic within a filesystem
   return state;
 }
