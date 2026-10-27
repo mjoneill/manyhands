@@ -88,9 +88,24 @@ async function readActivityNodes(executor) {
   }
   return nodes;
 }
+/** ONE node's terms, by a bounded query (the per-write read-back must not enumerate the whole activity population). */
+async function readNode(executor, iri) {
+  const t = {};
+  for (const b of await query(executor, `SELECT ?p ?o WHERE { <${iri}> ?p ?o }`)) (t[b.p.value] ||= []).push(b.o);
+  return t;
+}
 
 // An xsd:dateTime is compared as an INSTANT, never as text: the store canonicalizes the lexical form.
-const sameInstant = (a, b) => { const x = Date.parse(a), y = Date.parse(b); return Number.isFinite(x) && Number.isFinite(y) && x === y; };
+// Compared at FULL precision: Date.parse keeps milliseconds only, so the fraction is compared as its own digit string (trailing
+// zeros dropped, so .000Z and Z are equal and .000001Z is not .000Z). An instant this cannot read is never equal to anything.
+const INSTANT = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/;
+const instantKey = (v) => {
+  const m = INSTANT.exec(String(v));
+  if (!m) return null;
+  const sec = Date.parse(`${m[1]}${m[3]}`);
+  return Number.isFinite(sec) ? `${sec / 1000}.${(m[2] ?? '').replace(/0+$/, '')}` : null;
+};
+const sameInstant = (a, b) => { const x = instantKey(a), y = instantKey(b); return x != null && x === y; };
 const holderTerm = (h) => (h === undefined ? UNKNOWN : h === null ? NONE : `${PERSON}${encodeURIComponent(h)}`);
 const columnTerm = (st) => (!st || !('column' in st) ? { iri: UNKNOWN } : st.column == null ? { iri: NONE } : { lit: String(st.column) });
 
@@ -124,10 +139,14 @@ const lit = (s) => JSON.stringify(String(s));
 const termSparql = (t) => (t.iri ? `<${t.iri}>` : t.dt ? `${lit(t.lit)}^^<${t.dt}>` : lit(t.lit));
 /** an executor binding, re-serialized as the exact RDF term it is (IRI, typed or language-tagged literal) */
 const bindingSparql = (b) => (b.type === 'uri' ? `<${b.value}>` : b.datatype ? `${lit(b.value)}^^<${b.datatype}>` : b['xml:lang'] ? `${lit(b.value)}@${b['xml:lang']}` : lit(b.value));
+const isLit = (b) => b && (b.type === 'literal' || b.type === 'typed-literal');
+const plainLit = (b) => isLit(b) && !b['xml:lang'] && (!b.datatype || b.datatype === `${XSD}string`);
+/** an RDF term equals a wanted one in KIND as well as value: an IRI's text in a literal is not the IRI */
 const termEq = (have, want) => {
+  if (!have) return false;
   if (want.iri) return have.type === 'uri' && have.value === want.iri;
-  if (want.dt === `${XSD}dateTime`) return have.type !== 'uri' && sameInstant(have.value, want.lit);
-  return have.type !== 'uri' && have.value === want.lit;
+  if (want.dt === `${XSD}dateTime`) return isLit(have) && have.datatype === want.dt && sameInstant(have.value, want.lit);
+  return plainLit(have) && have.value === want.lit;
 };
 
 const args = parse(process.argv.slice(2));
@@ -157,7 +176,9 @@ const seqNodes = new Map();   // seq -> {iri, terms}
 for (const [iri, terms] of nodes) {
   const local = iri.slice(ACT.length);
   const m = SEQ_RE.exec(local);
-  if (m) { seqNodes.set(Number(m[1]), { iri, terms }); continue; }
+  // only the CANONICAL activityIri(N): seq-04 is not seq-4, and an unsafe N is not an identity (no lossy Number coercion)
+  if (m && Number.isSafeInteger(Number(m[1])) && String(Number(m[1])) === m[1]) { seqNodes.set(Number(m[1]), { iri, terms }); continue; }
+  if (m) { refused.badIri.push(iri); continue; }
   if (RUN_RE.test(local) && terms[P.performedUsing]?.length && terms[P.generated]?.length) { skippedNonSeq.push(iri); continue; }
   refused.badIri.push(iri);
 }
@@ -178,13 +199,15 @@ for (const [seq, { iri, terms }] of [...seqNodes].sort((a, b) => a[0] - b[0])) {
   const have = (k) => terms[P[k]]?.[0];
   const fields = [];
   // what the projector wrote must equal the event it was projected from
-  if (have('used')?.value !== `${ENT}${ev.entity.id}`) fields.push(NAME.used);
-  if ((have('entityKind')?.value ?? null) !== (ev.entity.kind ?? null)) fields.push(NAME.entityKind);
-  if (have('op')?.value !== ev.op) fields.push(NAME.op);
+  if (!termEq(have('used'), { iri: `${ENT}${ev.entity.id}` })) fields.push(NAME.used);
+  if (ev.entity.kind != null ? !termEq(have('entityKind'), { lit: ev.entity.kind }) : have('entityKind')) fields.push(NAME.entityKind);
+  if (!termEq(have('op'), { lit: ev.op })) fields.push(NAME.op);
   const when = ev.occurred_at || ev.recorded_at;
-  if (when ? !(have('startedAtTime') && sameInstant(have('startedAtTime').value, when)) : have('startedAtTime')) fields.push(NAME.startedAtTime);
-  if (ev.actor ? have('wasAssociatedWith')?.value !== `${PERSON}${ev.actor}` : have('wasAssociatedWith')) fields.push(NAME.wasAssociatedWith);
-  if (have('shortId') && ev.entity.shortId != null && have('shortId').value !== String(ev.entity.shortId)) fields.push(NAME.shortId);
+  // the projector writes startedAtTime as a PLAIN literal (graph-replica lit()); an xsd:dateTime of the same instant is also accepted
+  const st = have('startedAtTime');
+  if (when ? !(st && (plainLit(st) || (isLit(st) && st.datatype === `${XSD}dateTime`)) && sameInstant(st.value, when)) : st) fields.push(NAME.startedAtTime);
+  if (ev.actor ? !termEq(have('wasAssociatedWith'), { iri: `${PERSON}${ev.actor}` }) : have('wasAssociatedWith')) fields.push(NAME.wasAssociatedWith);
+  if (have('shortId') && ev.entity.shortId != null && !termEq(have('shortId'), { lit: String(ev.entity.shortId) })) fields.push(NAME.shortId);
 
   const want = [];
   if (getsCardFacts(ev)) {
@@ -205,8 +228,10 @@ for (const [seq, { iri, terms }] of [...seqNodes].sort((a, b) => a[0] - b[0])) {
   if (!want.length) continue;                       // a node with no facts to carry: verified, nothing to do
   if (!insert.length) { alreadyCurrent++; alreadyCurrentSeqs.push(seq); continue; }
   // the identity terms preflight validated, exactly as read: the apply-time fence requires each to be unchanged
-  const identity = ['used', 'op', 'entityKind', 'startedAtTime', 'wasAssociatedWith', 'shortId'].filter((k) => have(k)).map((k) => [P[k], have(k)]);
-  const absent = ['entityKind', 'startedAtTime', 'wasAssociatedWith', 'shortId'].filter((k) => !have(k)).map((k) => P[k])
+  // every single-valued term present at preflight (identity AND any already-current fact) is fenced exactly; a change to any of
+  // them, a second value, or one appearing where none was, makes the WHOLE node's update add nothing
+  const identity = SINGLE.filter((k) => have(k)).map((k) => [P[k], have(k)]);
+  const absent = SINGLE.filter((k) => !have(k)).map((k) => P[k])
     .filter((p) => !insert.some(([q]) => q === p));   // a term this update inserts is fenced by the insert's own absence check
   plan.push({ seq, iri, insert, want, identity, absent });
 }
@@ -258,7 +283,7 @@ for (const item of plan) {
     // A COMPLETE refusal (the executor's own epoch fence answers 409). Prove it did not apply rather than call it uncertain,
     // then say why it stopped: a moved store identity, or a refusal on a stable store. Either way nothing later is sent.
     let node, now;
-    try { node = (await readActivityNodes(executor)).get(item.iri) ?? {}; now = await readMarker(executor); } catch { uncertain.push(item.seq); break; }
+    try { node = await readNode(executor, item.iri); now = await readMarker(executor); } catch { uncertain.push(item.seq); break; }
     if (item.insert.some(([p]) => node[p]?.length)) { uncertain.push(item.seq); break; }   // a refused update whose facts are present: not provable
     const moved = ['dataset', 'epoch', 'incarnation'].filter((k) => String(now[k]) !== String(marker[k]));
     stopped = moved.length ? { code: 'STORE_IDENTITY_CHANGED', fields: moved } : { code: 'UPDATE_REFUSED', status };
@@ -266,9 +291,9 @@ for (const item of plan) {
   }
   // an accepted write is not a stored write: read the node back
   let after;
-  try { after = (await readActivityNodes(executor)).get(item.iri) ?? {}; } catch { uncertain.push(item.seq); break; }
+  try { after = await readNode(executor, item.iri); } catch { uncertain.push(item.seq); break; }
   const bad = [
-    ...item.identity.filter(([p, b]) => (after[p]?.length ?? 0) !== 1 || after[p][0].value !== b.value || after[p][0].type !== b.type).map(([p]) => nameOf(p)),
+    ...item.identity.filter(([p, b]) => (after[p]?.length ?? 0) !== 1 || after[p][0].value !== b.value || after[p][0].type !== b.type || (after[p][0].datatype ?? null) !== (b.datatype ?? null)).map(([p]) => nameOf(p)),
     ...item.absent.filter((p) => after[p]?.length).map(nameOf),
     ...item.want.filter(([p, t]) => (after[p]?.length ?? 0) !== 1 || !termEq(after[p][0], t)).map(([p]) => nameOf(p)),
   ];
