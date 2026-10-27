@@ -27,6 +27,7 @@
  *   CH11 after F, each card write (create, move, claim, edit, release, delete) is a NATIVE graph row: seq null, graph {opId,commitSeq,version,part,nativeOp},
  *        op mapped, holder before the write, title null, each exactly once; a delete needs no live entity; default latest-per-entity vs history:true
  *   CH14 a multi-part commit is served WHOLE past the page limit (parts in order, `oversizedCommit`, `returned` above the limit)
+ *   CH17 a KNOWN lane keeps its cursor when F appears, and /api/changes reads with F present never move it (a control: S3 changes no lane)
  *   CH16 reproject: derived, history-only (never latest, not counted by default; op update / nativeOp reproject with history:true, counted)
  *   CH15 walking backward: every native row exactly once, no commit split across pages
  *   CH12 the no-log-access recorder: an F-present request opens nothing under the event-log dir; positive control: the no-F request does, and nothing reads it in the background
@@ -540,6 +541,27 @@ test('#1762 S3 CH16 — a `reproject` part (a card re-written only because a #N 
   assert.equal(latest3?.graph?.nativeOp, 'update', '... it is never #3\'s latest row: that is its own last authored write, the edit');
   assert.equal(defaultMode.totals.cards, defaultMode.changes.length, 'and is not counted in totals');
   assert.equal(mine(defaultMode.changes).length, 2, 'the entities #3 and the new card, once each');
+});
+
+// ── CH17 lanes across the switch (a control: S3 changes no lane) ──
+test('#1762 S3 CH17 CONTROL — a KNOWN lane keeps its cursor when F appears, and /api/changes reads with F present never move it (S3 changes no lane)', T, async () => {
+  await W.clearFrontier();
+  const reg = () => W.send('POST', '/api/cursors/register', { registrySeatId: 'ch17.lane' });
+  const state = async () => { const e = (await reg()).json.envelope; return { acked: e.last_acked_seq, served: e.last_served_seq }; };
+  assert.equal((await reg()).status, 200, 'PRECONDITION: the lane registered');
+  for (let i = 0; i < 2; i++) assert.equal((await W.send('POST', '/api/cards', { title: `lane control ${i}`, description: 'x', createdBy: 'ada' })).status, 201, 'PRECONDITION: a write the lane is owed');
+  const pulled = await W.send('GET', `/api/cursors/pull?identity=${encodeURIComponent('registry:ch17.lane')}`);
+  assert.equal(pulled.status, 200, `PRECONDITION: the pull answered (${pulled.status}: ${pulled.text.slice(0, 160)})`);
+  assert.ok(pulled.json.ack_token, 'PRECONDITION: the page carries an ack token');
+  assert.equal((await W.send('POST', '/api/cursors/ack', { identity: 'registry:ch17.lane', token: pulled.json.ack_token })).status, 200, 'PRECONDITION: the lane acked');
+  const before = await state();
+  assert.ok(before.acked >= 1, `PRECONDITION: the lane has a cursor to keep (${JSON.stringify(before)})`);
+  await W.plantFrontier();
+  assert.equal((await reg()).json.fresh, false, 'a known lane is not fresh once F exists');
+  assert.deepEqual(await state(), before, 'planting F moved nothing: the lane keeps exactly the cursor it had');
+  const first = await changesOf(`since=${SINCE_ALL}&history=true&limitCards=2`);
+  for (const q of [`since=${SINCE_ALL}`, `since=${SINCE_ALL}&history=true`, `since=${encodeURIComponent(first.cursor)}`]) assert.equal((await W.get(`/api/changes?${q}`)).status, 200, `/api/changes?${q} answered`);
+  assert.deepEqual(await state(), before, 'and four /api/changes reads with F present did not move it either');
 });
 
 // ── CH12 the no-log-access recorder, with its positive control ──
