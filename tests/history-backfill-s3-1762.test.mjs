@@ -42,10 +42,9 @@
  *   BF16  term KIND is validated, not text: prov:used / prov:wasAssociatedWith as a plain literal with the IRI's text, a holder as a literal, a
  *         logRecordedAt as an xsd:string, are mismatches, never accepted by lexical equality
  *   BF17  timestamps compare at FULL precision: a microsecond difference is a mismatch (logRecordedAt and startedAtTime), never rounded away
- *   BF18  a NONCANONICAL alias (activity/seq-04 beside seq-4) is reported by its IRI, never collapsed into the canonical node (whether it counts in
- *         scanned.nodes is a definition left open: both are accepted), and the canonical node is still completed
- *   BF19  the readback does NOT scale with the node count: the number of whole-population activity enumerations during an apply is the same for a 14-node
- *         world and a larger one
+ *   BF18  a NONCANONICAL alias (activity/seq-04 beside seq-4) is reported by its IRI in badIri, never collapsed into the canonical node and never counted in
+ *         scanned.nodes (canonical seq-nodes only; the contract author's pin); scanned.nodes + |badIri| + |skippedNonSeq| is every activity subject; the canonical node is still completed
+ *   BF19  the readback does NOT scale with the node count: an apply makes exactly ONE whole-population activity enumeration (the preflight), whatever the world size (the contract author's pin)
  *   BF12  the apply-time FENCE: a fact that appears on a node between plan and write, OR a validated identity term that changes (prov:used,
  *         scrum:op, scrum:entityKind, prov:startedAtTime, prov:wasAssociatedWith, scrum:shortId; replaced, or a second value added, or newly
  *         present where preflight saw none), makes that node's guarded update change nothing; the node is refused as `mismatch` naming the
@@ -568,7 +567,8 @@ async function lossyProxy(executorUrl, { mode = null, nth = 1, beforeForward = n
     if (isUpdate) { state.updates++; state.bodies.push(body.toString('utf8')); faulted = state.updates === nth; }
     if (req.method === 'POST' && req.url.startsWith('/query')) state.queries.push(body.toString('utf8'));
     if (faulted && mode === 'request-lost') { req.socket.destroy(); return; }
-    if (faulted && mode === 'refuse-409') { res.writeHead(409, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'refused by the test proxy', code: 'TEST_REFUSED' })); return; }   // never forwarded: proven not applied
+    const refuseWith = /^refuse-(\d{3})$/.exec(mode || '');
+    if (faulted && refuseWith) { res.writeHead(Number(refuseWith[1]), { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'refused by the test proxy', code: 'TEST_REFUSED' })); return; }   // never forwarded: proven not applied
     if (isUpdate && beforeForward && when(body.toString('utf8'), state.updates)) await beforeForward(body.toString('utf8'));
     const up = await fetch(`${executorUrl}${req.url}`, { method: req.method, headers: Object.fromEntries(Object.entries(req.headers).filter(([k]) => !['host', 'connection', 'content-length'].includes(k))), body: body.length ? body : undefined });
     const text = Buffer.from(await up.arrayBuffer());
@@ -701,6 +701,26 @@ for (const [label, field, predicate, change] of FENCE_TERMS) {
     });
   });
 }
+test('#1762 S3 BF12b — a SECOND scrum:shortId value of another datatype added between plan and write fences the node: nothing is added to it, it is refused as mismatch, never retried', T, async () => {
+  await world(async ({ cliVia, x, base, report, upd, factsOf }) => {
+    const sid = EVENTS.find((e) => e.seq === 4).entity.shortId;
+    const proxy = await lossyProxy(x.baseUrl, { beforeForward: () => upd(`INSERT DATA { <${node(4)}> <${SHORT}> "${sid}"^^<${XSD}integer> . }`), when: (body) => body.includes(node(4)) });
+    let after = null;
+    try {
+      const r = await cliVia(proxy.url, [...base, '--apply']);
+      assert.equal(r.status, 3, `a node that gained a second identity term is a refusal, exit 3 (got ${r.status}: ${(r.err || r.out).slice(-300)})`);
+      const got = flat(report(r, 'second shortId'), 'second shortId');
+      assert.deepEqual(got.mismatch, [4], 'node 4 is listed as mismatch');
+      assert.ok(got.mismatchFields[4].includes(LOCAL.shortId), `naming the term that gained a value (${LOCAL.shortId}); got ${JSON.stringify(got.mismatchFields[4])}`);
+      after = await factsOf(node(4));
+      assert.equal(proxy.state.updates, SERVED_SEQS.length, 'and it was not retried blind');
+    } finally { await proxy.close(); }
+    assert.equal((after[SHORT] || []).length, 2, 'PRECONDITION: the second term really is a second term (the same lexical value in another datatype), and it was not removed');
+    assert.equal(after[COLUMN_AFTER], undefined, 'the guarded update changed NOTHING: no column');
+    assert.equal(after[HOLDER], undefined, '(nor a holder)');
+    assert.equal(after[LOGAT], undefined, '(nor a logRecordedAt)');
+  });
+});
 test('#1762 S3 BF12b — a term preflight saw ABSENT (an event with no actor has no prov:wasAssociatedWith) and then newly present fences the node, never written through', T, async () => {
   const noActor = EVENTS.map((e) => (e.seq === 4 ? { ...e, actor: null } : e));       // the projector omits wasAssociatedWith for an event with no actor: preflight legitimately sees none
   await world(async ({ cliVia, x, base, report, upd, factsOf }) => {
@@ -775,16 +795,16 @@ for (const [field, pred, newLit] of MARKER_CHANGES) {
 }
 
 // ── BF14 UPDATE_REFUSED ──
-for (const nth of [1, 3]) {
-  test(`#1762 S3 BF14a — a COMPLETE refusal on a stable store, proven not applied (${nth === 1 ? 'the first update' : 'after two confirmed nodes'}): exit 4, apply.stopped UPDATE_REFUSED with its status, later writes stopped, confirmed kept, uncertain EMPTY`, T, async () => {
+for (const [status, nth] of [[409, 1], [409, 3], [403, 1], [403, 3]]) {
+  test(`#1762 S3 BF14a — a COMPLETE ${status} refusal on a stable store, proven not applied (${nth === 1 ? 'the first update' : 'after two confirmed nodes'}): exit 4, apply.stopped UPDATE_REFUSED with its status, later writes stopped, confirmed kept, uncertain EMPTY`, T, async () => {
     await world(async ({ cliVia, x, base, report, q, factsOf }) => {
-      const proxy = await lossyProxy(x.baseUrl, { mode: 'refuse-409', nth });
+      const proxy = await lossyProxy(x.baseUrl, { mode: `refuse-${status}`, nth });
       try {
         const r = await cliVia(proxy.url, [...base, '--apply']);
         assert.equal(r.status, 4, `an interrupted apply is exit 4 (got ${r.status}: ${(r.err || r.out).slice(-300)})`);
         const j = report(r, 'update refused');
         assert.equal(j.apply?.stopped?.code, 'UPDATE_REFUSED', `apply.stopped names the code (got ${JSON.stringify(j.apply)})`);
-        assert.equal(j.apply.stopped.status, 409, 'and the status the executor answered');
+        assert.equal(j.apply.stopped.status, status, 'and the status the executor answered (not a constant)');
         assert.equal(j.apply.confirmed.length, nth - 1, 'confirmed keeps exactly the nodes confirmed before it');
         assert.deepEqual(j.apply.uncertain, [], 'uncertain is EMPTY: the store is stable and the update is proven not applied');
         assert.equal(proxy.state.updates, nth, 'nothing after the refused update was dispatched');
@@ -864,11 +884,11 @@ test('#1762 S3 BF18 — a NONCANONICAL alias (activity/seq-04 beside seq-4) is r
     const r = await cli([...base, '--apply']);
     assert.equal(r.status, 3, `an alias is a refusal: coverage is not bijective (got ${r.status}: ${(r.err || r.out).slice(-300)})`);
     const j = report(r, 'alias');
-    // WHETHER a refused alias counts in scanned.nodes is a definition the contract does not settle (a node scanned and refused, or refused before it is scanned), so both are accepted;
-    // what is NOT accepted is the original defect: the two IRIs collapsed into one, with the alias neither counted nor named. Every seq subject is accounted for.
-    assert.ok([subjects - 1, subjects].includes(j.scanned.nodes), `scanned.nodes is the canonical nodes (${subjects - 1}) or every seq subject (${subjects}), never a collapse (got ${j.scanned.nodes})`);
-    const flatAlias = [...j.refused.badIri, ...j.refused.duplicate.map((d) => d.iri).filter(Boolean)];
-    assert.ok(flatAlias.includes(alias), `the alias is named by its IRI in an explicit bucket (got ${JSON.stringify(j.refused)})`);
+    // PINNED (the contract author): scanned.nodes counts canonical seq-nodes only; every other IRI under the activity namespace is in exactly one of badIri / skippedNonSeq.
+    assert.equal(j.scanned.nodes, subjects - 1, `scanned.nodes is the canonical seq-nodes only (${subjects - 1}); the alias is never counted, and the two IRIs are never collapsed (got ${j.scanned.nodes})`);
+    assert.ok(j.refused.badIri.includes(alias), `the alias is named by its IRI in badIri (got ${JSON.stringify(j.refused)})`);
+    const allActivity = Number((await q(`SELECT (COUNT(DISTINCT ?a) AS ?n) WHERE { ?a a <${PROV}Activity> . FILTER(STRSTARTS(STR(?a), "${ACT}")) }`))[0].n.value);
+    assert.equal(j.scanned.nodes + j.refused.badIri.length + j.skippedNonSeq.length, allActivity, `scanned.nodes + |badIri| + |skippedNonSeq| accounts for every activity subject (${allActivity})`);
     const canonical = await factsOf(node(4));
     for (const p of [COLUMN_AFTER, HOLDER, LOGAT]) one(canonical, p, 'the CANONICAL seq 4');
     for (const p of [COLUMN_AFTER, HOLDER, LOGAT]) assert.equal((await factsOf(alias))[p], undefined, `the alias gets no ${p.replace(RS, 'scrum:')}`);
@@ -890,11 +910,12 @@ async function wholePopulationScans(events) {
   }, { events });
   return { count, written };
 }
-test('#1762 S3 BF19 — the readback does NOT scale with the node count: the number of whole-population activity enumerations during an apply is the same for the 15-event world and a larger one', T, async () => {
+test('#1762 S3 BF19 — the readback does NOT scale with the node count: the apply makes exactly ONE whole-population activity enumeration (the preflight), for the 15-event world and a larger one', T, async () => {
   const extra = Array.from({ length: 12 }, (_, i) => cardEv(16 + i, 'update', `uuid-x${i}`, 200 + i, { column: 'backlog', claimedBy: null, title: `extra ${i}` }));
   const small = await wholePopulationScans(EVENTS);
   const large = await wholePopulationScans([...EVENTS, ...extra]);
   assert.ok(large.written > small.written, `PRECONDITION: the larger world writes more nodes (${large.written} vs ${small.written})`);
   assert.ok(small.count >= 1, `PRECONDITION: the proxy counts the census enumeration it can see (${small.count})`);
-  assert.equal(large.count, small.count, `whole-population enumerations must not grow with the node count: ${small.count} for ${small.written} written nodes, ${large.count} for ${large.written} (a per-node readback that rescans every activity is quadratic over ~89k nodes)`);
+  assert.equal(small.count, 1, `exactly ONE whole-population enumeration per run, the preflight, in the small world (got ${small.count} for ${small.written} written nodes)`);
+  assert.equal(large.count, 1, `and exactly one in the larger world (got ${large.count} for ${large.written} written nodes): a per-node readback that rescans every activity is quadratic over ~89k nodes, and a constant 2 or 5 is a count nobody designed`);
 });
