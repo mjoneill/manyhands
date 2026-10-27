@@ -21,8 +21,10 @@
  *   D1/D2 the activity projector, with and without --work, runs to completion and writes no Action (--work is accepted but ignored, with a stderr line)
  *   F   GUARD: the claim throttle (kept) still refuses a second seat inside the cooldown, with the gate flags absent
  *
- * TODO rows (node:test `todo`, NOT passes):
- *   E2  sprint-signals reports signal 2 as retired ({retired, since, workObjects}) and never imports a deleted module (needs the review script's own graph arguments)
+ * E2a/E2b the sprint review, without and with --work-store, exits 0 and reports signal 2 as RETIRED since 2026-08-18 (#1763), never counts it as
+ *   measured, and says --work-store is ignored. (The review script reads no graph; the builder corrected that at 02:27Z. The no-import half is E.)
+ *
+ * No todo rows remain.
  *
  * NOT COVERED, BY NAME: the plist edits themselves (the morning window, with the owner present); the two WorkObjects whose
  * scrum:requiredRaw holds task descriptions (the owner's one-line question); cursors.json (kept, and mis-registered under
@@ -215,6 +217,29 @@ for (const withWork of [false, true]) {
   });
 }
 
+// ── E2: the sprint review's signal 2 is RETIRED (the script takes --since --events --seats [--work-store]; it does not talk to REST) ──
+const runReview = (args) => new Promise((resolve) => {
+  const p = spawn(process.execPath, [path.join(ROOT, 'scripts', 'sprint-review.mjs'), ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '', err = ''; p.stdout.on('data', (d) => { out += d; }); p.stderr.on('data', (d) => { err += d; });
+  const timer = setTimeout(() => p.kill('SIGKILL'), 60000);
+  p.on('close', (status) => { clearTimeout(timer); resolve({ status, out, err }); });
+});
+for (const withStore of [false, true]) {
+  test(`#1763 E2${withStore ? 'b' : 'a'} — the sprint review ${withStore ? 'WITH' : 'WITHOUT'} --work-store exits 0 and reports signal 2 as RETIRED${withStore ? ', saying --work-store is ignored' : ''}; retired is never counted as measured`, async () => {
+    const events = fs.mkdtempSync(path.join(os.tmpdir(), 'wl-1763-events-'));
+    const store = withStore ? storeWithOpenWindow().dir : null;
+    const since = new Date(Date.now() - 7 * 86400_000).toISOString();
+    const r = await runReview(['--since', since, '--events', events, '--seats', 'ada,bo', ...(withStore ? ['--work-store', store] : [])]);
+    assert.equal(r.status, 0, `E2: the review exits 0 (exit ${r.status}: ${(r.err || r.out).slice(-200)})`);
+    const line = r.out.split('\n').find((l) => /^SIGNAL 2/.test(l));
+    assert.ok(line, `E2: the report has a SIGNAL 2 line (output starts: ${r.out.slice(0, 160)})`);
+    assert.ok(/RETIRED since 2026-08-18 \(#1763\)/.test(line), `E2: signal 2 reads RETIRED since 2026-08-18 (#1763) (got: ${line.slice(0, 200)})`);
+    const measurable = /(\d+) of (\d+) signals measurable/.exec(r.out);
+    assert.ok(measurable && Number(measurable[1]) === 0, `E2: with nothing measured the report says 0 measurable, so a retired signal is not counted as measured (got: ${measurable ? measurable[0] : 'no such line'})`);
+    if (withStore) assert.ok(r.err.includes('work ledger retired (#1763): --work-store ignored'), `E2: and it says --work-store is ignored on stderr (stderr: ${r.err.slice(0, 200)})`);
+    else assert.ok(!r.err.includes('ignored'), 'E2: without the flag there is no such note');
+  });
+}
+
 // ── TODO rows: node:test reports them as todo, never as a pass ──
 const TODO = (why) => ({ todo: why });
-test('#1763 E2 — sprint-signals reports signal 2 as retired and imports no deleted module', TODO('needs how signal 2 reads the graph (the contract says it reads the WorkObjects)'), async () => { assert.fail('awaiting the build'); });
