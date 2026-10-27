@@ -30,6 +30,10 @@
  *   BF11  exit 4: a lost ACK on the FIRST write is exit 4 with `apply.uncertain` (exactly the one node in flight: one update per node),
  *         never exit 2 and never "0 written"; uncertainty wins over the refusal buckets; the re-run reconciles (no fact twice). A failure
  *         AFTER some writes landed: `confirmed` = the nodes before it, `uncertain` = the one in flight, the rest unattempted
+ *   BF13  the STORE IDENTITY changing during apply (the reviewer's ruling, commons 47679): when the marker's dataset, epoch or incarnation differs
+ *         from the plan, at the first update or after confirmed progress: the WHOLE run stops, exit 4, `apply.stopped` {code: STORE_IDENTITY_CHANGED,
+ *         fields}, nothing added to the fenced node, no later update, confirmed kept, `uncertain` empty (the update is proven not applied), and a
+ *         restart is a NEW explicit plan. Only isolated throwaway stores are changed.
  *   BF12  the apply-time FENCE: a fact that appears on a node between plan and write, OR a validated identity term that changes (prov:used,
  *         scrum:op, scrum:entityKind, prov:startedAtTime, prov:wasAssociatedWith, scrum:shortId; replaced, or a second value added, or newly
  *         present where preflight saw none), makes that node's guarded update change nothing; the node is refused as `mismatch` naming the
@@ -73,6 +77,7 @@ const PERSON = 'https://scrumboard.local/person/';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const COLUMN_AFTER = `${RS}columnAfter`, HOLDER = `${RS}holderAtWrite`, SHORT = `${RS}shortId`, LOGAT = `${RS}logRecordedAt`;
 const NONE = `${RS}none`, UNKNOWN = `${RS}unknown`;
+const BK = 'urn:scrum:bookkeeping:executor';
 const FACTS = new Set([COLUMN_AFTER, HOLDER, SHORT, LOGAT]);
 const BUCKETS = ['mismatch', 'missingNode', 'missingEvent', 'duplicate', 'badIri'];
 const node = (seq) => `${ACT}seq-${seq}`;
@@ -541,7 +546,7 @@ test('#1762 S3 BF10 — the dry run and --apply classify identically, and a dry 
  * executor applied it, the script cannot know), or cuts it before forwarding (`request-lost`: it never arrived). `beforeForward(bodyText)` runs
  * before the nth is forwarded (the fence rows change a node there). The script sends ONE guarded update per node (v2.2 pin 2, A6).
  */
-async function lossyProxy(executorUrl, { mode = null, nth = 1, beforeForward = null, when = (b) => true } = {}) {
+async function lossyProxy(executorUrl, { mode = null, nth = 1, beforeForward = null, when = (b, n) => true } = {}) {
   const state = { updates: 0, forwarded: 0, bodies: [] };
   const srv = http.createServer(async (req, res) => {
     const chunks = []; for await (const c of req) chunks.push(c);
@@ -550,7 +555,7 @@ async function lossyProxy(executorUrl, { mode = null, nth = 1, beforeForward = n
     let faulted = false;
     if (isUpdate) { state.updates++; state.bodies.push(body.toString('utf8')); faulted = state.updates === nth; }
     if (faulted && mode === 'request-lost') { req.socket.destroy(); return; }
-    if (isUpdate && beforeForward && when(body.toString('utf8'))) await beforeForward(body.toString('utf8'));
+    if (isUpdate && beforeForward && when(body.toString('utf8'), state.updates)) await beforeForward(body.toString('utf8'));
     const up = await fetch(`${executorUrl}${req.url}`, { method: req.method, headers: Object.fromEntries(Object.entries(req.headers).filter(([k]) => !['host', 'connection', 'content-length'].includes(k))), body: body.length ? body : undefined });
     const text = Buffer.from(await up.arrayBuffer());
     if (isUpdate) state.forwarded++;
@@ -699,3 +704,57 @@ test('#1762 S3 BF12b — a term preflight saw ABSENT (an event with no actor has
     } finally { await proxy.close(); }
   }, { events: noActor });
 });
+
+// ── BF13 the store identity changes DURING apply (isolated throwaway store only; the proxy changes the marker itself and verifies it did) ──
+const MARKER_CHANGES = [
+  ['dataset', 'urn:ex:datasetId', () => '"other-dataset"'],
+  ['epoch', 'urn:ex:epoch', (cur) => `"${Number(cur) + 7}"^^<${XSD}integer>`],
+  ['incarnation', 'urn:ex:incarnation', () => '"11111111-2222-3333-4444-555555555555"'],
+];
+for (const [field, pred, newLit] of MARKER_CHANGES) {
+  for (const nth of [1, 3]) {
+    test(`#1762 S3 BF13 — the ${field} changes ${nth === 1 ? 'at the FIRST update' : 'after TWO confirmed nodes'}: the whole run stops, exit 4, apply.stopped STORE_IDENTITY_CHANGED naming ${field}, the fenced node untouched, no later update, a restart is a NEW explicit plan`, T, async () => {
+      await world(async ({ cliVia, cli, x, base, report, q, factsOf, health }) => {
+        const markerOf = async () => Object.fromEntries((await q(`SELECT ?p ?o WHERE { GRAPH <${BK}> { <urn:ex:dataset> ?p ?o } }`)).map((b) => [b.p.value, b.o.value]));
+        const before = await markerOf();
+        let proven = null;
+        const proxy = await lossyProxy(x.baseUrl, {
+          when: (body, n) => n === nth,
+          beforeForward: async (body) => {
+            const cur = (await (await fetch(`${x.baseUrl}/health`)).json()).epoch;
+            const r = await fetch(`${x.baseUrl}/update`, { method: 'POST', headers: { 'content-type': 'application/sparql-update', 'x-op-id': `urn:ex:op/test/bf1762-marker/${crypto.randomUUID()}`, 'x-epoch': String(cur), [WRITE_PROTOCOL_HEADER]: WRITE_PROTOCOL },
+              body: `DELETE { GRAPH <${BK}> { <urn:ex:dataset> <${pred}> ?o } } INSERT { GRAPH <${BK}> { <urn:ex:dataset> <${pred}> ${newLit(cur)} } } WHERE { GRAPH <${BK}> { <urn:ex:dataset> <${pred}> ?o } }` });
+            assert.equal(r.status, 200, `PRECONDITION: the proxy changed the marker (${r.status} ${(await r.text()).slice(0, 160)})`);
+            const after = await markerOf();
+            assert.notEqual(after[pred], before[pred], `PRECONDITION (independent check): the marker's ${field} really differs now (${before[pred]} -> ${after[pred]})`);
+            proven = { before: before[pred], after: after[pred] };
+          },
+        });
+        let touched = null;
+        try {
+          const r = await cliVia(proxy.url, [...base, '--apply']);
+          assert.ok(proven, 'PRECONDITION: the marker was changed before the update was forwarded');
+          assert.equal(r.status, 4, `an identity change during apply is exit 4 (interrupted apply), not 3 and not 0 (got ${r.status}: ${(r.err || r.out).slice(-300)})`);
+          const j = report(r, `${field}@${nth}`);
+          assert.equal(j.apply?.stopped?.code, 'STORE_IDENTITY_CHANGED', `apply.stopped names the code (got ${JSON.stringify(j.apply)})`);
+          assert.deepEqual(j.apply?.stopped?.fields, [field], `and the field that changed, and only it`);
+          assert.equal(j.apply.confirmed.length, nth - 1, `confirmed keeps exactly the nodes confirmed against the ORIGINAL plan (${nth - 1})`);
+          assert.deepEqual(j.apply.uncertain, [], 'uncertain is empty: the guarded update is PROVEN not to have applied, so no uncertain node is manufactured');
+          assert.deepEqual(flat(j, 'stopped'), emptyBuckets, 'and the store change is NOT reported as a per-node mismatch');
+          assert.equal(proxy.state.updates, nth, `the run stopped at the fenced update: nothing after it was dispatched (${proxy.state.updates} updates)`);
+          assert.equal((await servedWithLogAt(q)).length, nth - 1, `the store holds exactly the ${nth - 1} confirmed node(s) and nothing for the fenced one`);
+          touched = await servedWithLogAt(q);
+          for (const n of j.apply.confirmed) assert.ok(touched.includes(Number(n)), `confirmed node ${n} really is in the store`);
+        } finally { await proxy.close(); }
+        // a restart is a NEW explicit plan against whatever the store is now: it names the store as it is, and finishes what is left
+        const m = await markerOf();
+        const restart = await cliVia(x.baseUrl, ['--executor', '@EXECUTOR', '--dataset', m['urn:ex:datasetId'], '--log', base[base.indexOf('--log') + 1], '--apply']);
+        assert.equal(restart.status, 0, `a NEW run that names the store as it now is completes (got ${restart.status}: ${(restart.err || restart.out).slice(-300)})`);
+        const j2 = report(restart, 'restart');
+        assert.equal(j2.written + j2.alreadyCurrent, SERVED_SEQS.length, 'and accounts for every node: written now or already current');
+        assert.equal(j2.alreadyCurrent, nth - 1, `the ${nth - 1} node(s) confirmed before the change are recognised as current, not written twice`);
+        assert.equal((await servedWithLogAt(q)).length, SERVED_SEQS.length, 'every served node ends with its logRecordedAt, once');
+      });
+    });
+  }
+}
