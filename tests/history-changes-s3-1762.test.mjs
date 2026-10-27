@@ -30,7 +30,7 @@
  *   CH17 a KNOWN lane keeps its cursor when F appears, and /api/changes reads with F present never move it (a control: S3 changes no lane)
  *   CH18 a write that lands between the page's reads never yields a MIXED answer (one snapshot, or a 503); CH19 a post-F S2 refusal record is served, two of one
  *         entity are two rows; CH20 a receipt and its native activity are ONE row; CH21 the `since` cutoff compares the full instant; CH22 a frontierLogSeq past the
- *         safe integers, and a marker with no commitSeq or two, are refused 503 (a marker fault: HISTORY_FRONTIER_INVALID or GRAPH_EXECUTOR_UNAVAILABLE, not pinned); CH24 no F and an unreadable or malformed store marker is a 503 GRAPH_EXECUTOR_UNAVAILABLE, never a log-only answer; CH23 the F read failing after the cards guard passed is
+ *         safe integers, and a marker with no commitSeq or two, are refused 503 (a marker fault: HISTORY_FRONTIER_INVALID or GRAPH_EXECUTOR_UNAVAILABLE, not pinned); CH25 a post keeps its payload, redaction and paging with F on; CH26 no F and a malformed marker term (type, datatype, range, incarnation syntax) is refused like CH24; CH24 no F and an unreadable or malformed store marker is a 503 GRAPH_EXECUTOR_UNAVAILABLE, never a log-only answer; CH23 the F read failing after the cards guard passed is
  *         503 GRAPH_EXECUTOR_UNAVAILABLE (CH18-CH22 are the integration review's reproductions at e32b0c2; CH9 now runs LAST because it kills the executor)
  *   CH16 reproject: derived, history-only (never latest, not counted by default; op update / nativeOp reproject with history:true, counted)
  *   CH15 walking backward: every native row exactly once, no commit split across pages
@@ -62,7 +62,7 @@ import { HAVE_PY, PY, killExecutor } from './helpers/graph-executor-proc.mjs';
 import { wholeBoardWorld, WB_DATASET } from './helpers/whole-board-1645.mjs';
 import { startRestServer } from './helpers/harness.mjs';
 import { mintToken, hashToken } from '../core/credentials.mjs';
-import { WRITE_PROTOCOL, WRITE_PROTOCOL_HEADER } from '../core/graph-client.mjs';
+import { WRITE_PROTOCOL, WRITE_PROTOCOL_HEADER, createGraphClient } from '../core/graph-client.mjs';
 
 const T = { skip: HAVE_PY ? false : `UNAVAILABLE: no python with pyoxigraph at ${PY} (a skip is not a pass)`, timeout: 240000 };
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -778,6 +778,82 @@ for (const [label, rewrite] of [
   test(`#1762 S3 CH24 — NO frontier and ${label}: 503 GRAPH_EXECUTOR_UNAVAILABLE with no rows and no cursor, never a log-only answer (confirmed absence of F is not enough without a readable store marker)`, T, async () => {
     await W.clearFrontier();
     const proxy = await interpose({ rewrite: async (q, buf) => { if (!FRONTIER_READ(q)) return null; const j = JSON.parse(buf.toString()); j.results.bindings = rewrite(j.results.bindings); return Buffer.from(JSON.stringify(j)); } });
+    let server = null;
+    try {
+      server = await W.startRest({ SCRUM_GRAPH_EXECUTOR_URL: proxy.url });
+      proxy.state.rewritten = 0;
+      const r = await server.get(`/api/changes?since=${SINCE_ALL}&history=true`);
+      assert.ok(proxy.state.rewritten >= 1, `PRECONDITION: the interposer rewrote the marker read (${proxy.state.rewritten})`);
+      assert.equal(r.status, 503, `(got ${r.status}: ${r.text.slice(0, 200)})`);
+      assert.equal(r.json?.code, 'GRAPH_EXECUTOR_UNAVAILABLE', `named (got ${r.json?.code})`);
+      assert.equal(r.json?.changes, undefined, 'no rows (no log fallback)');
+      assert.equal(r.json?.cursor, undefined, 'and no cursor');
+    } finally { if (server) await server.stop(); await proxy.close(); }
+  });
+}
+
+// ── CH25 a post keeps the conversations unit's payload, redaction and paging when F and native history are on ──
+/** every row that names `id`, as `op:title`, in a default view and a history view: the shape of what a reader of the post sees */
+async function postViews(id) {
+  const out = {};
+  for (const [label, qs] of [['default', `since=${SINCE_ALL}`], ['history', `since=${SINCE_ALL}&history=true`]]) {
+    const j = await changesOf(qs);
+    out[label] = j.changes.filter((r) => r.kind === 'conversation' && String(r.id ?? '').endsWith(id)).map((r) => `${r.op}:${r.title}`).sort();
+  }
+  return out;
+}
+const redactPost = async (id) => {
+  const r = await createGraphClient({ baseUrl: W.exec.baseUrl, expectedDatasetId: WB_DATASET }).update({ kind: 'post.redact', opId: `urn:ex:op/redact/${id}`, actor: `${PERSON}ada`, post: { id }, authorityRef: 'test-authority-ref', occurredAt: new Date().toISOString() });
+  assert.equal(r.outcome, 'APPLIED', `PRECONDITION: the post is redacted (${JSON.stringify(r)})`);
+};
+test('#1762 S3 CH25a — a VISIBLE post written AFTER F reads as it does with F absent: op post, its text as the title, in the default AND the history view (the conversations unit stays authoritative for payload)', T, async () => {
+  await W.plantFrontier();                                    // F first: the post is a NATIVE write past F, the case the review reproduced
+  const body = `POST PAYLOAD MUST SURVIVE S3 ${crypto.randomUUID().slice(0, 8)}`;
+  const created = await W.send('POST', '/api/conversations', { author: 'ada', body });
+  assert.equal(created.status, 201, `PRECONDITION: the post is written (${created.status} ${created.text.slice(0, 200)})`);
+  const withF = await postViews(created.json.id);
+  const row = (await changesOf(`since=${SINCE_ALL}&history=true`)).changes.find((r) => r.kind === 'conversation' && String(r.id ?? '').endsWith(created.json.id));
+  await W.clearFrontier();
+  const without = await postViews(created.json.id);
+  assert.deepEqual(without.history, [`post:${body}`], `CONTROL: with no F the post is one row carrying its text (got ${JSON.stringify(without)})`);
+  assert.deepEqual(withF, without, 'with F present the post is the same rows with the same text, in both views: a generic activity row never replaces it');
+  assert.equal(withF.default.length, 1, 'exactly ONE row in the default (latest) view'); assert.equal(withF.history.length, 1, 'and exactly one in the history view: never the post and a twin');
+  assert.ok(row?.graph?.opId && Number.isInteger(row.graph.part) && typeof row.graph.nativeOp === 'string', `and it keeps the native provenance: opId, part and nativeOp (got ${JSON.stringify(row?.graph)})`);
+});
+test('#1762 S3 CH25b — a post REDACTED after F carries NONE of its text in the answer, reads as it does with F absent, and a visible post beside it keeps its text', T, async () => {
+  await W.plantFrontier();
+  const secret = `REDACTED SECRET ${crypto.randomUUID().slice(0, 8)}`, visible = `VISIBLE ${crypto.randomUUID().slice(0, 8)}`;
+  const a = await W.send('POST', '/api/conversations', { author: 'ada', body: secret });
+  const b = await W.send('POST', '/api/conversations', { author: 'bob', body: visible });
+  assert.equal(a.status, 201); assert.equal(b.status, 201);
+  await redactPost(a.json.id);
+  const withF = await postViews(a.json.id), visibleWithF = await postViews(b.json.id);
+  const all = await W.get(`/api/changes?since=${SINCE_ALL}&history=true`);
+  assert.ok(!all.text.includes(secret), 'no part of the answer carries the redacted text');
+  assert.ok(all.text.includes(visible), 'and the visible post beside it still carries its text');
+  await W.clearFrontier();
+  const without = await postViews(a.json.id);
+  assert.ok(without.history.length >= 1 && without.history.every((x) => x.endsWith(':null') || x.startsWith('redact:')), `CONTROL: with no F every row naming the redacted post has a null title (got ${JSON.stringify(without)})`);
+  assert.deepEqual(withF, without, 'with F present the redacted post reads exactly as with F absent');
+  assert.deepEqual(visibleWithF, await postViews(b.json.id), 'and the visible post is unchanged by F');
+});
+
+// ── CH26 no F, a store marker whose terms are malformed ──
+const MARKER_FAULTS = [
+  ['incarnation is not an incarnation', 'urn:ex:incarnation', { type: 'literal', value: 'not-an-incarnation' }],
+  ['incarnation is a URI', 'urn:ex:incarnation', { type: 'uri', value: 'urn:ex:not-a-literal' }],
+  ['epoch is zero', 'urn:ex:epoch', { type: 'literal', datatype: `${XSD}integer`, value: '0' }],
+  ['epoch is a string, not an integer', 'urn:ex:epoch', { type: 'literal', datatype: `${XSD}string`, value: '1' }],
+  ['epoch is a URI', 'urn:ex:epoch', { type: 'uri', value: '1' }],
+  ['commitSeq is negative', 'urn:ex:commitSeq', { type: 'literal', datatype: `${XSD}integer`, value: '-1' }],
+  ['commitSeq is a URI', 'urn:ex:commitSeq', { type: 'uri', value: '10' }],
+  ['commitSeq is a string, not an integer', 'urn:ex:commitSeq', { type: 'literal', datatype: `${XSD}string`, value: '10' }],
+  ['commitSeq is past the safe integers', 'urn:ex:commitSeq', { type: 'literal', datatype: `${XSD}integer`, value: '9007199254740993' }],
+];
+for (const [label, pred, term] of MARKER_FAULTS) {
+  test(`#1762 S3 CH26 — NO frontier and ${label}: 503 GRAPH_EXECUTOR_UNAVAILABLE with no rows and no cursor (no-F needs a genuinely readable marker, not three cardinalities)`, T, async () => {
+    await W.clearFrontier();
+    const proxy = await interpose({ rewrite: async (q, buf) => { if (!FRONTIER_READ(q)) return null; const j = JSON.parse(buf.toString()); j.results.bindings = j.results.bindings.map((b) => (MARKER_ROW(b) && b.p?.value === pred ? { ...b, o: term } : b)); return Buffer.from(JSON.stringify(j)); } });
     let server = null;
     try {
       server = await W.startRest({ SCRUM_GRAPH_EXECUTOR_URL: proxy.url });
