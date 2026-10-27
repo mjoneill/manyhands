@@ -17,12 +17,12 @@
  *   C   nothing writes the file: its bytes and mtime are unchanged after create, update, move, claim, get and board_status
  *   B   board_status reports the ledger as retired, with the file made UNREADABLE (nothing reads it)
  *   E   (source) the four work modules are gone and nothing imports them; server.js no longer calls projectWorkLedger
+ *   B2  board_status's counts come from the GRAPH (a seeded executor: 2 WorkObjects, 3 Actions), with the file unreadable and disagreeing
+ *   D1/D2 the activity projector, with and without --work, runs to completion and writes no Action (--work is accepted but ignored, with a stderr line)
  *   F   GUARD: the claim throttle (kept) still refuses a second seat inside the cooldown, with the gate flags absent
  *
- * TODO rows (node:test `todo`, NOT passes), each waiting on a fact the build will settle:
- *   B2  the counts board_status reports come from the graph (needs a seeded executor world and the shape the build chooses)
- *   D   the projector without --work writes no Action, and graph counts stay put (needs the projector's command line in the new shape)
- *   E2  sprint-signals reports signal 2 as retired and never imports a deleted module (needs how it reads the graph)
+ * TODO rows (node:test `todo`, NOT passes):
+ *   E2  sprint-signals reports signal 2 as retired ({retired, since, workObjects}) and never imports a deleted module (needs the review script's own graph arguments)
  *
  * NOT COVERED, BY NAME: the plist edits themselves (the morning window, with the owner present); the two WorkObjects whose
  * scrum:requiredRaw holds task descriptions (the owner's one-line question); cursors.json (kept, and mis-registered under
@@ -35,7 +35,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
 import { startRestServer, startMcpServer, mcpSession, makeBoardFixture } from './helpers/harness.mjs';
+import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-executor-proc.mjs';
+import { createGraphClient } from '../core/graph-client.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, '..');
@@ -125,6 +128,9 @@ test('#1763 B — board_status reports the ledger as RETIRED, with the file made
       assert.ok(status.workLedger && typeof status.workLedger === 'object', `B: board_status still carries a workLedger summary (keys: ${Object.keys(status).slice(0, 12).join(', ')})`);
       assert.equal(status.workLedger.retired, true, `B: it says retired (got ${JSON.stringify(status.workLedger).slice(0, 200)})`);
       assert.equal(status.workLedger.open, undefined, 'B: and no longer lists open windows from a file');
+      assert.equal(status.workLedger.actions, null, 'B: with no executor the count is null, never a fabricated 0');
+      assert.equal(status.workLedger.workObjects, null, 'B: and so is the WorkObject count');
+      assert.equal(typeof status.workLedger.unavailable, 'string', 'B: and the reply says why (unavailable: <reason>)');
     });
   } finally { fs.chmodSync(file, 0o644); }
 });
@@ -152,8 +158,63 @@ test('#1763 F — GUARD: the claim throttle is KEPT: a second seat inside the co
   });
 });
 
+// ── executor-backed rows: B2, D1, D2 ──
+const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)';
+const TX = { skip: SKIP, timeout: 300000 };
+const RS = 'https://scrumboard.local/ns#';
+const ACTION = 'https://schema.org/Action', WORKOBJ = `${RS}WorkObject`, OFWORK = `${RS}ofWork`;
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const DS = 'wl-1763';
+async function withExecutor(fn) {
+  const store = tmpStore('wl-1763-');
+  const exec = await startExecutor({ store, datasetId: DS, create: true });
+  const gc = createGraphClient({ baseUrl: exec.baseUrl, expectedDatasetId: DS, timeoutMs: 30000, label: 'wl-1763' });
+  const q = async (sparql) => { const r = await gc.query(sparql); assert.ok(r.ok, `the executor answered (${r.reason})`); return r.rows; };
+  const counts = async () => { const a = await q(`SELECT (COUNT(DISTINCT ?a) AS ?n) WHERE { ?a <${RDF_TYPE}> <${ACTION}> }`); const w = await q(`SELECT (COUNT(DISTINCT ?w) AS ?n) WHERE { ?w <${RDF_TYPE}> <${WORKOBJ}> }`); return { actions: Number(a[0].n.value), workObjects: Number(w[0].n.value) }; };
+  try { await fn({ exec, q, counts, store }); } finally { await killExecutor(exec); fs.rmSync(store, { recursive: true, force: true }); fs.rmSync(`${store}.checkpoints`, { recursive: true, force: true }); }
+}
+const runProjector = (args) => new Promise((resolve) => {
+  const p = spawn(process.execPath, [path.join(ROOT, 'scripts', 'activity-projector.mjs'), ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '', err = ''; p.stdout.on('data', (d) => { out += d; }); p.stderr.on('data', (d) => { err += d; });
+  const timer = setTimeout(() => p.kill('SIGKILL'), 120000);
+  p.on('close', (status) => { clearTimeout(timer); resolve({ status, out, err }); });
+});
+
+test('#1763 B2 — board_status\'s ledger counts come from the GRAPH: seeded Actions and WorkObjects are counted, with the file unreadable', TX, async () => {
+  await withExecutor(async ({ exec }) => {
+    const { dir, file } = storeWithOpenWindow();   // a file that disagrees with the graph on purpose: it is never read
+    fs.chmodSync(file, 0o000);
+    const ep = (await (await fetch(`${exec.baseUrl}/health`)).json()).epoch;
+    const seed = await fetch(`${exec.baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/wl-1763-seed-${process.pid}-${Date.now()}`, 'x-epoch': String(ep) },
+      body: `INSERT DATA { <entity:work/wl-a> <${RDF_TYPE}> <${WORKOBJ}> . <entity:work/wl-b> <${RDF_TYPE}> <${WORKOBJ}> .
+        <urn:wl:action/1> <${RDF_TYPE}> <${ACTION}> ; <${OFWORK}> <entity:work/wl-a> . <urn:wl:action/2> <${RDF_TYPE}> <${ACTION}> ; <${OFWORK}> <entity:work/wl-a> . <urn:wl:action/3> <${RDF_TYPE}> <${ACTION}> ; <${OFWORK}> <entity:work/wl-b> . }` });
+    assert.equal(seed.status, 200, `PRECONDITION: the graph is seeded with 2 WorkObjects and 3 Actions (${seed.status} ${(await seed.text()).slice(0, 160)})`);
+    const rest = await startRestServer({ board: board(), env: { SCRUM_GRAPH_DATASET_ID: DS, SCRUM_GRAPH_EXECUTOR_URL: exec.baseUrl, SCRUM_GRAPH_QUERY_SOURCE: 'executor' } });
+    const mcp = await startMcpServer({ restApiBase: rest.baseUrl, env: oldPlist(dir) });
+    try {
+      const session = await mcpSession(mcp.mcpUrl);
+      const text = (await session.callTool('board_status', {})).result.content[0].text;
+      let status; try { status = JSON.parse(text); } catch { assert.fail(`B2: board_status did not answer JSON; it said: ${text.slice(0, 160)}`); }
+      assert.deepEqual({ retired: status.workLedger?.retired, actions: status.workLedger?.actions, workObjects: status.workLedger?.workObjects }, { retired: true, actions: 3, workObjects: 2 }, `B2: the ledger summary is the graph's counts (got ${JSON.stringify(status.workLedger).slice(0, 200)})`);
+    } finally { await mcp.stop(); await rest.stop(); fs.chmodSync(file, 0o644); }
+  });
+});
+
+// D: the projector's work half is gone. Today the CLI REQUIRES --work (exit 2 without it) and, given it, projects every line as Actions.
+for (const withWork of [false, true]) {
+  test(`#1763 D${withWork ? '2' : '1'} — the activity projector ${withWork ? 'WITH' : 'WITHOUT'} --work runs to completion and writes NO Action${withWork ? ', saying that --work is ignored' : ''}`, TX, async () => {
+    await withExecutor(async ({ exec, counts }) => {
+      const { dir } = storeWithOpenWindow();
+      const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wl-1763-log-'));
+      const before = await counts();
+      const r = await runProjector(['--log', logDir, ...(withWork ? ['--work', dir] : []), '--executor', exec.baseUrl, '--once']);
+      assert.equal(r.status, 0, `D: the projector ${withWork ? 'accepts' : 'no longer requires'} --work and exits 0 (exit ${r.status}: ${(r.err || r.out).slice(-200)})`);
+      assert.deepEqual(await counts(), before, `D: the graph's Action and WorkObject counts are unchanged (${JSON.stringify(before)})`);
+      if (withWork) assert.ok(r.err.includes('work ledger retired (#1763): --work ignored'), `D2: it says so on stderr (stderr: ${r.err.slice(0, 200)})`);
+    });
+  });
+}
+
 // ── TODO rows: node:test reports them as todo, never as a pass ──
 const TODO = (why) => ({ todo: why });
-test('#1763 B2 — board_status\'s ledger counts come from the graph', TODO('needs a seeded executor world and the count shape the build chooses'), async () => { assert.fail('awaiting the build'); });
-test('#1763 D — the activity projector without --work writes no Action, and the graph\'s Action and WorkObject counts stay put', TODO('needs the projector\'s command line in its new shape'), async () => { assert.fail('awaiting the build'); });
 test('#1763 E2 — sprint-signals reports signal 2 as retired and imports no deleted module', TODO('needs how signal 2 reads the graph (the contract says it reads the WorkObjects)'), async () => { assert.fail('awaiting the build'); });
