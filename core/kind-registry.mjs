@@ -200,7 +200,8 @@ export const KIND_DECLARATIONS = Object.freeze([
   {
     name: 'scrum:RosterRoles', eventKind: null, collection: null,
     createdBy: 'POST /api/roster with roles (#1368, #1764)',
-    definition: 'The roster\'s role grants: which seat holds the Product Owner role (roles.po).',
+    definition: 'The roster\'s role grants, as one node beside its seats: which configured seat holds the Product Owner role '
+      + '(roles.po, #1368). Saved with the roster; a save that names no roles keeps the current grant.',
   },
   {
     name: 'scrum:ChannelConfig', eventKind: null, collection: null,
