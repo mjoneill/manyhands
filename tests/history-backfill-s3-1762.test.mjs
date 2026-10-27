@@ -34,6 +34,18 @@
  *         from the plan, at the first update or after confirmed progress: the WHOLE run stops, exit 4, `apply.stopped` {code: STORE_IDENTITY_CHANGED,
  *         fields}, nothing added to the fenced node, no later update, confirmed kept, `uncertain` empty (the update is proven not applied), and a
  *         restart is a NEW explicit plan. Only isolated throwaway stores are changed.
+ *   BF14  UPDATE_REFUSED (approved, commons 47685): a COMPLETE refusal on a stable store PROVEN not applied is exit 4, `apply.stopped` {code: UPDATE_REFUSED,
+ *         status}, later writes stopped, prior confirmations kept, `uncertain` empty. A non-200 ALONE is not that proof: an update the executor applied and then
+ *         answered 500 is never reported as proven-not-applied (the node is confirmed or uncertain, never silently absent)
+ *   BF15  the fence covers PRE-EXISTING validated facts too: a node that already has the right column (or holder, or timestamp) and needs the others, whose
+ *         existing fact changes between plan and write, gets NOTHING added (all-or-nothing), and is refused naming the changed fact
+ *   BF16  term KIND is validated, not text: prov:used / prov:wasAssociatedWith as a plain literal with the IRI's text, a holder as a literal, a
+ *         logRecordedAt as an xsd:string, are mismatches, never accepted by lexical equality
+ *   BF17  timestamps compare at FULL precision: a microsecond difference is a mismatch (logRecordedAt and startedAtTime), never rounded away
+ *   BF18  a NONCANONICAL alias (activity/seq-04 beside seq-4) is reported by its IRI, never collapsed into the canonical node (whether it counts in
+ *         scanned.nodes is a definition left open: both are accepted), and the canonical node is still completed
+ *   BF19  the readback does NOT scale with the node count: the number of whole-population activity enumerations during an apply is the same for a 14-node
+ *         world and a larger one
  *   BF12  the apply-time FENCE: a fact that appears on a node between plan and write, OR a validated identity term that changes (prov:used,
  *         scrum:op, scrum:entityKind, prov:startedAtTime, prov:wasAssociatedWith, scrum:shortId; replaced, or a second value added, or newly
  *         present where preflight saw none), makes that node's guarded update change nothing; the node is refused as `mismatch` naming the
@@ -393,7 +405,7 @@ test('#1762 S3 BF6d — an activity IRI that is not seq-<digits> is refused as `
 // BF6e..k: what a pair is validated AGAINST, and the pre-existing facts that must agree. A contradiction is a `mismatch`, listed and NEVER overwritten.
 const mismatchCase = (name, seq, field, plant) => test(`#1762 S3 BF6${name}`, T, async () => {
   await world(async ({ cli, base, upd, factsOf, report }) => {
-    await plant(upd);
+    await plant(upd, { factsOf });
     const before = await factsOf(node(seq));
     const r = await cli([...base, '--apply']);
     assert.equal(r.status, 3, `a contradicted node exits 3 (got ${r.status}: ${(r.err || r.out).slice(-300)})`);
@@ -547,19 +559,22 @@ test('#1762 S3 BF10 — the dry run and --apply classify identically, and a dry 
  * before the nth is forwarded (the fence rows change a node there). The script sends ONE guarded update per node (v2.2 pin 2, A6).
  */
 async function lossyProxy(executorUrl, { mode = null, nth = 1, beforeForward = null, when = (b, n) => true } = {}) {
-  const state = { updates: 0, forwarded: 0, bodies: [] };
+  const state = { updates: 0, forwarded: 0, bodies: [], queries: [] };
   const srv = http.createServer(async (req, res) => {
     const chunks = []; for await (const c of req) chunks.push(c);
     const body = Buffer.concat(chunks);
     const isUpdate = req.method === 'POST' && req.url.startsWith('/update');
     let faulted = false;
     if (isUpdate) { state.updates++; state.bodies.push(body.toString('utf8')); faulted = state.updates === nth; }
+    if (req.method === 'POST' && req.url.startsWith('/query')) state.queries.push(body.toString('utf8'));
     if (faulted && mode === 'request-lost') { req.socket.destroy(); return; }
+    if (faulted && mode === 'refuse-409') { res.writeHead(409, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'refused by the test proxy', code: 'TEST_REFUSED' })); return; }   // never forwarded: proven not applied
     if (isUpdate && beforeForward && when(body.toString('utf8'), state.updates)) await beforeForward(body.toString('utf8'));
     const up = await fetch(`${executorUrl}${req.url}`, { method: req.method, headers: Object.fromEntries(Object.entries(req.headers).filter(([k]) => !['host', 'connection', 'content-length'].includes(k))), body: body.length ? body : undefined });
     const text = Buffer.from(await up.arrayBuffer());
     if (isUpdate) state.forwarded++;
     if (faulted && mode === 'ack-lost') { req.socket.destroy(); return; }
+    if (faulted && mode === 'applied-then-500') { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'the proxy answered 500 AFTER the executor applied it' })); return; }
     res.writeHead(up.status, { 'content-type': up.headers.get('content-type') ?? 'application/json' }); res.end(text);
   });
   await new Promise((r) => srv.listen(0, '127.0.0.1', r)); owned.servers.add(srv);
@@ -758,3 +773,128 @@ for (const [field, pred, newLit] of MARKER_CHANGES) {
     });
   }
 }
+
+// ── BF14 UPDATE_REFUSED ──
+for (const nth of [1, 3]) {
+  test(`#1762 S3 BF14a — a COMPLETE refusal on a stable store, proven not applied (${nth === 1 ? 'the first update' : 'after two confirmed nodes'}): exit 4, apply.stopped UPDATE_REFUSED with its status, later writes stopped, confirmed kept, uncertain EMPTY`, T, async () => {
+    await world(async ({ cliVia, x, base, report, q, factsOf }) => {
+      const proxy = await lossyProxy(x.baseUrl, { mode: 'refuse-409', nth });
+      try {
+        const r = await cliVia(proxy.url, [...base, '--apply']);
+        assert.equal(r.status, 4, `an interrupted apply is exit 4 (got ${r.status}: ${(r.err || r.out).slice(-300)})`);
+        const j = report(r, 'update refused');
+        assert.equal(j.apply?.stopped?.code, 'UPDATE_REFUSED', `apply.stopped names the code (got ${JSON.stringify(j.apply)})`);
+        assert.equal(j.apply.stopped.status, 409, 'and the status the executor answered');
+        assert.equal(j.apply.confirmed.length, nth - 1, 'confirmed keeps exactly the nodes confirmed before it');
+        assert.deepEqual(j.apply.uncertain, [], 'uncertain is EMPTY: the store is stable and the update is proven not applied');
+        assert.equal(proxy.state.updates, nth, 'nothing after the refused update was dispatched');
+        assert.deepEqual(flat(j, 'refused'), emptyBuckets, 'and it is not a per-node mismatch');
+        assert.equal((await servedWithLogAt(q)).length, nth - 1, 'the store holds only the confirmed nodes');
+      } finally { await proxy.close(); }
+    });
+  });
+}
+test('#1762 S3 BF14b — a non-200 ALONE is not proof: an update the executor APPLIED and then answered 500 is never reported proven-not-applied; its node is confirmed or uncertain, never absent', T, async () => {
+  await world(async ({ cliVia, x, base, report, q }) => {
+    const proxy = await lossyProxy(x.baseUrl, { mode: 'applied-then-500', nth: 2 });
+    try {
+      const r = await cliVia(proxy.url, [...base, '--apply']);
+      assert.equal(r.status, 4, `(got ${r.status}: ${(r.err || r.out).slice(-300)})`);
+      const j = report(r, 'applied then 500');
+      const inStore = await servedWithLogAt(q);
+      const accounted = new Set([...(j.apply?.confirmed ?? []), ...(j.apply?.uncertain ?? [])].map(Number));
+      for (const n of inStore) assert.ok(accounted.has(n), `node ${n} IS in the store, so it must be confirmed or uncertain, not silently absent from the report (got ${JSON.stringify(j.apply)})`);
+      assert.equal(proxy.state.updates, 2, 'and the run stopped there');
+    } finally { await proxy.close(); }
+  });
+});
+
+// ── BF15 the fence covers pre-existing validated facts ──
+const EXISTING = [
+  ['columnAfter', LOCAL.column, `<${node(4)}> <${COLUMN_AFTER}> "done" .`, `DELETE { <${node(4)}> <${COLUMN_AFTER}> ?o } INSERT { <${node(4)}> <${COLUMN_AFTER}> "changed-under-it" } WHERE { <${node(4)}> <${COLUMN_AFTER}> ?o }`, [HOLDER, LOGAT]],
+  ['holderAtWrite', LOCAL.holder, `<${node(4)}> <${HOLDER}> <${PERSON}ada> .`, `DELETE { <${node(4)}> <${HOLDER}> ?o } INSERT { <${node(4)}> <${HOLDER}> <${PERSON}mallory> } WHERE { <${node(4)}> <${HOLDER}> ?o }`, [COLUMN_AFTER, LOGAT]],
+  ['logRecordedAt', LOCAL.logAt, `<${node(4)}> <${LOGAT}> "${recordedAtOf(4)}"^^<${XSD}dateTime> .`, `DELETE { <${node(4)}> <${LOGAT}> ?o } INSERT { <${node(4)}> <${LOGAT}> "2001-01-01T00:00:00.000Z"^^<${XSD}dateTime> } WHERE { <${node(4)}> <${LOGAT}> ?o }`, [COLUMN_AFTER, HOLDER]],
+];
+for (const [label, field, plant, change, missing] of EXISTING) {
+  test(`#1762 S3 BF15 — a node that ALREADY has the right ${label} and needs the others: if that existing fact changes between plan and write, NOTHING is added to the node and it is refused naming ${field}`, T, async () => {
+    await world(async ({ cliVia, x, base, report, upd, factsOf }) => {
+      await upd(`INSERT DATA { ${plant} }`);
+      const proxy = await lossyProxy(x.baseUrl, { beforeForward: () => upd(change), when: (body) => body.includes(node(4)) });
+      let m = null;
+      try {
+        const r = await cliVia(proxy.url, [...base, '--apply']);
+        assert.equal(r.status, 3, `a node whose existing fact changed is a refusal, exit 3 (got ${r.status}: ${(r.err || r.out).slice(-300)})`);
+        const got = flat(report(r, 'existing fact'), 'existing fact');
+        assert.deepEqual(got.mismatch, [4], 'node 4 is listed');
+        assert.ok(got.mismatchFields[4].includes(field), `naming the existing fact that changed (${field}); got ${JSON.stringify(got.mismatchFields[4])}`);
+        m = await factsOf(node(4));
+      } finally { await proxy.close(); }
+      for (const p of missing) assert.equal(m[p], undefined, `all-or-nothing: the fact ${p.replace(RS, 'scrum:')} that the plan would have ADDED is not on the node (the refused pair is untouched)`);
+    });
+  });
+}
+
+// ── BF16 term KIND, not text ──
+const lit = (v) => JSON.stringify(v);
+mismatchCase('s — (BF16, term kind) prov:used as a PLAIN LITERAL with the IRI\'s text (an event names an IRI, not a string that looks like one) is refused as mismatch, untouched', 4, LOCAL.used,
+  (upd) => upd(swap(4, `${PROV}used`, lit(`${ENT}uuid-a`))));
+mismatchCase('t — (BF16, term kind) prov:wasAssociatedWith as a plain literal with the IRI\'s text is refused as mismatch, untouched', 4, LOCAL.actor,
+  (upd) => upd(swap(4, `${PROV}wasAssociatedWith`, lit(`${PERSON}ada`))));
+mismatchCase('u — (BF16, term kind) an existing holderAtWrite that is a literal with the right IRI text (not an IRI) is refused as mismatch, untouched', 4, LOCAL.holder,
+  (upd) => upd(`INSERT DATA { <${node(4)}> <${HOLDER}> ${lit(`${PERSON}ada`)} . }`));
+mismatchCase('v — (BF16, term kind) an existing logRecordedAt that is an xsd:string (not an xsd:dateTime) with the right instant is refused as mismatch, untouched', 4, LOCAL.logAt,
+  (upd) => upd(`INSERT DATA { <${node(4)}> <${LOGAT}> ${lit(recordedAtOf(4))} . }`));
+
+// ── BF17 full precision ──
+mismatchCase('w — (BF17, precision) a logRecordedAt that differs from the event\'s by ONE MICROSECOND is refused as mismatch (the executor keeps the microsecond literal; a millisecond compare would miss it)', 4, LOCAL.logAt,
+  async (upd, { factsOf }) => {
+    await upd(`INSERT DATA { <${node(4)}> <${LOGAT}> "2026-10-20T10:04:00.000001Z"^^<${XSD}dateTime> . }`);
+    assert.match((await factsOf(node(4)))[LOGAT][0].value, /00\.000001Z$/, 'PRECONDITION (independent check): the store really keeps the microsecond, so the two instants differ');
+  });
+mismatchCase('x — (BF17, precision) a startedAtTime that differs from the event\'s time by ONE MICROSECOND is refused as mismatch', 4, LOCAL.time,
+  (upd) => upd(swap(4, `${PROV}startedAtTime`, '"2026-10-20T09:59:00.000001Z"')));
+
+// ── BF18 a noncanonical alias ──
+test('#1762 S3 BF18 — a NONCANONICAL alias (activity/seq-04 beside seq-4) is reported by its IRI, never collapsed into the canonical node, and the canonical node is still completed', T, async () => {
+  await world(async ({ cli, base, upd, q, factsOf, report }) => {
+    const alias = `${ACT}seq-04`;
+    await upd(`INSERT { <${alias}> ?p ?o } WHERE { <${node(4)}> ?p ?o }`);
+    const subjects = Number((await q(`SELECT (COUNT(DISTINCT ?a) AS ?n) WHERE { ?a a <${PROV}Activity> . FILTER(STRSTARTS(STR(?a), "${ACT}seq-")) }`))[0].n.value);
+    assert.equal(subjects, EVENTS.length + 1, 'PRECONDITION: the alias is a separate node beside the canonical one');
+    const r = await cli([...base, '--apply']);
+    assert.equal(r.status, 3, `an alias is a refusal: coverage is not bijective (got ${r.status}: ${(r.err || r.out).slice(-300)})`);
+    const j = report(r, 'alias');
+    // WHETHER a refused alias counts in scanned.nodes is a definition the contract does not settle (a node scanned and refused, or refused before it is scanned), so both are accepted;
+    // what is NOT accepted is the original defect: the two IRIs collapsed into one, with the alias neither counted nor named. Every seq subject is accounted for.
+    assert.ok([subjects - 1, subjects].includes(j.scanned.nodes), `scanned.nodes is the canonical nodes (${subjects - 1}) or every seq subject (${subjects}), never a collapse (got ${j.scanned.nodes})`);
+    const flatAlias = [...j.refused.badIri, ...j.refused.duplicate.map((d) => d.iri).filter(Boolean)];
+    assert.ok(flatAlias.includes(alias), `the alias is named by its IRI in an explicit bucket (got ${JSON.stringify(j.refused)})`);
+    const canonical = await factsOf(node(4));
+    for (const p of [COLUMN_AFTER, HOLDER, LOGAT]) one(canonical, p, 'the CANONICAL seq 4');
+    for (const p of [COLUMN_AFTER, HOLDER, LOGAT]) assert.equal((await factsOf(alias))[p], undefined, `the alias gets no ${p.replace(RS, 'scrum:')}`);
+  });
+});
+
+// ── BF19 the readback does not scale with the node count ──
+async function wholePopulationScans(events) {
+  let count = 0, written = 0;
+  await world(async ({ cliVia, x, base, report }) => {
+    const proxy = await lossyProxy(x.baseUrl, {});
+    try {
+      const r = await cliVia(proxy.url, [...base, '--apply']);
+      assert.equal(r.status, 0, `(got ${r.status}: ${(r.err || r.out).slice(-300)})`);
+      written = report(r, 'scale').written;
+      // a bounded readback names its node (activity/seq-<N>); a whole-population enumeration names only the namespace
+      count = proxy.state.queries.filter((qq) => qq.includes(`${ACT}`) && !/activity\/seq-\d+/.test(qq)).length;
+    } finally { await proxy.close(); }
+  }, { events });
+  return { count, written };
+}
+test('#1762 S3 BF19 — the readback does NOT scale with the node count: the number of whole-population activity enumerations during an apply is the same for the 15-event world and a larger one', T, async () => {
+  const extra = Array.from({ length: 12 }, (_, i) => cardEv(16 + i, 'update', `uuid-x${i}`, 200 + i, { column: 'backlog', claimedBy: null, title: `extra ${i}` }));
+  const small = await wholePopulationScans(EVENTS);
+  const large = await wholePopulationScans([...EVENTS, ...extra]);
+  assert.ok(large.written > small.written, `PRECONDITION: the larger world writes more nodes (${large.written} vs ${small.written})`);
+  assert.ok(small.count >= 1, `PRECONDITION: the proxy counts the census enumeration it can see (${small.count})`);
+  assert.equal(large.count, small.count, `whole-population enumerations must not grow with the node count: ${small.count} for ${small.written} written nodes, ${large.count} for ${large.written} (a per-node readback that rescans every activity is quadratic over ~89k nodes)`);
+});
