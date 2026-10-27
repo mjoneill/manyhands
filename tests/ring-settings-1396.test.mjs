@@ -34,6 +34,7 @@ test('#1396 s2 — a terminal seat is ticked into the ring from Settings, joins 
   try {
     // #1796 — the MCP port is chosen BEFORE REST and Chrome boot (REST needs its notify URL) and bound AFTER, so a stranger can take it in
     // between and the harness will not retry an explicit port. The whole start runs again, with a fresh port, only on that error.
+    // (the body below is deliberately NOT re-indented one level: that keeps this change to the lines that matter under `git diff -w`)
     await retryOnPortContention(async () => {
     const mcpPort = await freePort();
     let mcp = null;

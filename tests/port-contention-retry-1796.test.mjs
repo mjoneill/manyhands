@@ -15,6 +15,7 @@
  *   P5  the contention is REAL here, not simulated: a stranger takes the chosen port before the server binds, the first attempt
  *       fails with the harness's actual error, and the second attempt (a fresh port) starts a working server. This is the card's
  *       RED recipe made deterministic.
+ *   P7  a bound below one is refused up front, with a clear error (it would otherwise run nothing and have nothing to report)
  *   P6  through `withBrowserServer`: a contended start inside its body reaches the retry with the message intact, and the
  *       teardown (server stopped, browser closed) ran on each failed attempt, so a retry leaks nothing
  */
@@ -100,4 +101,13 @@ test('#1796 P6 — through withBrowserServer: the contended start reaches the re
   assert.equal(launches, 2, 'the whole sequence, REST and browser included, ran again');
   assert.deepEqual(events.filter((e) => e.endsWith('stopped') || e.endsWith('closed')).sort(),
     ['browser 1 closed', 'browser 2 closed', 'server 1 stopped', 'server 2 stopped'], 'every attempt stopped what it started');
+});
+
+test('#1796 P7 — a bound below one is refused up front with a clear error, and the attempt never runs', async () => {
+  have();
+  for (const attempts of [0, -1, 1.5, NaN]) {
+    let ran = 0;
+    await assert.rejects(H.retryOnPortContention(async () => { ran++; return 'x'; }, { attempts }), (e) => e instanceof RangeError && /attempts must be an integer of at least 1/.test(e.message), `attempts: ${attempts}`);
+    assert.equal(ran, 0, `attempts: ${attempts} — nothing ran`);
+  }
 });
