@@ -9564,7 +9564,16 @@ async function handleSetRoster(req, res) {
       try {
         // TEST-ONLY seam (#1764 builder row): fail ONLY the narrowing write, after the graph commit. Unset, a no-op.
         if (process.env.SCRUM_TEST_FAIL_ROSTER_EXPORT_NARROW === '1') throw new Error('injected: the narrowing export write failed');
-        writeRosterExport(clean, savedRoles);
+        // TEST-ONLY seam: hold a save that names this seat key between its commit and its narrowing, so a LATER save commits
+        // in between (the interleaving the narrowing must survive). Unset, a no-op.
+        if (process.env.SCRUM_TEST_DELAY_ROSTER_NARROW_FOR && clean[process.env.SCRUM_TEST_DELAY_ROSTER_NARROW_FOR]) await new Promise((r) => setTimeout(r, 1500));
+        // UNDER THE LOCK, and from the graph's CURRENT roster, never this save's own `clean`: a concurrent save may have
+        // committed after ours, and narrowing the file to ours would then leave its seats unguarded (the PR #140 review's
+        // concurrent-save case). Whatever order saves finish in, the last narrowing writes exactly what the graph holds.
+        await withWriteLock(async () => {
+          const ents = COLLECTIONS.snapshot().rosterSeats ?? [];
+          writeRosterExport(seatsFrom(ents), rolesFrom(ents));
+        });
       } catch (e) {
         console.error(`#1764 roster saved to the graph, but its export could not be narrowed to the new seats (it still lists a superset, which the history gate over-guards): ${e.message}`);
         return sendJSON(res, 500, { error: `the roster was saved, but roster.json (the history gate's copy) could not be updated: ${e.message}` });
