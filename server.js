@@ -42,6 +42,7 @@ import { validateCompare, evaluateCompareAsync } from './core/check-compare.mjs'
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { countLegacy, setLegacyContext, installStructuredCloneCounter, legacyCounters } from './core/legacy-counters.mjs';
 import { createGraphSlice } from './core/graph-slice-routes.mjs';
+import { historyNativeOn } from './core/durable-update.mjs';   // #1762 S1b
 // #1561 — the log-born unit (memory, decision, seat-state) on the graph executor, behind
 // SCRUM_GRAPH_UNIT_LOGBORN=1. The folds live there now; with the flag OFF they are the only part used.
 import {
@@ -64,11 +65,13 @@ import { KIND_DECLARATIONS, PROJECTED_TYPES, divergence } from './core/kind-regi
 import { SHAPE_QUERY, withObjectShapes } from './core/predicate-shapes.mjs';
 import { shortenTypeIri, PERSON_IRI_BASE } from './core/jsonld.mjs';
 // #805 — the boot migration's inputs (the live flat sources) and its builder.
-import { readPool, recentWhispers, DEFAULT_POOL, poolFilePath } from './whisper-store.mjs';
+import { readPool, recentWhispers, DEFAULT_POOL, poolFilePath, whisperStateFilePath } from './whisper-store.mjs';
 import { readTendingConfig, validateTendingConfig, tendingConfigFilePath } from './tending-config.mjs';   // #1785 — the file is read ONCE, by the boot import
 import { buildTendingEntities, person as personIri } from './core/tending-bootstrap.mjs';
 import { resolvePool as resolveWhisperPool, bagState } from './core/tending-pool.mjs';
 import { mintId } from './core/tending-ids.mjs';
+import { windowReserved, reservationEntity, claimStateFor, grantEntity, claimHistory } from './core/whisper-graph.mjs';   // #1786
+import { claimWhisper, HOUR_MS } from './core/whisper-window.mjs';   // #1786 — the claim decision, unchanged, over graph state
 import { createPrompt, editPrompt, setEnabled, reorderPlaylist, removePrompt, setShuffle, readShuffle, assertSlug, readTendingConfigFrom, setTendingConfig, tendingConfigImported } from './core/tending-authoring.mjs';
 import { resolveProvenance } from './core/tending-provenance.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
@@ -1344,6 +1347,9 @@ const convEvent = (conv, actor = null) => ({
 const memoryEvent = (op, identity, actor = null) => ({
   op, actor, entity: { kind: 'memory', id: identity['@id'] }, state: identity,
 });
+// #1762 S1 — a column write's declared actor (#675 `by`, as card edits take it): recorded on the event and the activity, never
+// stored on the column. A value that is not a plain seat key is dropped (the write is then attributed to the board).
+const columnActor = (body) => (body && typeof body.by === 'string' && /^[A-Za-z0-9._~-]{1,100}$/.test(body.by) ? body.by : null);
 const columnEvent = (op, col, actor = null) => ({
   op, actor, entity: { kind: 'column', id: col.id }, state: col,
 });
@@ -3304,7 +3310,10 @@ async function updateMemoryOnGraph(req, res, id, body, flags) {
     if (cur.rev == null) return sendJSON(res, 500, { error: `memory ${id} has no write revision (urn:ex:ver) in the graph store: it was not written by this unit or its migration` });
     actor ??= logbornActor(req, res, 'memory.revise');
     if (!actor) return;
-    const r = await LOGBORN.write(memoryReviseIntention({ actor, identity: composed.identity, newVersions: composed.added, expectedRev: cur.rev }));
+    // #1762 S1b — the activity's versionAfter is the version REST will answer with, which a title-only revise does not carry
+    const versionAfter = Math.max(0, ...[...cur.versions, ...composed.added].map((v) => Number(v['scrum:version']) || 0));
+    const r = await LOGBORN.write({ ...memoryReviseIntention({ actor, identity: composed.identity, newVersions: composed.added, expectedRev: cur.rev }),
+      ...(historyNativeOn() && versionAfter > 0 ? { history: { versionAfter } } : {}) });
     if (r.outcome === 'PRECONDITION_FAILED') continue;
     if (r.outcome !== 'APPLIED') return logbornWriteFailed(res, r);
     let after;
@@ -9858,6 +9867,58 @@ async function handleCreateMint(req, res) {
   }
 }
 
+// ── #1786 — the whisper's two once-per-window guards, as graph state decided under the write lock (core/whisper-graph.mjs).
+// REST is the one writer, so the check and the write cannot interleave: two MCP processes or ticks racing one window get
+// one 201 and one 409 (a send), or one grant and one refusal (a whisper). The MCP no longer keeps whisper-state.json.
+const periodOf = (v) => (Number.isSafeInteger(v) && v > 0 ? v : HOUR_MS);
+async function handleReserveWindow(req, res) {
+  try {
+    const raw = await readBody(req);
+    const { window, by } = raw ? JSON.parse(raw) : {};
+    if (!window || typeof window !== 'string') return sendJSON(res, 400, { error: 'window is required' });
+    const out = await withWriteLock(async () => {
+      if (windowReserved(tendingEntities(), window)) return { already: true };
+      writeTendingEntities([reservationEntity(window, new Date().toISOString())], { actor: by || 'board', op: 'create' });
+      return { reserved: true };
+    });
+    return out.already ? sendJSON(res, 409, { already: true, window }) : sendJSON(res, 201, { reserved: true, window });
+  } catch (e) {
+    console.error('POST /api/tending/windows:', e.message);
+    sendJSON(res, 500, { error: 'Failed to reserve the window' });
+  }
+}
+async function handleClaimWhisper(req, res) {
+  try {
+    const raw = await readBody(req);
+    const body = raw ? JSON.parse(raw) : {};
+    const { window, seat } = body;
+    if (!window || !seat) return sendJSON(res, 400, { error: 'window and seat are required' });
+    const receivedAt = typeof body.receivedAt === 'string' ? body.receivedAt : new Date().toISOString();
+    let r;
+    try {
+      r = await withWriteLock(async () => {
+        const ents = tendingEntities();
+        const now = new Date().toISOString();
+        const d = claimWhisper({ state: claimStateFor(ents, window), prompt: { window }, seat, now, periodMs: periodOf(body.periodMs) });
+        if (d.granted) writeTendingEntities([grantEntity({ ents, window, seat, receivedAt, completedAt: now, reached: body.reached })], { actor: seat, op: 'create' });
+        return d;
+      });
+    } catch (e) {
+      if (/claimWhisper:/.test(e.message)) return sendJSON(res, 400, { granted: false, reason: 'invalid', error: e.message });
+      throw e;
+    }
+    const { state: _state, ...answer } = r;   // the settlement state is the graph's, not the caller's
+    sendJSON(res, 200, answer);
+  } catch (e) {
+    console.error('POST /api/tending/claims:', e.message);
+    sendJSON(res, 500, { error: 'Failed to settle the claim' });
+  }
+}
+function handleGetClaims(req, res) {
+  const limit = Math.min(200, Math.max(1, Number(new URL(req.url, 'http://x').searchParams.get('limit')) || 24));
+  sendJSON(res, 200, { history: claimHistory(tendingEntities(), limit) });
+}
+
 function handleGetWhispers(req, res) {
   try { sendWhispers(res); } catch (e) {
     console.error('GET /api/tending/whispers:', e.message);
@@ -11612,7 +11673,7 @@ async function handleCreateColumn(req, res) {
       const order = typeof body.order === 'number' ? body.order : data.columns.length;
       const col = { id, name: body.name.trim(), order };
       data.columns.push(col);
-      writeBoard(data, [columnEvent('create', col)]);
+      writeBoard(data, [columnEvent('create', col, columnActor(body))]);
       return col;
     });
     sendJSON(res, 201, created);
@@ -11660,11 +11721,12 @@ async function handleUpdateColumn(req, res, columnId) {
       const col = data.columns[idx];
       for (const [k, v] of Object.entries(patch)) {
         if (isEchoOfStored(v, col[k])) continue;        // #844 — nothing was attempted
+        if (k === 'by') continue;                       // #1762 S1 — the declared actor (#675), not a column field
         if (k === 'id') { refusedFields.push(k); continue; } // immutable, and now said so
         if (!PATCHABLE_COLUMN_FIELDS.has(k)) { ignoredFields.push(k); continue; } // #299
         col[k] = v;
       }
-      writeBoard(data, [columnEvent('update', col)]);
+      writeBoard(data, [columnEvent('update', col, columnActor(patch))]);
       return col;
     });
     if (!updated) return sendJSON(res, 404, { error: 'Column not found' });
@@ -13456,6 +13518,9 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/tending\/order$/,        fn: (req, res) => applyTendingOp(req, res, (e, b, at) => reorderPlaylist(e, { slugs: b.slugs, at })) },
   { method: 'POST',   re: /^\/api\/tending\/shuffle$/,      fn: (req, res) => applyTendingOp(req, res, (e, b, at) => setShuffle(e, { shuffle: b.shuffle === true, at })) },
   { method: 'POST',   re: /^\/api\/tending\/mints$/,        fn: (req, res) => handleCreateMint(req, res) },
+  { method: 'POST',   re: /^\/api\/tending\/windows$/,      fn: (req, res) => handleReserveWindow(req, res) },   // #1786
+  { method: 'POST',   re: /^\/api\/tending\/claims$/,       fn: (req, res) => handleClaimWhisper(req, res) },    // #1786
+  { method: 'GET',    re: /^\/api\/tending\/claims$/,       fn: (req, res) => handleGetClaims(req, res) },       // #1786
   { method: 'POST',   re: /^\/api\/tending-config$/,       fn: (req, res) => handleSetTendingConfig(req, res) },
   { method: 'POST',   re: /^\/api\/roster$/,               fn: (req, res) => handleSetRoster(req, res) },   // #506
   { method: 'GET',    re: /^\/api\/people$/,               fn: (req, res) => handleListPeople(req, res) },       // #619
@@ -13565,6 +13630,7 @@ if (CARDS_UNIT) {
   CARDS = createCardsUnit({
     client: createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 30000, label: 'cards' }),
     mintId: () => crypto.randomUUID(),
+    historyNative: process.env.SCRUM_HISTORY_NATIVE === '1',   // #1762 S1 — each card write commits its activity record; OFF until the S6 switch
   });
   try { await CARDS.load(); } catch (e) {
     console.error(`#1598 cards unit: the cards could not be read from the graph — refusing to serve: ${e.message}`);
@@ -13653,6 +13719,7 @@ if (SMALLKINDS_UNIT) {
     COLLECTIONS = createCollectionsUnit({
       client: createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 30000, label: 'collections' }),
       families: COLLECTION_FAMILIES, mintId: () => crypto.randomUUID(),
+      historyNative: process.env.SCRUM_HISTORY_NATIVE === '1',   // #1762 S1
     });
     try { await COLLECTIONS.load(); } catch (e) {
       console.error(`#1624 small-kinds unit: the collections could not be read from the graph — refusing to serve: ${e.message}`);
@@ -13696,6 +13763,7 @@ if (COLUMNS_UNIT) {
   COLUMNS = createColumnsUnit({
     client: createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 30000, label: 'columns' }),
     mintId: () => crypto.randomUUID(),
+    historyNative: process.env.SCRUM_HISTORY_NATIVE === '1',   // #1762 S1
   });
   try { await COLUMNS.load(); } catch (e) {
     console.error(`#1639 columns unit: the columns could not be read from the graph — refusing to serve: ${e.message}`);
@@ -14359,7 +14427,28 @@ function migrateTendingIfNeeded() {
 }
 
 migrateBoardIfNeeded();
-migrateTendingIfNeeded();
+// #1786 — UNDER THE WRITE LOCK, awaited before listen(): with the collections unit on, a collection write outside the lock
+// throws (#1624), and an unmigrated graph with whisper-state.json or whisper-pool.json present refused to boot. The function's
+// own failure path (refuse to serve) is unchanged.
+await withWriteLock(async () => migrateTendingIfNeeded());
+// #1786 (#139 review) — the legacy file guard's LAST CONSUMED send window carries into the graph, once, as a reservation (no
+// TendingMint is invented: a burned window was never delivered). Before this guard, mintOnce consumed lastMintedWindow in
+// whisper-state.json BEFORE posting, so a window can be spent with no mint at all; without this the first boot of the new
+// MCP could send it again. Idempotent: the reservation's IRI is the window's. A malformed or absent file carries nothing.
+try {
+  await withWriteLock(async () => {
+    let st = null;
+    try { st = JSON.parse(fs.readFileSync(whisperStateFilePath(), 'utf8')); } catch { return; }
+    const w = typeof st?.lastMintedWindow === 'string' ? st.lastMintedWindow : null;
+    if (!w || windowReserved(tendingEntities(), w)) return;
+    writeTendingEntities([reservationEntity(w, typeof st.lastMintedAt === 'string' ? st.lastMintedAt : new Date().toISOString())], { actor: 'board', op: 'create' });
+    console.error(`${new Date().toISOString()} #1786 the legacy whisper-state.json's last consumed window ${w} is reserved in the graph`);
+  });
+} catch (e) {
+  console.error(`#1786 carrying the legacy send window FAILED — refusing to serve (the window could be sent twice): ${e.message}`);
+  process.exit(1);
+}
+
 // #1764 — the roster, at boot, under the write lock and before listen(): the ONE-TIME import of roster.json when the graph
 // holds no configured roster (a roster saved from Settings is never overwritten by a file), then, ALWAYS, the export
 // rewritten from the graph. That rewrite is the recovery: a crash mid-save leaves the export a SUPERSET (safe for the

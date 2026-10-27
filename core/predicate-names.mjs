@@ -84,6 +84,9 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:color': 'color',   // #1764 → a roster seat's hex colour (roster.json `color`)
   'scrum:glyph': 'glyph',   // #1764 → a roster seat's glyph (roster.json `glyph`)
   'scrum:aliases': 'aliases',   // #1764 → a roster seat's aliases, one literal each (roster.json `aliases`)
+  'scrum:attachmentOf': 'attachments',   // #1787 → a card's (or post's) attachment node names its owner; one node per attachments[] entry
+  'scrum:attachmentIndex': 'attachments[] (position)',   // #1787 → the entry's index in attachments[] (xsd:integer)
+  'schema:contentSize': 'attachments[].size',   // #1787 → the attachment's size in bytes (xsd:integer)
   'scrum:ChannelConfig': null,              // #1784 — the type; the channel delivery config, one node
   'scrum:channelMode': 'scrum:channelMode',   // #1784 → soft | hard | off | token-ring (a literal)
   'scrum:softMinMs': 'scrum:softMinMs', 'scrum:softMaxMs': 'scrum:softMaxMs',   // #1784 → the soft window (xsd:integer ms)

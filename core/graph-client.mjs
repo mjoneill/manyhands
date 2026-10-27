@@ -15,7 +15,21 @@
  * (reconcile by opId, then replay the same intention); UNAVAILABLE only when the
  * request provably never left (connection refused before send).
  */
-import { compile, canonicalize, digestOf, ValidationError } from './graph-compiler.mjs';
+import { compile, canonicalize, digestOf, ValidationError, RECORD_HISTORY_KINDS } from './graph-compiler.mjs';
+import { historyNativeOn, isHistoryExemptOp } from './durable-update.mjs';
+
+/**
+ * #1762 S1b — with native history ON, a RECORD write (memory, decision, seat, post, delivery, model call, wake) records its
+ * activity whichever path sent it: every fact is derived by the compiler from the record, so the one client every writer
+ * uses attaches `history: true` here rather than at each call site, where a forgotten site would silently record nothing.
+ * A caller that knows a REST version the record does not carry sends `history: { versionAfter }` itself. Migrations are
+ * exempt. Applied identically in update() and reconcile(), so a replay's digest is the original's.
+ */
+export function withNativeHistory(i, on = historyNativeOn()) {
+  if (!on || !i || typeof i !== 'object' || i.history !== undefined || !RECORD_HISTORY_KINDS.includes(i.kind) || isHistoryExemptOp(i.opId)) return i;
+  if (i.kind === 'entity.put' && i.entity?.kind !== 'wake') return i;   // a collection write carries history per part (S1)
+  return { ...i, history: true };
+}
 import { NS } from './graph-vocab.mjs';
 
 const TERM_TYPES = new Set(['uri', 'literal', 'bnode']);
@@ -153,6 +167,7 @@ export function createGraphClient({ baseUrl, expectedDatasetId = null, timeoutMs
   }
 
   async function update(intention, { epoch } = {}) {
+    intention = withNativeHistory(intention);   // #1762 S1b
     let compiled;
     try {
       compiled = compile(intention);
@@ -202,6 +217,7 @@ export function createGraphClient({ baseUrl, expectedDatasetId = null, timeoutMs
   }
 
   async function reconcile(intention) {
+    intention = withNativeHistory(intention);   // #1762 S1b — the same intention update() sent
     let c;
     try { c = canonicalize(intention); } catch (e) {
       if (e instanceof ValidationError) return { outcome: 'REJECTED', reason: `validation: ${e.reason}` };
