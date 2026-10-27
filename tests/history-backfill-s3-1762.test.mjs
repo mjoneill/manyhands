@@ -44,8 +44,7 @@
  *   BF17  timestamps compare at FULL precision: a microsecond difference is a mismatch (logRecordedAt and startedAtTime), never rounded away
  *   BF18  a NONCANONICAL alias (activity/seq-04 beside seq-4) is reported by its IRI in badIri, never collapsed into the canonical node and never counted in
  *         scanned.nodes (canonical seq-nodes only; the contract author's pin); scanned.nodes + |badIri| + |skippedNonSeq| is every activity subject; the canonical node is still completed
- *   BF19  the readback does NOT scale with the node count: the number of whole-population activity enumerations during an apply is the same for a 14-node
- *         world and a larger one
+ *   BF19  the readback does NOT scale with the node count: an apply makes exactly ONE whole-population activity enumeration (the preflight), whatever the world size (the contract author's pin)
  *   BF12  the apply-time FENCE: a fact that appears on a node between plan and write, OR a validated identity term that changes (prov:used,
  *         scrum:op, scrum:entityKind, prov:startedAtTime, prov:wasAssociatedWith, scrum:shortId; replaced, or a second value added, or newly
  *         present where preflight saw none), makes that node's guarded update change nothing; the node is refused as `mismatch` naming the
@@ -911,11 +910,12 @@ async function wholePopulationScans(events) {
   }, { events });
   return { count, written };
 }
-test('#1762 S3 BF19 — the readback does NOT scale with the node count: the number of whole-population activity enumerations during an apply is the same for the 15-event world and a larger one', T, async () => {
+test('#1762 S3 BF19 — the readback does NOT scale with the node count: the apply makes exactly ONE whole-population activity enumeration (the preflight), for the 15-event world and a larger one', T, async () => {
   const extra = Array.from({ length: 12 }, (_, i) => cardEv(16 + i, 'update', `uuid-x${i}`, 200 + i, { column: 'backlog', claimedBy: null, title: `extra ${i}` }));
   const small = await wholePopulationScans(EVENTS);
   const large = await wholePopulationScans([...EVENTS, ...extra]);
   assert.ok(large.written > small.written, `PRECONDITION: the larger world writes more nodes (${large.written} vs ${small.written})`);
   assert.ok(small.count >= 1, `PRECONDITION: the proxy counts the census enumeration it can see (${small.count})`);
-  assert.equal(large.count, small.count, `whole-population enumerations must not grow with the node count: ${small.count} for ${small.written} written nodes, ${large.count} for ${large.written} (a per-node readback that rescans every activity is quadratic over ~89k nodes)`);
+  assert.equal(small.count, 1, `exactly ONE whole-population enumeration per run, the preflight, in the small world (got ${small.count} for ${small.written} written nodes)`);
+  assert.equal(large.count, 1, `and exactly one in the larger world (got ${large.count} for ${large.written} written nodes): a per-node readback that rescans every activity is quadratic over ~89k nodes, and a constant 2 or 5 is a count nobody designed`);
 });
