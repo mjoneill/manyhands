@@ -18,7 +18,8 @@
  *   LP4b (placed with the proof rows below, after the proof design was ruled): a COVERED TAIL, F.logSeq beyond the last committed node and the lane acked at it, is an empty page whose token has log = F.logSeq; the lane
  *        moves only when it is acked, then the log half is drained
  *   PR00/PR0/PA1-PA17/LP4b  the PROOF rows (S4 v1.6, v1.6.1, v1.6.2): a lane's log-half advance is verified against F's committed Merkle root; the rows build the certified world themselves (helpers/history-merkle-1762.mjs)
- *   LR1/LR1b/LR2/LR3a-c  the review of 60a02f8: a graph-born post receipt owed before F stays owed (and survives a restart, gone only after its ack); a redacted one is still an event; non-post legacy history keeps its
+ *   LR2/LR2b/LR4/LR5  the accepted S4 v1.7 wire (bounded facts beside state; numeric lane status, S3 keeps its string), the push mark's named no-op, and the fail-closed lifecycle on an unreadable F
+ *   LR1/LR1b/LR3a-c  the review of 60a02f8: a graph-born post receipt owed before F stays owed (and survives a restart, gone only after its ack); a redacted one is still an event; non-post legacy history keeps its
  *        bounded facts (lenient wire); REGISTER, PULL, ACK and the lane LISTING make no access to the retired event-log directory; implicit adoption past F is F.logSeq, from a log with a junk tail and from none
  *   LG1  GRAPH half, whole-commit pages: a multi-part native commit larger than `limit` is served WHOLE in one page (every part of it, nothing of any other commit), and the token's graph half is
  *        that commit's commitSeq (a page never ends inside a commit)
@@ -502,6 +503,27 @@ const redactLegacy = async (id) => {
   const r = await createGraphClient({ baseUrl: W.exec.baseUrl, expectedDatasetId: WB_DATASET }).update({ kind: 'post.redact', history: true, opId: `urn:ex:op/redact/${id}`, actor: `${PERSON}ada`, post: { id }, authorityRef: 'test-authority-ref', occurredAt: new Date().toISOString() });
   assert.equal(r.outcome, 'APPLIED', `PRECONDITION: the post is redacted (${JSON.stringify(r)})`);
 };
+/** an HTTP interposer between a REST server and the executor: `intercept(query, state)` may answer instead of forwarding ({status, body}). `state` counts what it did. */
+async function interpose({ intercept = async () => null } = {}) {
+  const { createServer } = await import('node:http');
+  const state = { queries: 0, intercepted: 0 };
+  const srv = createServer(async (req, res) => {
+    try {
+      const chunks = []; for await (const c of req) chunks.push(c);
+      const body = Buffer.concat(chunks); const text = body.toString(); state.queries++;
+      const early = await intercept(text, state);
+      if (early) { state.intercepted++; res.writeHead(early.status, { 'content-type': 'application/json' }); res.end(early.body ?? '{}'); return; }
+      const headers = { ...req.headers }; for (const h of ['host', 'connection', 'content-length']) delete headers[h];
+      const up = await fetch(`${W.exec.baseUrl}${req.url}`, { method: req.method, headers, ...(body.length ? { body } : {}) });
+      const buf = Buffer.from(await up.arrayBuffer());
+      const h = Object.fromEntries(up.headers); for (const k of ['content-length', 'content-encoding', 'transfer-encoding']) delete h[k];
+      res.writeHead(up.status, h); res.end(buf);
+    } catch (e) { res.writeHead(500); res.end(String(e)); }
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  return { url: `http://127.0.0.1:${srv.address().port}`, state, close: () => new Promise((r) => srv.close(r)) };
+}
+const FRONTIER_READ = (q) => q.includes('BIND("marker" AS ?src)');      // the one query that reads F and the store's marker together
 const ownSeqs = (r, n) => seqsOf(r).filter((x) => x <= n);
 
 test('#1762 S4 PR00 CONTROL — the certified world is what v1.6.2 says (read back from the executor, checked with the reference only): F carries each history field once, the stored entries and subtrees recompute to F\'s root, every audit path verifies, and the commitment recomputes (no product code is involved: this holds on main by design)', T, async () => {
@@ -839,16 +861,68 @@ test('#1762 S4 LR1b — a pre-F graph-born post REDACTED before the pull is stil
   assert.ok(!r.text.includes(secret), 'and none of its text is in the answer');
 });
 
-test('#1762 S4 LR2 — non-post legacy history keeps its bounded S3 facts: a card update\'s column after the write and a refusal\'s reason and status are SERVED, not reduced to an identity-only event (the wire shape is lenient here until it is pinned: the value may sit in `state` or beside it)', T, async () => {
+test('#1762 S4 LR2 — non-post legacy history keeps its bounded S3 facts on the ACCEPTED v1.7 wire: state stays null and the facts sit BESIDE it under S3\'s names (a card: column and holder; a refusal: reason, a NUMERIC status, route/request/response/rule null and named in `unknown`); S3\'s own legacy refusal row keeps the stored STRING status (a disclosed, intentional distinction)', T, async () => {
   await plantAtHead();
   await seedLane('lr2', 0);
   const r = await pull('lr2', 500);
   assert.equal(r.status, 200, `(${r.status}: ${r.text.slice(0, 200)})`);
   const card = r.json.events.find((x) => x.seq === 2), refusal = r.json.events.find((x) => x.seq === SKIP(6));
   assert.ok(card && refusal, 'PRECONDITION: both events are served');
-  assert.equal(card.state?.column ?? card.column, 'in-progress', `seq 2\'s column after the write is retained, not recovered from the current card (got ${JSON.stringify(card)})`);
-  assert.equal(refusal.reason ?? refusal.state?.reason, 'REFUSED-REASON-FIXTURE', `a refusal\'s reason is retained (got ${JSON.stringify(refusal)})`);
-  assert.equal(Number(refusal.status ?? refusal.state?.status), 409, 'and its status');
+  assert.equal(card.state, null, 'a seq-node holds no record, and none is recovered from the current card');
+  assert.equal(card.column, 'in-progress', 'the column after the write is retained');
+  assert.equal(card.holder, null, 'and the holder before the write (none)');
+  assert.equal(refusal.state, null);
+  assert.equal(refusal.reason, 'REFUSED-REASON-FIXTURE', 'a refusal\'s reason');
+  assert.strictEqual(refusal.status, 409, 'its status is a NUMBER on the lane wire');
+  for (const k of ['route', 'request', 'response', 'rule']) { assert.equal(refusal[k], null, `${k} was never held`); assert.ok(refusal.unknown?.includes(k), `and \`unknown\` names it (${k})`); }
+  const s3 = (await changesOf()).changes.find((x) => x.seq === SKIP(6));
+  assert.strictEqual(s3.status, '409', 'S3\'s legacy refusal row keeps the stored STRING (the lane coerces; changing S3\'s type is a separate API change)');
+});
+
+test('#1762 S4 LR2b — a refusal written AFTER F (an S2 record) reaches a lane with its bounded facts beside state: a numeric status, its rule and its route', T, async () => {
+  await plantAtHead();
+  await seedLane('lr2b', 0);
+  const entityId = `lr2b-refused-${crypto.randomUUID().slice(0, 8)}`;
+  const written = await W.send('POST', '/api/refusals', { actor: 'ada', rule: '#755 work gate', reason: 'bounded', entity: { kind: 'card', id: entityId }, route: 'mcp card_create' });
+  assert.equal(written.status, 201, `PRECONDITION: the refusal is recorded (${written.status} ${written.text.slice(0, 200)})`);
+  const r = await pull('lr2b', 500);
+  assert.equal(r.status, 200, `(${r.status}: ${r.text.slice(0, 200)})`);
+  const native = r.json.events.find((x) => String(x.entity?.id).endsWith(entityId));
+  assert.ok(native, 'the S2 refusal record is an event for the lane');
+  assert.equal(native.state, null);
+  assert.strictEqual(native.status, 403, 'a numeric status');
+  assert.equal(native.rule, '#755 work gate'); assert.equal(native.route, 'mcp card_create');
+});
+
+test('#1762 S4 LR4 — the PUSH MARK past F is an explicit no-op: 200 {served:false, advanced:false, code HISTORY_FRONTIER_PRESENT}, and the lane is byte-identical (a push mark names a log seq, which the retired log can no longer resolve)', T, async () => {
+  await plantAtHead();
+  await seedLane('lr4', 0);
+  const post = await W.send('POST', '/api/conversations', { author: 'ada', body: 'push remains a doorbell' });
+  assert.equal(post.status, 201);
+  const before = JSON.stringify(laneState('lr4'));
+  const r = await W.send('POST', '/api/cursors/served', { identity: 'registry:lr4', conversationId: post.json.id });
+  assert.equal(r.status, 200, `(${r.status}: ${r.text.slice(0, 200)})`);
+  assert.equal(r.json.served, false); assert.equal(r.json.advanced, false); assert.equal(r.json.code, 'HISTORY_FRONTIER_PRESENT');
+  assert.equal(JSON.stringify(laneState('lr4')), before, 'and nothing about the lane changed');
+});
+
+test('#1762 S4 LR5 — an UNREADABLE frontier refuses inbound liveness for a KNOWN lane and adoption of a FRESH one (503 GRAPH_EXECUTOR_UNAVAILABLE) without changing the cursor file: never a fallback to a retired log or an unverified head; the fault demonstrably fired', T, async () => {
+  await plantAtHead();
+  await seedLane('lr5', 0);
+  const proxy = await interpose({ intercept: async (q) => (FRONTIER_READ(q) ? { status: 500, body: JSON.stringify({ error: 'injected F query failure' }) } : null) });
+  let server = null;
+  try {
+    server = await W.startRest({ SCRUM_GRAPH_EXECUTOR_URL: proxy.url });
+    for (const body of [{ identity: 'registry:lr5' }, { bearerSeat: 'lr5-fresh' }]) {
+      const before = fs.readFileSync(lanePath(), 'utf8'); proxy.state.intercepted = 0;
+      const r = await fetch(`${server.rest.baseUrl}/api/cursors/inbound`, { method: 'POST', headers: { authorization: `Bearer ${W.TOK}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+      const j = await r.json().catch(() => null);
+      assert.equal(r.status, 503, `${JSON.stringify(body)}: refused (got ${r.status} ${JSON.stringify(j)?.slice(0, 160)})`);
+      assert.equal(j?.code, 'GRAPH_EXECUTOR_UNAVAILABLE');
+      assert.ok(proxy.state.intercepted > 0, 'PRECONDITION: the frontier read was made to fail');
+      assert.equal(fs.readFileSync(lanePath(), 'utf8'), before, 'and the cursor file is byte-identical');
+    }
+  } finally { if (server) await server.stop(); await proxy.close(); }
 });
 
 // ── retired log: every F-present cursor entrypoint must be independent of the event-log directory ──
