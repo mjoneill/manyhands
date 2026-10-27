@@ -1,8 +1,9 @@
 /**
  * #1762 S3 — the facts-only BACKFILL (`scripts/history-backfill-1762.mjs`), black-box, rows first.
  *
- * ROW AUTHOR's rows for the builder's script, written to the "S3 CONTRACT v2", its v2.1 corrections and the v2.2 pins on #1762 (section 4, the
- * v2.1 points, the four v2.2 pins) before the script exists. Every row is a REAL executor, the REAL projector (`scripts/activity-projector.mjs --once`) over a
+ * ROW AUTHOR's rows for the builder's script, written to the "S3 CONTRACT v2", its v2.1 corrections, the v2.2 pins and v2.3 (the whole non-post bucket) on
+ * #1762 (section 4, the v2.1 points, the v2.2 pins) before the script exists. mismatch[].fields are the PREFIXED predicate names (the reviewer's 07:01Z
+ * ruling, which supersedes v2.2 pin 3's local names). Every row is a REAL executor, the REAL projector (`scripts/activity-projector.mjs --once`) over a
  * hand-built log, and the script as a child process. Nothing here imports the builder's code.
  *
  *   BF-P  the script exists                        (until it does, every row says so, not "exit 1")
@@ -29,8 +30,10 @@
  *   BF11  exit 4: a lost ACK on the FIRST write is exit 4 with `apply.uncertain` (exactly the one node in flight: one update per node),
  *         never exit 2 and never "0 written"; uncertainty wins over the refusal buckets; the re-run reconciles (no fact twice). A failure
  *         AFTER some writes landed: `confirmed` = the nodes before it, `uncertain` = the one in flight, the rest unattempted
- *   BF12  the apply-time FENCE: a fact that appears on a node between plan and write makes that node's guarded update change nothing;
- *         the node is refused as `mismatch` (fields named), never retried blind and never overwritten, the others are written
+ *   BF12  the apply-time FENCE: a fact that appears on a node between plan and write, OR a validated identity term that changes (prov:used,
+ *         scrum:op, scrum:entityKind, prov:startedAtTime, prov:wasAssociatedWith, scrum:shortId; replaced, or a second value added, or newly
+ *         present where preflight saw none), makes that node's guarded update change nothing; the node is refused as `mismatch` naming the
+ *         changed term, never retried blind and never overwritten; the others are written
  *
  * ── NOT PINNED / NOT WRITTEN ───────────────────────────────────────────────────────────────────────────────────────────────────
  *   · the fence's dataset / epoch / incarnation half (a store restored between plan and write): no seam changes the marker at that instant
@@ -125,7 +128,7 @@ const CONVERSATION_SEQS = [7];         // a conversation: not history S3 serves,
 const REFUSAL_SEQS = [8, 14];          // card-kind refusals: logRecordedAt (+ shortId where missing) only
 /** every served legacy seq-node: what `written` counts (v2.2 pin 4, and the reviewer's correction: logRecordedAt covers every served legacy row) */
 const SERVED_SEQS = [...CARD_SEQS, ...REFUSAL_SEQS, ...COLUMN_SEQS].sort((a, b) => a - b);
-const LOCAL = { used: 'used', op: 'op', entityKind: 'entityKind', time: 'startedAtTime', actor: 'wasAssociatedWith', shortId: 'shortId', column: 'columnAfter', holder: 'holderAtWrite', logAt: 'logRecordedAt' };   // v2.2 pin 3
+const LOCAL = { used: 'prov:used', op: 'scrum:op', entityKind: 'scrum:entityKind', time: 'prov:startedAtTime', actor: 'prov:wasAssociatedWith', shortId: 'scrum:shortId', column: 'scrum:columnAfter', holder: 'scrum:holderAtWrite', logAt: 'scrum:logRecordedAt' };   // the reviewer's 07:01Z ruling: PREFIXED predicate names (it supersedes v2.2 pin 3's local names)
 const recordedAtOf = (s) => EVENTS[s - 1].recorded_at;
 
 // ── the world ──
@@ -187,7 +190,7 @@ function flat(j, label) {
   const ALLOWED = new Set(Object.values(LOCAL));
   for (const m of j.refused.mismatch) {
     assert.ok(Number.isInteger(m.seq), `${label}: a mismatch entry names its seq (got ${JSON.stringify(m)})`);
-    assert.ok(Array.isArray(m.fields) && m.fields.length >= 1 && m.fields.every((f) => ALLOWED.has(f)), `${label}: and the fields that differ, by the predicate's LOCAL name (v2.2 pin 3: ${[...ALLOWED].join(', ')}); got ${JSON.stringify(m)}`);
+    assert.ok(Array.isArray(m.fields) && m.fields.length >= 1 && m.fields.every((f) => ALLOWED.has(f)), `${label}: and the fields that differ, by the PREFIXED predicate name (the reviewer's 07:01Z ruling, which supersedes v2.2 pin 3): ${[...ALLOWED].join(', ')}); got ${JSON.stringify(m)}`);
   }
   return { mismatchFields: Object.fromEntries(j.refused.mismatch.map((m) => [m.seq, [...m.fields].sort()])), mismatch: j.refused.mismatch.map((m) => m.seq).sort((a, b) => a - b), missingNode: [...j.refused.missingNode].sort((a, b) => a - b), missingEvent: [...j.refused.missingEvent].sort((a, b) => a - b), duplicate: j.refused.duplicate, badIri: sorted(j.refused.badIri) };
 }
@@ -269,8 +272,8 @@ test('#1762 S3 BF2 — --apply: every served legacy node gets logRecordedAt; onl
   });
 });
 
-// ── BF2c (v2.3, pending review): the WHOLE non-post bucket is served, so every non-conversation kind gets logRecordedAt ──
-test('#1762 S3 BF2c — every NON-CONVERSATION kind the log path serves gets logRecordedAt and no column or holder; a conversation still gets nothing', { ...T, todo: 'pending contract v2.3 review: S3 serves the whole non-post bucket, not just card/column/collection' }, async () => {
+// ── BF2c (contract v2.3, approved): the WHOLE non-post bucket is served, so every non-conversation kind gets logRecordedAt ──
+test('#1762 S3 BF2c — every NON-CONVERSATION kind the log path serves gets logRecordedAt and no column or holder; a conversation still gets nothing (contract v2.3: the whole non-post bucket is served)', T, async () => {
   const kinds = ['delivery', 'board-meta', 'model-call', 'memory', 'seat-state'];
   const evs = [
     ...kinds.map((k, i) => ({ seq: i + 1, op: 'create', actor: 'ada', recorded_at: AT(i + 1), occurred_at: '2026-10-20T08:00:00.000Z', entity: { kind: k, id: `${k}-1` }, state: { id: `${k}-1`, column: 'SHOULD-NOT-BE-COPIED' } })),
@@ -354,7 +357,7 @@ async function refusedCase(label, plant, expected, { survivors = CARD_SEQS, held
     const j = report(r, label);
     const got = flat(j, label);
     assert.deepEqual(got.mismatch, expected.mismatch ?? [], `${label}: mismatch bucket`);
-    for (const [seq, f] of Object.entries(expected.mismatchFields ?? {})) assert.deepEqual(got.mismatchFields[seq], f, `${label}: seq ${seq} names the field(s) that differ, by local name (v2.2 pin 3)`);
+    for (const [seq, f] of Object.entries(expected.mismatchFields ?? {})) assert.deepEqual(got.mismatchFields[seq], f, `${label}: seq ${seq} names the field(s) that differ, by prefixed predicate name`);
     assert.deepEqual(got.missingNode, expected.missingNode ?? [], `${label}: missingNode bucket`);
     assert.deepEqual(got.missingEvent, expected.missingEvent ?? [], `${label}: missingEvent bucket`);
     assert.deepEqual(got.badIri, expected.badIri ?? [], `${label}: badIri bucket`);
@@ -369,10 +372,10 @@ async function refusedCase(label, plant, expected, { survivors = CARD_SEQS, held
   }, { events });
 }
 test('#1762 S3 BF6a — a node whose prov:used is NOT its event\'s entity is refused as `mismatch`, listed, untouched; the others are written', T, async () => {
-  await refusedCase('mismatch (used)', (upd) => upd(swap(3, `${PROV}used`, `<${ENT}uuid-zzz>`)), { mismatch: [3], mismatchFields: { 3: ['used'] } }, { survivors: CARD_SEQS.filter((s) => s !== 3), held: [3] });
+  await refusedCase('mismatch (used)', (upd) => upd(swap(3, `${PROV}used`, `<${ENT}uuid-zzz>`)), { mismatch: [3], mismatchFields: { 3: [LOCAL.used] } }, { survivors: CARD_SEQS.filter((s) => s !== 3), held: [3] });
 });
 test('#1762 S3 BF6b — a node whose scrum:op is NOT its event\'s op is refused as `mismatch`, listed, untouched; the others are written', T, async () => {
-  await refusedCase('mismatch (op)', (upd) => upd(swap(2, `${RS}op`, '"delete"')), { mismatch: [2], mismatchFields: { 2: ['op'] } }, { survivors: CARD_SEQS.filter((s) => s !== 2), held: [2] });
+  await refusedCase('mismatch (op)', (upd) => upd(swap(2, `${RS}op`, '"delete"')), { mismatch: [2], mismatchFields: { 2: [LOCAL.op] } }, { survivors: CARD_SEQS.filter((s) => s !== 2), held: [2] });
 });
 test('#1762 S3 BF6c — a seq-node the log has NO event for is refused as `missingEvent`, listed by its N, untouched; the others are written', T, async () => {
   await refusedCase('missingEvent', (upd) => upd(planted(node(999))), { missingEvent: [999] }, { held: [999] });
@@ -392,7 +395,7 @@ const mismatchCase = (name, seq, field, plant) => test(`#1762 S3 BF6${name}`, T,
     const j = report(r, name);
     const got = flat(j, name);
     assert.deepEqual({ ...got, mismatchFields: undefined }, { ...emptyBuckets, mismatch: [seq], mismatchFields: undefined }, `seq ${seq} is listed as mismatch, alone`);
-    assert.deepEqual(got.mismatchFields[seq], [field], `and names the predicate that differs, by its local name (v2.2 pin 3)`);
+    assert.deepEqual(got.mismatchFields[seq], [field], `and names the predicate that differs, by its prefixed name`);
     assert.deepEqual(await factsOf(node(seq)), before, `seq ${seq}: NOTHING about it changed — a contradiction is refused, never overwritten`);
     for (const s of CARD_SEQS.filter((x) => x !== seq)) assert.equal(one(await factsOf(node(s)), COLUMN_AFTER, `seq ${s}`).value, EXPECT[s].column, `seq ${s} verified, so it WAS written`);
   });
@@ -528,7 +531,7 @@ test('#1762 S3 BF10 — the dry run and --apply classify identically, and a dry 
     assert.equal(applied.status, 3);
     const a = flat(report(dry, 'dry'), 'dry'), b = flat(report(applied, 'apply'), 'apply');
     assert.deepEqual(a, b, 'identical buckets');
-    assert.deepEqual(b, { ...emptyBuckets, mismatch: [3], mismatchFields: { 3: ['used'] }, missingEvent: [999], badIri: [`${ACT}seq-abc`] });
+    assert.deepEqual(b, { ...emptyBuckets, mismatch: [3], mismatchFields: { 3: [LOCAL.used] }, missingEvent: [999], badIri: [`${ACT}seq-abc`] });
   });
 });
 
@@ -645,4 +648,54 @@ test('#1762 S3 BF12 — a fact that appears on a node BETWEEN plan and write fen
       assert.ok(!(j.apply?.confirmed ?? []).map(Number).includes(4), 'and node 4 is not confirmed');
     } finally { await proxy.close(); }
   });
+});
+
+// ── BF12b the fence covers every identity term preflight validated, not only a newly appearing destination fact ──
+const FENCE_TERMS = [
+  ['prov:used is replaced', LOCAL.used, `${PROV}used`, (iri) => `DELETE { <${iri}> <${PROV}used> ?o } INSERT { <${iri}> <${PROV}used> <${ENT}someone-elses-card> } WHERE { <${iri}> <${PROV}used> ?o }`],
+  ['scrum:op is replaced', LOCAL.op, `${RS}op`, (iri) => `DELETE { <${iri}> <${RS}op> ?o } INSERT { <${iri}> <${RS}op> "delete" } WHERE { <${iri}> <${RS}op> ?o }`],
+  ['scrum:entityKind is replaced', LOCAL.entityKind, `${RS}entityKind`, (iri) => `DELETE { <${iri}> <${RS}entityKind> ?o } INSERT { <${iri}> <${RS}entityKind> "column" } WHERE { <${iri}> <${RS}entityKind> ?o }`],
+  ['prov:startedAtTime is replaced', LOCAL.time, `${PROV}startedAtTime`, (iri) => `DELETE { <${iri}> <${PROV}startedAtTime> ?o } INSERT { <${iri}> <${PROV}startedAtTime> "2001-01-01T00:00:00.000Z" } WHERE { <${iri}> <${PROV}startedAtTime> ?o }`],
+  ['prov:wasAssociatedWith is replaced', LOCAL.actor, `${PROV}wasAssociatedWith`, (iri) => `DELETE { <${iri}> <${PROV}wasAssociatedWith> ?o } INSERT { <${iri}> <${PROV}wasAssociatedWith> <${PERSON}mallory> } WHERE { <${iri}> <${PROV}wasAssociatedWith> ?o }`],
+  ['scrum:shortId is replaced', LOCAL.shortId, `${RS}shortId`, (iri) => `DELETE { <${iri}> <${RS}shortId> ?o } INSERT { <${iri}> <${RS}shortId> "999" } WHERE { <${iri}> <${RS}shortId> ?o }`],
+  ['a SECOND value is added to prov:used (nothing may be added to a term preflight validated)', LOCAL.used, `${PROV}used`, (iri) => `INSERT DATA { <${iri}> <${PROV}used> <${ENT}an-extra-entity> . }`],
+];
+for (const [label, field, predicate, change] of FENCE_TERMS) {
+  test(`#1762 S3 BF12b — the fence covers identity terms: ${label} between plan and write ⇒ refused as mismatch naming ${field}, never written through, never retried`, T, async () => {
+    await world(async ({ cliVia, x, base, report, upd, factsOf }) => {
+      const proxy = await lossyProxy(x.baseUrl, { beforeForward: () => upd(change(node(4))), when: (body) => body.includes(node(4)) });
+      let after = null;
+      try {
+        const r = await cliVia(proxy.url, [...base, '--apply']);
+        assert.equal(r.status, 3, `a node whose identity changed under it is a refusal, exit 3 (got ${r.status}: ${(r.err || r.out).slice(-300)})`);
+        const got = flat(report(r, 'identity fence'), 'identity fence');
+        assert.deepEqual(got.mismatch, [4], 'node 4 is listed as mismatch');
+        assert.ok(got.mismatchFields[4].includes(field), `naming the term that changed (${field}); got ${JSON.stringify(got.mismatchFields[4])}`);
+        after = await factsOf(node(4));
+      } finally { await proxy.close(); }
+      assert.equal(after[COLUMN_AFTER], undefined, 'the guarded update changed NOTHING: no column was written onto a node whose identity moved');
+      assert.equal(after[HOLDER], undefined, '(nor a holder)');
+      assert.equal(after[LOGAT], undefined, '(nor a logRecordedAt)');
+      assert.equal(proxy.state.updates, SERVED_SEQS.length, 'and it was not retried blind');
+      for (const s of CARD_SEQS.filter((n) => n !== 4)) assert.equal(one(await factsOf(node(s)), COLUMN_AFTER, `seq ${s}`).value, EXPECT[s].column, `seq ${s}: the other nodes were written`);
+    });
+  });
+}
+test('#1762 S3 BF12b — a term preflight saw ABSENT (an event with no actor has no prov:wasAssociatedWith) and then newly present fences the node, never written through', T, async () => {
+  const noActor = EVENTS.map((e) => (e.seq === 4 ? { ...e, actor: null } : e));       // the projector omits wasAssociatedWith for an event with no actor: preflight legitimately sees none
+  await world(async ({ cliVia, x, base, report, upd, factsOf }) => {
+    assert.equal((await factsOf(node(4)))[`${PROV}wasAssociatedWith`], undefined, 'PRECONDITION: the projected node has no actor term');
+    const proxy = await lossyProxy(x.baseUrl, { beforeForward: () => upd(`INSERT DATA { <${node(4)}> <${PROV}wasAssociatedWith> <${PERSON}mallory> . }`), when: (body) => body.includes(node(4)) });
+    try {
+      const r = await cliVia(proxy.url, [...base, '--apply']);
+      assert.equal(r.status, 3, `(got ${r.status}: ${(r.err || r.out).slice(-300)})`);
+      const got = flat(report(r, 'newly present'), 'newly present');
+      assert.deepEqual(got.mismatch, [4]);
+      assert.ok(got.mismatchFields[4].includes(LOCAL.actor), `naming prov:wasAssociatedWith (got ${JSON.stringify(got.mismatchFields[4])})`);
+      const m = await factsOf(node(4));
+      assert.deepEqual((m[`${PROV}wasAssociatedWith`] || []).map((t) => t.value), [`${PERSON}mallory`], 'the value that appeared is not overwritten, and no second one was added');
+      assert.equal(m[COLUMN_AFTER], undefined, 'and nothing else was written onto the node');
+      assert.equal(m[LOGAT], undefined);
+    } finally { await proxy.close(); }
+  }, { events: noActor });
 });
