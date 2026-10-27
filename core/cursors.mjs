@@ -93,7 +93,13 @@ function relocatedFile(eventDir) {
   if (!relocatedDir) return null;
   const p = join(relocatedDir, 'cursors.json');
   const old = join(eventDir, 'cursors.json');
-  if (p === old || !existsSync(p)) return null;
+  if (p === old) return null;
+  if (!existsSync(p)) {
+    // #1762 S4 v1.1 A3 — no stale or empty fallback: once the old file has been ARCHIVED, the relocated state must exist.
+    // Reading the old path (now absent) would return empty and silently restart every lane at head.
+    if (existsSync(`${old}.migrated`)) throw stateInvalid(p, `it is missing, and ${old}.migrated proves the state was relocated here`);
+    return null;
+  }
   const seats = strictSeats(p);
   // the old file still in place means the relocation was not finished: the two must agree lane for lane, or nobody can say which is true
   if (existsSync(old)) {
