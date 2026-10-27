@@ -13293,6 +13293,7 @@ function handleCursorReport(req, res) {
     });
     sendJSON(res, 200, { head_seq: headSeq(EVENT_LOG_DIR), lanes: report });
   } catch (e) {
+    if (e?.code === CURSOR_STATE_INVALID) return sendJSON(res, 503, { error: e.message, code: e.code, file: e.file });   // #1762 S4
     console.error('GET /api/cursors:', e.message);
     sendJSON(res, 500, { error: 'Failed to compute reachability' });
   }
