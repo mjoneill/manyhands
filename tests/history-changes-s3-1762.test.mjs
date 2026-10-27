@@ -27,6 +27,7 @@
  *   CH11 after F, each card write (create, move, claim, edit, release, delete) is a NATIVE graph row: seq null, graph {opId,commitSeq,version,part,nativeOp},
  *        op mapped, holder before the write, title null, each exactly once; a delete needs no live entity; default latest-per-entity vs history:true
  *   CH14 a multi-part commit is served WHOLE past the page limit (parts in order, `oversizedCommit`, `returned` above the limit)
+ *   CH16 reproject: derived, history-only (never latest, not counted by default; op update / nativeOp reproject with history:true, counted)
  *   CH15 walking backward: every native row exactly once, no commit split across pages
  *   CH12 the no-log-access recorder: an F-present request opens nothing under the event-log dir; positive control: the no-F request does, and nothing reads it in the background
  *   CH13 F + the conversations unit OFF is 503 HISTORY_CONFIG_UNSUPPORTED (and no F + OFF is today's behaviour)
@@ -503,6 +504,42 @@ test('#1762 S3 CH15 — walking BACKWARD page by page, every native row is serve
   assert.deepEqual(sorted(seen), sorted(all.map(key)), 'and none is missing: the pages together are exactly the whole history');
   const pageOf = new Map();
   pages.forEach((rows, i) => rows.forEach((r) => { const c = r.graph.commitSeq; assert.ok(!pageOf.has(c) || pageOf.get(c) === i, `commit ${c} is split across pages ${pageOf.get(c)} and ${i}`); pageOf.set(c, i); }));
+});
+
+// ── CH16 reproject: derived, history-only ──
+test('#1762 S3 CH16 — a `reproject` part (a card re-written only because a #N it names appeared) is DERIVED: never an entity\'s latest row and not counted by default; with history:true it is served as op update, nativeOp reproject, and counted', T, async () => {
+  await W.plantFrontier();
+  const t0 = new Date(Date.now() - 2000).toISOString();
+  const probe = (await W.send('POST', '/api/cards', { title: 'native probe', description: 'to learn the next shortId', createdBy: 'ada' })).json;
+  const next = probe.shortId + 1;
+  const holder = 'uuid-3';
+  const okc = (r, what) => assert.ok(r.status >= 200 && r.status < 300, `PRECONDITION: ${what} (${r.status} ${r.text.slice(0, 200)})`);
+  okc(await W.send('POST', `/api/cards/${holder}/claim`, { by: 'ada' }), 'ada claims #3');
+  okc(await W.send('PATCH', `/api/cards/${holder}`, { description: `waits on #${next}`, by: 'ada' }), '#3 names the next shortId');
+  const created = await W.send('POST', '/api/cards', { title: 'native names-target', description: 'mints the #N that #3 names', createdBy: 'ada' });
+  assert.equal(created.status, 201, `PRECONDITION: the create applied (${created.status})`);
+  assert.equal(created.json.shortId, next, 'PRECONDITION: the new card minted exactly the #N that #3 names');
+  const recorded = await W.q(`SELECT ?a WHERE { ?a <${RS}op> "reproject" ; <${PROV}used> <${ENT_NS}${holder}> }`);
+  assert.ok(recorded.length >= 1, 'PRECONDITION (independent check of the executor): the create really recorded a reproject activity for #3, so a red below is about serving it, not about the setup');
+  const defaultMode = (await changesOf(`since=${encodeURIComponent(t0)}`));
+  const history = (await changesOf(`since=${encodeURIComponent(t0)}&history=true`));
+  const mine = (rows) => rows.filter((r) => r.id === holder || r.id === created.json.id);
+  const reprojects = history.changes.filter((r) => r.graph?.nativeOp === 'reproject');
+  assert.equal(reprojects.length, 1, `history:true serves the derived part (got ${reprojects.length} reproject rows; on main there are none, so this is the red)`);
+  const rp = reprojects[0];
+  assert.equal(rp.id, holder, 'it is #3\'s part');
+  assert.equal(rp.op, 'update', 'mapped to update');
+  assert.equal(rp.holder, 'ada', 'and the holder before it is the claimant: a reproject changes no holder');
+  assert.equal(rp.title, null);
+  const createRow = history.changes.find((r) => r.id === created.json.id && r.graph?.nativeOp === 'create');
+  assert.equal(rp.graph.commitSeq, createRow?.graph?.commitSeq, 'and it rides the create\'s own commit');
+  assert.notEqual(rp.graph.part, createRow?.graph?.part, 'as a different part');
+  assert.equal(history.totals.cards, history.changes.length, 'with history:true the derived part is counted');
+  assert.ok(!defaultMode.changes.some((r) => r.graph?.nativeOp === 'reproject'), 'by default a reproject part is not served ...');
+  const latest3 = defaultMode.changes.find((r) => r.id === holder);
+  assert.equal(latest3?.graph?.nativeOp, 'update', '... it is never #3\'s latest row: that is its own last authored write, the edit');
+  assert.equal(defaultMode.totals.cards, defaultMode.changes.length, 'and is not counted in totals');
+  assert.equal(mine(defaultMode.changes).length, 2, 'the entities #3 and the new card, once each');
 });
 
 // ── CH12 the no-log-access recorder, with its positive control ──
