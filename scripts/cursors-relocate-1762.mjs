@@ -59,6 +59,9 @@ for (const d of [args.from, args.to]) {
   let st = null; try { st = fs.statSync(d); } catch { /* below */ }
   if (!st || !st.isDirectory()) fail(2, `${d} is not a directory — nothing changed`);
 }
+// the same directory under two spellings (a symlink, a trailing slash, /var vs /private/var) is ONE place: relocating it onto
+// itself would archive away the only copy, so it is refused before anything is read or written
+if (fs.realpathSync(args.from) === fs.realpathSync(args.to)) fail(2, `--from and --to are the same directory (${fs.realpathSync(args.to)}) — nothing changed`);
 const base = { dryRun: !args.apply, from: oldFile, to: newFile };
 
 // ── where is the state now? ──
@@ -75,6 +78,10 @@ const old = lanesOf(oldFile);
 if (old.error) fail(2, `${old.error} — nothing changed`);
 const lanes = Object.keys(old.seats).length;
 
+// an archive already beside a live old file is contradictory history: which file is the truth cannot be decided here
+if (exists(archive)) {
+  out(3, { ...base, state: 'refused', reason: `${archive} already exists beside a live ${oldFile}; the archive is never overwritten — resolve which one is current by hand`, action: 'none' });
+}
 let state;
 if (exists(newFile)) {
   const n = lanesOf(newFile);
@@ -104,6 +111,7 @@ if (placed.error || !isDeepStrictEqual(placed.seats, old.seats)) {
   fail(2, `verification failed: ${newFile} does not hold every lane of ${oldFile} — the old file is left in place, not archived`);
 }
 crash('after-verify');
+if (exists(archive)) fail(3, `${archive} appeared during the run; the archive is never overwritten — the new file is in place and verified, the old file is left where it is`);
 fs.renameSync(oldFile, archive);
 fsyncPath(args.from);
 if (exists(tmpFile)) fs.rmSync(tmpFile);         // a temp file left by an earlier crash is a copy of what is now in place

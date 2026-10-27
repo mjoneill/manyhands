@@ -129,7 +129,7 @@ import {
   discardPendingServes, headSeq, PULL_LIMIT, graphAckedOf, ackFor, parseAckToken,   // #1576
   ACK_TOKEN_INVALID, ACK_UNKNOWN_LANE, ACK_FENCED, CURSOR_ROLLED_BACK,   // #1561 rollback
 } from './core/cursor-service.mjs';
-import { setCursorsDataDir, cursorsPath, CURSOR_STATE_INVALID } from './core/cursors.mjs';   // #1762 S4 — the relocated lane state
+import { setCursorsDataDir, setCursorsOwnedFile, cursorsPath, CURSOR_STATE_INVALID } from './core/cursors.mjs';   // #1762 S4 — the relocated lane state
 import { configureIdentities, usingDefaultRoster } from './core/identity.mjs';
 import { hostAllowed, parseAllowedHosts, refuseHost } from './core/host-guard.mjs';
 import { agentConstraints, unseenLayers } from './core/agent-constraints.mjs';   // #1350
@@ -262,6 +262,7 @@ const PROJECT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const BOARD_DATA_FILE = process.env.SCRUM_BOARD_FILE || path.join(process.env.SCRUM_DATA_DIR || PROJECT_DIR, 'board-data.json');
 const DATA_DIR = process.env.SCRUM_DATA_DIR || path.dirname(BOARD_DATA_FILE);
 setCursorsDataDir(DATA_DIR);   // #1762 S4 — a relocated cursors.json in the data folder is THE lane state once it exists
+setCursorsOwnedFile(process.env.SCRUM_CURSORS_FILE || null);   // #1762 S4 v1.1 A3 — configured ownership: the only state, never a fallback
 // the event log and the misses log are named for the board file's IDENTITY (#669: two boards never share a log). Its basename
 // suffices only when the board lives IN the data folder (two files in one folder cannot share a name); a board kept elsewhere
 // adds a short hash of its absolute path, so two `board.json` files from different folders cannot collide in one DATA_DIR.
