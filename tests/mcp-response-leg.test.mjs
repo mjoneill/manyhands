@@ -165,9 +165,12 @@ test('a tool call whose client aborts mid-flight still executes — and the serv
       signal: controller.signal,
     });
 
-    // Let the request reach the server and the tool start (stub hit), then abort.
-    await eventually(() => stub.hits.length > 0, 3000);
-    assert.equal(stub.hits.length, 1, 'the tool call reached the REST layer before the abort');
+    // Let the request reach the server and the tool start (stub hit), then abort. The stub sees EVERY request the MCP
+    // server makes to REST, including the config reads it makes at startup and on a timer (/api/config, /api/tending-config),
+    // so the tool call is counted by its own request, never by hits.length.
+    const toolHits = () => stub.hits.filter((h) => h.method === 'POST' && h.url.startsWith('/api/conversations'));
+    await eventually(() => toolHits().length > 0, 3000);
+    assert.equal(toolHits().length, 1, 'the tool call reached the REST layer before the abort');
     controller.abort();
     let bodyText = '';
     try { bodyText = await res.text(); } catch { bodyText = ''; }
