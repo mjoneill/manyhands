@@ -189,3 +189,21 @@ test('A4 the LOOP with every unfiltered read failing: scans keep completing and 
     } finally { child.kill('SIGTERM'); }
   }));
 });
+
+test('A5 (review of 439adb3) a MALFORMED pending entry, one with no string obligationId, is never published but still COUNTS in pendingCount, as the old survey counted it', async () => {
+  const malformed = item('m-bad', 'publisher', { at: at(T0, -9 * MIN) });
+  delete malformed.e.obligationId;   // keyed in the outbox, but the entry itself carries no obligationId
+  const board = makeBoardFixture({
+    announcementOutbox: {
+      origins: { [stuck.o.mutationId]: stuck.o, [malformed.o.mutationId]: malformed.o },
+      entries: { [stuck.e.obligationId]: stuck.e, 'm-bad:claim': malformed.e },
+    },
+  });
+  await withBoard(board, (s) => withProxy(s.baseUrl, async (proxy) => {
+    const listed = (await api(s.baseUrl, 'GET', '/api/outbox?status=pending')).body?.entries ?? [];
+    assert.ok(listed.some((e) => e && typeof e.obligationId !== 'string'), `PRECONDITION: the board lists the malformed entry as pending (${JSON.stringify(listed).slice(0, 300)})`);
+    const r = await runPublisher(proxy.base, tmp(), ['--audit-every-ms', HOUR_MS]);
+    assert.ok(!proxy.publishes.includes('m-bad:claim'), 'the malformed entry is never attempted');
+    assert.equal(r.status.pendingCount, listed.length, `pendingCount counts every listed pending entry, the malformed one included (${r.status.pendingCount} of ${listed.length})`);
+  }));
+});

@@ -32,7 +32,9 @@
  *   {checkedAt, lastScanCompletedAt, pendingCount, oldestPendingAt, blockedCount, lastError, auditIntegrityFailures,
  *    lastAuditAt, lastAuditAttemptAt, attempted, deferred, publishErrors, backoff, firstSeenScan, scanCount}
  * pendingCount and oldestPendingAt come from every scan; blockedCount and auditIntegrityFailures from the last
- * SUCCESSFUL audit (lastAuditAt), carried between runs.
+ * SUCCESSFUL audit (lastAuditAt), carried between runs. ⚠️ null means UNKNOWN, never zero: measured 2026-10-27, the
+ * unfiltered survey (and even ?status=blocked, 36 s) outlasts the client's 15 s timeout on the live board until #1751
+ * makes origin reads cheap, so those two stay null and lastError names the audit.
  * attempted/deferred/publishErrors describe the last scan (null when its listing failed). backoff, firstSeenScan
  * and scanCount are the publisher's only state: they are read back from this same file at start, so they persist
  * between --once runs. It ENABLES detection of a dead publisher (a stale checkedAt); nothing consumes it yet.
@@ -180,6 +182,7 @@ async function readOutbox(call, query = '') {
  */
 export async function scan(call, batch, state, nowMs) {
   const { entries } = await readOutbox(call, '?status=pending');
+  const listedPending = entries.filter((e) => e && e.status === 'pending');
   const pending = entries.filter((e) => e && typeof e.obligationId === 'string');
   const pendingIds = new Set(pending.map((e) => e.obligationId));
   // An entry that is no longer pending (published, blocked, gone) leaves the state.
@@ -195,7 +198,9 @@ export async function scan(call, batch, state, nowMs) {
 
   // #1775 — the pending counts come from THIS filtered read; the unfiltered survey is the audit's alone
   const counts = { attempted: 0, deferred: 0, publishErrors: 0, lastError: null,
-    pendingCount: pending.length, oldestPendingAt: pending.length ? (oldestFirst(pending)[0].payload?.occurredAt ?? null) : null };   // `byAge` is re-sorted in place above
+    // counted over EVERY pending entry the listing returned, as the survey counted them: a malformed entry (no string
+    // obligationId) is never published, but it must stay visible in the count. `byAge` is re-sorted in place above.
+    pendingCount: listedPending.length, oldestPendingAt: listedPending.length ? (oldestFirst(listedPending)[0].payload?.occurredAt ?? null) : null };
   const settle = (id) => { delete state.backoff[id]; delete state.firstSeenScan[id]; };
   const fail = (id, reason, isError) => {
     const failures = (state.backoff[id]?.failures ?? 0) + 1;
