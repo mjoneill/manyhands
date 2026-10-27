@@ -45,8 +45,8 @@
  *   R14 forty concurrent refusals: every one answers as before, and each is recorded or COUNTED (none vanishes)
  *   R14b with the executor STALLED, a server refusal still answers promptly (the audit is not on the response path)
  *   R15 entityId at the boundary: 64 characters stored, 65 or a dot absent
- *   R16 a write to a route no router entry matches IS audited: one record, route and refusedAction scrum:unlisted, the marker nowhere
- *   R17 the record names its audit op with scrum:recordedBy (v2.2 section 8); the compiler's bookkeeping predicate is urn:ex:recordedBy
+ *   R16 a write to a path NO route matches is not a refusal record (v2.2 amendment): no record, no event-log append, the marker nowhere
+ *   R17 the record names its audit op with urn:ex:recordedBy, in the bookkeeping graph only (v2.2 amendment 00:59Z), exact closure
  *
  * CONTRACT v2.2 (commons/card #1762, 2026-10-27 00:45Z) is the reference: unknown code, rule, label or unmatched route is the IRI
  * scrum:unlisted; a missing code is ABSENT; scrum:refusedAction and scrum:recordedBy (bookkeeping graph, its own APPLIED receipt) are in
@@ -158,8 +158,8 @@ const RR = {
   type: `${RS}RefusalRecord`, refusedAction: `${RS}refusedAction`, recordedBy: `${RS}recordedBy`, route: `${RS}route`, status: `${RS}status`, code: `${RS}code`, rule: `${RS}rule`,
   entityKind: `${RS}entityKind`, entityId: `${RS}entityId`, requestId: `${RS}requestId`, actor: `${PROV}wasAssociatedWith`, at: `${PROV}startedAtTime`,
 };
-const EX_RECORDED_BY = 'urn:ex:recordedBy';   // the compiler's bookkeeping predicate for every record kind
-const ALLOWED = new Set([RDF_TYPE, RR.refusedAction, RR.recordedBy, EX_RECORDED_BY, RR.route, RR.status, RR.code, RR.rule, RR.entityKind, RR.entityId, RR.requestId, RR.actor, RR.at]);
+const EX_RECORDED_BY = 'urn:ex:recordedBy';   // pinned by the v2.2 amendment (00:59Z): the executor's EX vocabulary, in the bookkeeping graph only
+const ALLOWED = new Set([RDF_TYPE, RR.refusedAction, EX_RECORDED_BY, RR.route, RR.status, RR.code, RR.rule, RR.entityKind, RR.entityId, RR.requestId, RR.actor, RR.at]);
 // v2.2: an unknown code, rule, label or unmatched route is the IRI scrum:unlisted; a MISSING code or rule is ABSENT; the route placeholder is `:p`
 const UNLISTED = `${RS}unlisted`;
 const OPREF = (actorIri, template, requestId) => `urn:ex:op/refused/${crypto.createHash('sha256').update(`${actorIri}\u0000${template}\u0000${requestId}`).digest('hex').slice(0, 32)}`;   // v2.2 section 2
@@ -178,8 +178,8 @@ async function refusalRecords(q) {
   }
   return m;
 }
-/** the op a record names as its audit write, whichever namespace carries the link (R17 pins which) */
-const opOf = (n, label) => { const v = [...(n[RR.recordedBy] || []), ...(n[EX_RECORDED_BY] || [])]; assert.equal(v.length, 1, `${label}: the record names exactly one audit op (got ${JSON.stringify(v)})`); return v[0].value; };
+/** the op a record names as its audit write (urn:ex:recordedBy; R17 pins where it lives) */
+const opOf = (n, label) => { const v = n[EX_RECORDED_BY] || []; assert.equal(v.length, 1, `${label}: the record names exactly one audit op (got ${JSON.stringify(v)})`); return v[0].value; };
 const one = (node, p, label) => { const v = node[p] || []; assert.equal(v.length, 1, `${label}: exactly one ${p} (got ${JSON.stringify(v)})`); return v[0]; };
 /** every subject, predicate or object, in any graph, that holds `needle` (case-insensitively): the free-text trace */
 async function traces(q, needle) {
@@ -638,31 +638,37 @@ test('#1762 S2 R15 — entityId at the boundary: 64 characters is stored, 65 cha
   });
 });
 
-// ── R16: a write to a route no router entry matches IS audited, as scrum:unlisted (v2.2 section 1) ──
-test('#1762 S2 R16 — a refused write to a route no router entry matches is audited: ONE record, scrum:route and scrum:refusedAction are scrum:unlisted, and the marker in the path is nowhere', T, async () => {
+// ── R16: a write to a path NO route matches (v2.2 amendment, 00:59Z) ──
+test('#1762 S2 R16 — a write to a path no route matches is NOT a refusal record (the static file server answers it, not the chokepoint): no record, no event-log append, and the marker in the path is nowhere', T, async () => {
   await world(true, async ({ q, call, evdir }) => {
     const evBefore = await settledEv(evdir);
     const r = await call('PATCH', `/api/${MARK}-nothing-here`, { x: 1 });
-    assert.ok(isRefusal(r), `PRECONDITION: a write to a route that does not exist is refused (${r.status} ${r.text.slice(0, 160)})`);
+    assert.ok(isRefusal(r), `PRECONDITION: a write to a path that does not exist is refused (${r.status} ${r.text.slice(0, 160)})`);
     await sleep(2000);
-    const recs = [...(await refusalRecords(q)).values()];
-    assert.equal(recs.length, 1, `R16: the refusal is audited, one record (got ${recs.length})`);
-    assert.equal(one(recs[0], RR.route, 'R16').value, UNLISTED, 'R16: scrum:route is scrum:unlisted, never the raw path');
-    assert.equal(one(recs[0], RR.refusedAction, 'R16').value, UNLISTED, 'R16: and so is scrum:refusedAction');
-    assert.equal((await traces(q, MARK)).length, 0, 'R16: the marker in the path is nowhere');
+    assert.equal((await refusalRecords(q)).size, 0, 'R16: no refusal record for a path no route matches (the amended contract: S2 neither adds nor removes an audit for it)');
+    assert.equal((await traces(q, MARK)).length, 0, 'R16: the marker in the path is nowhere in the graph');
     sameLog(evBefore, evState(evdir), 'R16');
   });
 });
+// R16b, "a refusal that reaches the chokepoint without a table template is scrum:unlisted", has no REST input today: all 66 write routes in the
+// router have a template in the table. It is the builder's pure row's until a route is added outside the table.
 
-// ── R17: the audit link's namespace (v2.2 section 8 says scrum:recordedBy) ──
-test('#1762 S2 R17 — the record names its audit op with scrum:recordedBy, as v2.2 section 8 says', T, async () => {
+// ── R17: the audit link, pinned by the v2.2 amendment: urn:ex:recordedBy, in the bookkeeping graph only ──
+test('#1762 S2 R17 — the record names its audit op with urn:ex:recordedBy; the link lives in the bookkeeping graph and nowhere else, and that graph holds exactly it for the record', T, async () => {
   await world(true, async ({ q, call }) => {
     const refuse = await claimThenRefuse(call);
     await refuse();
     await sleep(1500);
-    const recs = [...(await refusalRecords(q)).values()];
+    const recs = [...(await refusalRecords(q)).entries()];
     assert.equal(recs.length, 1, `R17: one record (got ${recs.length})`);
-    assert.equal((recs[0][RR.recordedBy] || []).length, 1, `R17: scrum:recordedBy is present (the record carries ${Object.keys(recs[0]).filter((p) => /recordedBy/.test(p)).join(', ') || 'no recordedBy at all'})`);
+    const [iri, n] = recs[0];
+    assert.equal((n[EX_RECORDED_BY] || []).length, 1, `R17: urn:ex:recordedBy is present (the record carries ${Object.keys(n).filter((p) => /recordedBy/.test(p)).join(', ') || 'no recordedBy at all'})`);
+    assert.equal((n[RR.recordedBy] || []).length, 0, 'R17: and no scrum:recordedBy beside it');
+    const where = await q(`SELECT DISTINCT ?g WHERE { GRAPH ?g { <${iri}> <${EX_RECORDED_BY}> ?op } }`);
+    assert.deepEqual(where.map((r) => r.g.value), [BK], 'R17: the link lives in the bookkeeping graph and nowhere else');
+    const inBk = await q(`SELECT DISTINCT ?p WHERE { GRAPH <${BK}> { <${iri}> ?p ?o } }`);
+    assert.deepEqual(inBk.map((r) => r.p.value), [EX_RECORDED_BY], 'R17: and the bookkeeping graph holds exactly urn:ex:recordedBy for the record');
+    assert.ok(/^urn:ex:op\/refused\//.test(n[EX_RECORDED_BY][0].value), 'R17: it points at the record\'s own urn:ex:op/refused/ op');
   });
 });
 
