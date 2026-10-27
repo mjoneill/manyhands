@@ -261,32 +261,6 @@
    "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
   },
   {
-   "file": "tests/in-flight-status.test.mjs",
-   "statement": "MCP board_status carries inFlight and a workLedger read from the same store work_list reads",
-   "field": "claimedAt",
-   "consumer": "startRestServer",
-   "dates": [
-    "2026-01-01T00:00:00.000Z",
-    "2026-08-01T00:00:00.000Z",
-    "2026-08-10T00:00:00.000Z",
-    "2026-08-10T00:20:00.000Z"
-   ],
-   "fingerprint": "0088f4e2824e3fa3",
-   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
-  },
-  {
-   "file": "tests/in-flight-status.test.mjs",
-   "statement": "MCP board_status without a work store says so \u2014 available:false, not a zero",
-   "field": "claimedAt",
-   "consumer": "startRestServer",
-   "dates": [
-    "2026-01-01T00:00:00.000Z",
-    "2026-08-01T00:00:00.000Z"
-   ],
-   "fingerprint": "24cb9cecf0799625",
-   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
-  },
-  {
    "file": "tests/ready-api.test.mjs",
    "statement": "GET /api/ready serves the hand-derived verdicts from a real board file",
    "field": "claimedAt",
@@ -456,6 +430,18 @@
    ],
    "fingerprint": "0cfce81c5cc93d7c",
    "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/in-flight-status.test.mjs",
+   "statement": "#1763 MCP board_status carries inFlight and a RETIRED workLedger \u2014 with an old work store set, nothing is read from it",
+   "field": "claimedAt",
+   "consumer": "startRestServer",
+   "dates": [
+    "2026-01-01T00:00:00.000Z",
+    "2026-08-01T00:00:00.000Z"
+   ],
+   "fingerprint": "1632783ee6148286",
+   "reason": "claimedAt is the shared fixture's fixed past claim times, the same dates and the same reading as this file's first test (accepted 2026-10-15): the product windows on a claim's age are monotone, so an old fixed claim cannot cross a window by time passing. It replaces the two retired work-ledger tests' entries (#1763); the work-store line's own times are now relative. Read 2026-10-27."
   }
  ]
 }
