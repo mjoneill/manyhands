@@ -26,6 +26,8 @@
  *        sentinel cardsLog = F.logSeq + 1 is LEGAL (the forward rule must not reject it)
  *   CH11 after F, each card write (create, move, claim, edit, release, delete) is a NATIVE graph row: seq null, graph {opId,commitSeq,version,part,nativeOp},
  *        op mapped, holder before the write, title null, each exactly once; a delete needs no live entity; default latest-per-entity vs history:true
+ *   CH14 a multi-part commit is served WHOLE past the page limit (parts in order, `oversizedCommit`, `returned` above the limit)
+ *   CH15 walking backward: every native row exactly once, no commit split across pages
  *   CH12 the no-log-access recorder: an F-present request opens nothing under the event-log dir; positive control: the no-F request does, and nothing reads it in the background
  *   CH13 F + the conversations unit OFF is 503 HISTORY_CONFIG_UNSUPPORTED (and no F + OFF is today's behaviour)
  *   CH9  the executor unreachable is a 503 (CARDS_UNAVAILABLE today, GRAPH_EXECUTOR_UNAVAILABLE in the contract), never a log-only answer
@@ -451,6 +453,56 @@ test('#1762 S3 CH11c — default latest-per-entity: after several native writes 
   assert.equal(latest[0].op, 'delete', 'and it is the LAST write');
   const all = (await changesOf(`since=${encodeURIComponent(t0)}&history=true`)).changes.filter((r) => r.id === card.id);
   assert.equal(all.length, NATIVE_EXPECT.length, 'history:true serves every write');
+});
+
+// ── CH14 / CH15 whole-commit pages ──
+const ENT_NS = 'https://scrumboard.local/entity/';
+/** a create that NAMES other cards also writes their mirror edges: ONE commit, several parts (S1's A6). Returns the new card and how many activities its op recorded. */
+async function multiPartWrite(title) {
+  const r = await W.send('POST', '/api/cards', { title, description: 'names two cards', createdBy: 'ada', relationships: { relatedTo: [1, 3] } });
+  assert.equal(r.status, 201, `PRECONDITION: the multi-card create applied (${r.status} ${r.text.slice(0, 200)})`);
+  const ops = await W.q(`SELECT ?op WHERE { ?a <${PROV}used> <${ENT_NS}${r.json.id}> ; <${RS}recordedBy> ?op }`);
+  assert.equal(ops.length, 1, 'PRECONDITION: the new card has one recorded op');
+  const parts = Number((await W.q(`SELECT (COUNT(?b) AS ?n) WHERE { ?b <${RS}recordedBy> <${ops[0].op.value}> }`))[0].n.value);
+  assert.ok(parts >= 2, `PRECONDITION: the write is ONE commit of several parts (got ${parts})`);
+  return { card: r.json, parts };
+}
+test('#1762 S3 CH14 — a commit of several parts is served WHOLE even when it exceeds the page limit: all its parts, in part order, with `oversizedCommit` naming it and `returned` above the limit', T, async () => {
+  await W.plantFrontier();
+  const t0 = new Date(Date.now() - 2000).toISOString();
+  const { parts } = await multiPartWrite('native multi-part');
+  const j = await changesOf(`since=${encodeURIComponent(t0)}&history=true&limitCards=1`);
+  const native = j.changes.filter((r) => r.graph);
+  assert.ok(native.length >= 1, 'the page holds native rows: S3 serves a post-F write from the graph (on main it does not, so this is the red)');
+  const commit = native.at(-1).graph.commitSeq;
+  const rows = native.filter((r) => r.graph.commitSeq === commit);
+  assert.equal(rows.length, parts, `all ${parts} parts of the commit are in the page, though the limit is 1: a page never ends inside a commit`);
+  assert.deepEqual(rows.map((r) => r.graph.part), Array.from({ length: parts }, (_, i) => i), 'in part order, 0..n-1');
+  assert.equal(j.oversizedCommit, commit, 'and the envelope names the commit that exceeded the limit');
+  assert.ok(j.returned > 1, `returned (${j.returned}) is allowed to exceed the limit: the commit is reported, never truncated`);
+});
+
+test('#1762 S3 CH15 — walking BACKWARD page by page, every native row is served exactly once and no commit is ever split across pages', T, async () => {
+  await W.plantFrontier();
+  const t0 = new Date(Date.now() - 2000).toISOString();
+  const single = async (n) => { for (let i = 0; i < n; i++) assert.equal((await W.send('POST', '/api/cards', { title: `native single ${i}`, description: 'x', createdBy: 'ada' })).status, 201, 'PRECONDITION: a single-card write'); };
+  await single(2); await multiPartWrite('native multi A'); await single(1); await multiPartWrite('native multi B'); await single(1);
+  const all = (await changesOf(`since=${encodeURIComponent(t0)}&history=true&limitCards=500`)).changes.filter((r) => r.graph);
+  assert.ok(all.length >= 8, `the writes are served as native rows from the graph (${all.length}; on main there are none, so this is the red)`);
+  const key = (r) => `${r.graph.opId}/${r.graph.part}`;
+  const pages = []; let page = await changesOf(`since=${encodeURIComponent(t0)}&history=true&limitCards=2`);
+  for (let guard = 0; guard < 60; guard++) {
+    pages.push(page.changes.filter((r) => r.graph));
+    if (!page.nextBefore) break;
+    const r = await W.get(`/api/changes?before=${encodeURIComponent(page.nextBefore)}&history=true&limitCards=2`);
+    assert.equal(r.status, 200, `walking back answers (${r.status}: ${r.text.slice(0, 200)})`); page = r.json;
+  }
+  assert.ok(pages.length >= 3, `PRECONDITION: the history needed several pages (got ${pages.length})`);
+  const seen = pages.flat().map(key);
+  assert.equal(new Set(seen).size, seen.length, 'no (opId, part) is served twice across the walk');
+  assert.deepEqual(sorted(seen), sorted(all.map(key)), 'and none is missing: the pages together are exactly the whole history');
+  const pageOf = new Map();
+  pages.forEach((rows, i) => rows.forEach((r) => { const c = r.graph.commitSeq; assert.ok(!pageOf.has(c) || pageOf.get(c) === i, `commit ${c} is split across pages ${pageOf.get(c)} and ${i}`); pageOf.set(c, i); }));
 });
 
 // ── CH12 the no-log-access recorder, with its positive control ──
