@@ -35,11 +35,10 @@ test('#1396 s2 — a terminal seat is ticked into the ring from Settings, joins 
   let mcp = null;
   try {
     await withBrowserServer(async ({ server, browser }) => {
-      // The harness hands REST an ISOLATED config file (server.configFile) and
-      // sets it LAST, over any env a test passes; the MCP must read that same
-      // file or the page's save lands where the adapter never looks.
+      // The harness hands REST an ISOLATED config file (server.configFile), which REST reads live (unit off). #1784 — the MCP
+      // reads the config from REST on a short refresh, never a file of its own, so the page's save reaches it within one refresh.
       fs.writeFileSync(server.configFile, fs.readFileSync(cfg));
-      mcp = await startMcpServer({ port: mcpPort, restApiBase: server.baseUrl, env: { SCRUM_SEAT_TOKENS: tokens, SCRUM_CHANNEL_STAGGER: '', SCRUM_CHANNEL_CONFIG_FILE: server.configFile } });
+      mcp = await startMcpServer({ port: mcpPort, restApiBase: server.baseUrl, env: { SCRUM_SEAT_TOKENS: tokens, SCRUM_CHANNEL_STAGGER: '', MCP_CHANNEL_CONFIG_REFRESH_MS: '100' } });
       const status = async () => (await fetch(`${new URL(mcp.mcpUrl).origin}/channel/status`)).json();
       // A client-side close reaches the server a beat later; a GET that lands
       // before the transport drops the old stream is 409'd (one SSE stream per
@@ -70,7 +69,9 @@ test('#1396 s2 — a terminal seat is ticked into the ring from Settings, joins 
       const saved = await (await fetch(`${server.baseUrl}/api/config`)).json();
       assert.deepEqual(saved.tokenRing.bearerSeats, ['alpha'], 'the save carried the ticked seat');
 
-      // the adapter re-reads the config; a fresh stream open registers the seat
+      // the adapter re-reads the config (#1784: from REST, on its refresh); wait until it HOLDS the saved list, because the seat
+      // registers at stream open against whatever config the adapter has then
+      assert.ok(await until(async () => ((await status()).ring?.bearerSeats || []).includes('alpha')), 'the adapter picked up the saved list');
       await closeAndDrain(stream);
       const stream2 = await openChannelStream(mcp.mcpUrl, a.sessionId);
       st = await until(async () => { const x = await status(); return x.seats.alpha.ring ? x : null; });
@@ -86,6 +87,7 @@ test('#1396 s2 — a terminal seat is ticked into the ring from Settings, joins 
       await page.waitForFunction(() => /Saved/.test(document.querySelector('#msg')?.textContent || ''), { timeout: 5000 });
       const cleared = await (await fetch(`${server.baseUrl}/api/config`)).json();
       assert.equal(cleared.tokenRing.bearerSeats, undefined, 'unticked ⇒ the list is gone from the config');
+      assert.ok(await until(async () => !((await status()).ring?.bearerSeats || []).includes('alpha')), 'the adapter picked up the cleared list');
       await closeAndDrain(stream2);
       const stream3 = await openChannelStream(mcp.mcpUrl, a.sessionId);
       st = await until(async () => { const x = await status(); return x.seats.alpha.ring === false ? x : null; });

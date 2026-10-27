@@ -55,7 +55,26 @@ import { deliveryStaleMs, classifyDeliveries, boundedResidentReader } from './co
 // whisper-state.json and reads no whisper-pool.json. Only the pure prompt pick is local.
 import { mintFromPool } from './whisper-store.mjs';
 import { tendingTick, lastQualifyingActivity } from './core/tending-tick.mjs';
-import { tendingEnabled, quietAfterMinutes } from './tending-config.mjs';
+import { validateTendingConfig, DEFAULT_TENDING_CONFIG } from './tending-config.mjs';
+// #1785 — the tending switch and quiet threshold are GRAPH state (TendingState), read through REST, never from a file. A cached
+// copy answers the synchronous callers (the per-session tool surface, the ticks); it is refreshed from REST on a short timer
+// and fails CLOSED (tending OFF) when REST cannot answer or answers something malformed.
+// SINGLE-FLIGHT with a deadline: against a REST that hangs, a refresh per tick would otherwise stack one open request per tick
+// (#1388's leak shape). A read that times out keeps the switch CLOSED.
+let _tendingConfig = { ...DEFAULT_TENDING_CONFIG };
+let _tendingRefresh = null;
+const TENDING_CONFIG_TIMEOUT_MS = Number(process.env.MCP_TENDING_CONFIG_TIMEOUT_MS) || 5_000;
+function refreshTendingConfig() {
+  _tendingRefresh ??= (async () => {
+    try { _tendingConfig = validateTendingConfig(await apiCall('GET', '/api/tending-config', undefined, { signal: AbortSignal.timeout(TENDING_CONFIG_TIMEOUT_MS) })); }
+    catch { _tendingConfig = { ...DEFAULT_TENDING_CONFIG }; }
+    finally { _tendingRefresh = null; }
+    return _tendingConfig;
+  })();
+  return _tendingRefresh;
+}
+const tendingEnabled = () => _tendingConfig.enabled === true;
+const quietAfterMinutes = () => _tendingConfig.quietAfterMinutes;
 // #1216 — the daily digest: a whisper whose body is rendered from /api/checks
 // standing[] at fire time. Same quiet rule, same window discipline, same mint.
 import { digestTick } from './core/digest.mjs';
@@ -74,7 +93,7 @@ import { workDeclare, workBid, workNobid, workContest, workGrant, workWithdraw, 
 import { workLedgerSummary } from './core/in-flight.mjs';
 // #755 BRANCH E — the claim throttle. Its own flag; see core/claim-throttle.mjs.
 import { decideThrottle, isThrottleArmed, COOLDOWN_MS } from './core/claim-throttle.mjs';
-import { readConfig } from './channel-config.mjs';
+import { validateConfig, DEFAULT_CONFIG } from './channel-config.mjs';
 import { createSeatRegistry } from './core/seat-registry.mjs';
 // #683 — only the KEY-BUILDING half is imported here. The cursor state lives
 // beside the event log, which REST owns; mcp-server owns identity and asks over
@@ -93,10 +112,34 @@ for (const level of ['log', 'error', 'warn']) {
   console[level] = (...args) => orig(new Date().toISOString(), ...args);
 }
 
-// #256–#266 — channel delivery is config-driven (settings page, #263). Mode +
-// timings come from channel-config.json, read LIVE per dispatch so a settings
-// change applies with NO restart. SCRUM_CHANNEL_STAGGER=off (harness) → immediate.
+// #256–#266 — channel delivery is config-driven (settings page, #263). SCRUM_CHANNEL_STAGGER=off (harness) → immediate.
+// #1784 — the mode and timings come from REST's GET /api/config (the graph's `channelConfig` node; channel-config.json only
+// where REST still holds the file), never from a file this process opens. A cache answers the scheduler's synchronous reads;
+// it is refreshed on a short timer (a saved change applies with no restart, within one refresh), single-flight with a
+// deadline (a hung REST must not stack one request per tick, #1388's shape). A failed or malformed read KEEPS THE LAST GOOD
+// config, so delivery never changes mode because REST blinked; before the first good read it is the default (soft), which is
+// what a missing file meant before.
 const CHANNEL_STAGGER_OFF = process.env.SCRUM_CHANNEL_STAGGER === 'off';
+let _channelConfig = validateConfig(DEFAULT_CONFIG);
+let _channelConfigRefresh = null;
+let _channelConfigFailing = null;
+const CHANNEL_CONFIG_TIMEOUT_MS = Number(process.env.MCP_CHANNEL_CONFIG_TIMEOUT_MS) || 5_000;
+const CHANNEL_CONFIG_REFRESH_MS = Number(process.env.MCP_CHANNEL_CONFIG_REFRESH_MS) || 5_000;
+function refreshChannelConfig() {
+  _channelConfigRefresh ??= (async () => {
+    try {
+      _channelConfig = validateConfig(await apiCall('GET', '/api/config', undefined, { signal: AbortSignal.timeout(CHANNEL_CONFIG_TIMEOUT_MS) }));
+      if (_channelConfigFailing) { _channelConfigFailing = null; console.error(`#1784 channel config: REST answers again (mode ${_channelConfig.mode})`); }
+    } catch (e) {
+      // keep the last good config; say so once when the reads start failing, not on every tick
+      if (!_channelConfigFailing) { _channelConfigFailing = e.message; console.error(`#1784 channel config: GET /api/config failed, keeping mode ${_channelConfig.mode}: ${e.message}`); }
+    }
+    finally { _channelConfigRefresh = null; }
+    return _channelConfig;
+  })();
+  return _channelConfigRefresh;
+}
+const readConfig = () => _channelConfig;   // #1784 — the six scheduler reads below, unchanged in shape
 
 // ── #495 — which board this adapter is FOR ───────────────────────────────
 //
@@ -189,13 +232,14 @@ function exampleAssignees() {
 // the ONLY reason enabling required a restart — a restart that on 2026-08-14
 // cut every seat's session and left the steward unreachable for ~35 minutes.
 //
-// `tendingEnabled()` re-reads its file on every call:
+// #1785 — `tendingEnabled()` answers from a cache of REST's /api/tending-config (graph state on TendingState; the file is
+// retired), refreshed before every whisper tick:
 //   TOOL SURFACE — buildMcpServer() runs per session, so a reconnect picks up
 //                  a change with no restart.
 //   THE TIMER    — armed ALWAYS; the tick asks per firing and no-ops when off.
 //                  (Same shape as channel-scheduler's getConfig() getter.)
 //
-// Fail-closed: a missing or malformed config file leaves tending OFF.
+// Fail-closed: REST unreachable, slow past its deadline, or answering something malformed leaves tending OFF.
 const WHISPER_TICK_MS = Number(process.env.MCP_WHISPER_TICK_MS ?? 60000);
 
 // #301 — bound request bodies (mirrors the REST server's #250 caps). :3001 is
@@ -2733,8 +2777,9 @@ const whisperTick = async () => {
     onError: (line) => console.error(line),
   });
 };
-// Armed unconditionally; the switch is asked per firing, not per process.
-setInterval(() => { if (tendingEnabled()) whisperTick(); }, WHISPER_TICK_MS).unref();
+// Armed unconditionally; the switch is asked per firing, not per process. #1785 — the cached switch is refreshed first.
+setInterval(() => { refreshTendingConfig().then(() => { if (tendingEnabled()) whisperTick(); }); }, WHISPER_TICK_MS).unref();
+const firstTendingRead = refreshTendingConfig();   // #1785 — awaited before listen(), so the first session sees the real switch
 
 // ── #1216 — THE DAILY DIGEST TICK ─────────────────────────────────────────
 //
@@ -4262,12 +4307,17 @@ process.on('unhandledRejection', (reason) => {
   console.error(`unhandledRejection — staying alive: ${reason}`);
 });
 
-httpServer.listen(MCP_PORT, '127.0.0.1', () => {
+// #1784 — the first channel-config answer (or its deadline) before any session opens, then a refresh on a timer
+setInterval(() => { refreshChannelConfig(); }, CHANNEL_CONFIG_REFRESH_MS).unref();
+await refreshChannelConfig();
+// #1785 — no session opens before the first tending read has answered (or timed out, closed): a session's tool surface is
+// fixed when it opens, so one opened earlier would keep the default (whisper tools absent) even with tending on.
+firstTendingRead.then(() => httpServer.listen(MCP_PORT, '127.0.0.1', () => {
   BOUND_PORT = httpServer.address().port;   // #1338
   console.log(`🤖 MCP server running at http://127.0.0.1:${MCP_PORT}/mcp`);
   console.log(`   REST API target: ${REST_API_BASE}`);
   console.log('   Wire into an MCP client: point it at the URL above over HTTP.');
-});
+}));
 
 httpServer.on('error', (e) => {
   if (e.code === 'EADDRINUSE') {
