@@ -110,7 +110,7 @@ import { probeModel, PROTOCOL_NAMES as MODEL_PROTOCOLS } from './core/model-adap
 import { deriveGraph, personByKey } from './core/people.mjs';
 import { queryCards, facetCards, excerptOf, EXCERPT_CEILING } from './core/cards-query.mjs';
 import { similarCards } from './core/similar-cards.mjs';
-import { queryChangesFromLog, parseSince, EPOCH_CHANGED } from './core/changes-log-query.mjs';
+import { queryChangesFromLog, parseSince, EPOCH_CHANGED, incarnationTag } from './core/changes-log-query.mjs';
 import { feedQuery, feedRowsFromBindings, postFeedQuery, postFeedRows, REDACTED_IDS_QUERY, redactedIdsFrom } from './core/logborn-feed.mjs';   // #1561 — the unit's writes in the change feed
 import { FRONTIER_QUERY, classifyFrontier } from './core/history-frontier.mjs';   // #1762 S3 — card history from the graph past F
 import { legacyQuery, legacyEventsFromBindings, nativeQuery, nativeRowsFromBindings, refusalQuery, refusalRowsFromBindings, markerOf, instantKey } from './core/history-graph-read.mjs';
@@ -129,7 +129,8 @@ import {
   discardPendingServes, headSeq, PULL_LIMIT, graphAckedOf, ackFor, parseAckToken,   // #1576
   ACK_TOKEN_INVALID, ACK_UNKNOWN_LANE, ACK_FENCED, CURSOR_ROLLED_BACK,   // #1561 rollback
 } from './core/cursor-service.mjs';
-import { setCursorsDataDir, setCursorsOwnedFile, cursorsPath, CURSOR_STATE_INVALID } from './core/cursors.mjs';   // #1762 S4 — the relocated lane state
+import { setCursorsDataDir, setCursorsOwnedFile, cursorsPath, loadCursors, CURSOR_STATE_INVALID } from './core/cursors.mjs';
+import { lanePageFromHistory } from './core/history-lane.mjs';   // #1762 S4 — the proven lane log half past F   // #1762 S4 — the relocated lane state
 import { configureIdentities, usingDefaultRoster } from './core/identity.mjs';
 import { hostAllowed, parseAllowedHosts, refuseHost } from './core/host-guard.mjs';
 import { agentConstraints, unseenLayers } from './core/agent-constraints.mjs';   // #1350
@@ -13334,6 +13335,61 @@ async function graphHeadOrNull() {
 }
 
 /** POST /api/cursors/register — a lane announces itself. Known lanes KEEP their cursor. */
+/**
+ * #1762 S4 — the history frontier as the LANE routes see it: null when no executor is configured, else the classified F
+ * (absent | valid | invalid | mismatch) plus a query function. Unreadable throws GRAPH_EXECUTOR_UNAVAILABLE.
+ */
+function laneHistoryQuery() {
+  if (LOGBORN) return (sparql) => logbornFeedQuery(sparql);
+  if (ANNOUNCE_EXECUTOR) return async (sparql) => { const r = await POSTS_READER.query(sparql); if (!r.ok) throw Object.assign(new Error(`the graph could not be read: ${r.reason || 'unreadable'}`), { code: 'GRAPH_EXECUTOR_UNAVAILABLE' }); return r.rows; };
+  return null;
+}
+async function laneFrontier() {
+  const query = laneHistoryQuery();
+  if (!query) return null;
+  return { query, fr: classifyFrontier(await query(FRONTIER_QUERY)) };
+}
+/**
+ * #1762 S4 — one lane page past F: the PROVEN log half (core/history-lane.mjs) and the graph half (log-born receipts, S1's
+ * native activities and S2's refusal records past F.commitSeq, one row per (opId, part)), read in ONE snapshot: the marker's
+ * commitSeq seen by the frontier read must be the one every later read saw, or the page is read again once, then refused.
+ */
+async function lanePastFrontier(identity, limit, lf) {
+  const read = async (fr) => {
+    const F = fr.frontier, query = lf.query, startHw = fr.marker.commitSeq;
+    const lane = loadCursors(EVENT_LOG_DIR).seats[identity];
+    const graphAcked = lane ? (lane.graph_acked ?? 0) : 0;
+    const logPage = lane ? await lanePageFromHistory({ query, readPost: readGraphPost, F, acked: lane.acked, limit }) : { events: [], logHigh: null };
+    const feed = LOGBORN ? feedRowsFromBindings(await LOGBORN.query(feedQuery(graphAcked))) : null;
+    const through = feed ? feed.through : startHw;
+    const nativeB = await query(nativeQuery({ afterCommitSeq: F.commitSeq, through }));
+    const refusalB = await query(refusalQuery({ afterCommitSeq: F.commitSeq, through }));
+    const again = classifyFrontier(await query(FRONTIER_QUERY));
+    const same = again.state === 'valid' && JSON.stringify(again.frontier) === JSON.stringify(F)
+      && [through, markerOf(nativeB), markerOf(refusalB), again.marker.commitSeq].every((h) => Number(h) === startHw);
+    if (!same) return null;
+    const native = nativeRowsFromBindings(nativeB);
+    const nativeOps = new Set(native.map((r) => r.graph.opId));
+    const rows = [...(feed ? feed.rows.filter((r) => !(r.graph && nativeOps.has(r.graph.opId))) : []), ...native, ...refusalRowsFromBindings(refusalB)]
+      .sort((a, b) => a.graph.commitSeq - b.graph.commitSeq || (a.graph.part ?? 0) - (b.graph.part ?? 0));
+    const graph = feed ? { ...feed, rows } : { rows, through, epoch: Number(fr.marker.epoch), epochBase: null, incarnation: incarnationTag(fr.marker.incarnation), incarnationFrom: null };
+    return { graph, history: { events: logPage.events, logHigh: logPage.logHigh, frontierLogSeq: F.logSeq, frontierCommitSeq: F.commitSeq } };
+  };
+  let page = await read(lf.fr);
+  if (!page) {
+    const fr = classifyFrontier(await lf.query(FRONTIER_QUERY));
+    if (fr.state === 'valid' && JSON.stringify(fr.frontier) === JSON.stringify(lf.fr.frontier)) page = await read(fr);
+  }
+  if (!page) throw Object.assign(new Error('the store moved while this lane page was being read, twice; nothing is served from mixed snapshots — pull again'), { code: 'HISTORY_SNAPSHOT_MOVED' });
+  return page;
+}
+
+const frontierRefused = (res, fr) => {
+  if (fr.state === 'invalid') { sendJSON(res, 503, { error: `the history frontier is invalid: ${fr.reason}`, code: 'HISTORY_FRONTIER_INVALID' }); return true; }
+  if (fr.state === 'mismatch') { sendJSON(res, 503, { error: `the history frontier belongs to another store: ${fr.reason}`, code: 'HISTORY_FRONTIER_STORE_MISMATCH' }); return true; }
+  return false;
+};
+
 async function handleCursorRegister(req, res) {
   try {
     cursorsPath(EVENT_LOG_DIR);   // #1762 S4 — an unusable relocated state refuses BEFORE anything else is read or written
@@ -13350,7 +13406,11 @@ async function handleCursorRegister(req, res) {
     // #1575 — read for a KNOWN lane too: its executor epoch is checked against the store's
     // (reported as epoch_mismatch; moved only when the body asks `resync: "epoch"`).
     const head = await graphHeadOrNull();
+    let lf = null;
+    try { lf = await laneFrontier(); } catch (e) { if (graphRefused(res, e)) return; throw e; }
+    if (lf && frontierRefused(res, lf.fr)) return;
     const out = registerFor(EVENT_LOG_DIR, id.key, {
+      logHead: lf?.fr.state === 'valid' ? lf.fr.frontier.logSeq : null,   // #1762 S4 — never the log's head past F
       graphHead: head?.through ?? null, graphEpoch: head?.epoch ?? null, graphEpochBase: head?.epochBase ?? null,
       graphIncarnation: head?.incarnation ?? null, graphIncarnationFrom: head?.incarnationFrom ?? null,   // #1577
       resync: body.resync === 'epoch' ? 'epoch' : body.resync === 'rollback' ? 'rollback' : null,   // #1561 rollback
@@ -13393,16 +13453,33 @@ async function handleCursorPull(req, res) {
     // a log-only answer would read as "nothing happened there", and nothing is
     // committed, so neither cursor moves.
     let graph = null;
-    const graphAcked = LOGBORN ? graphAckedOf(EVENT_LOG_DIR, q.identity) : null;
-    if (graphAcked != null) {
+    let history = null;
+    // #1762 S4 — a valid, certified history frontier moves the lane off the event log (S4 v1.6–v1.6.3)
+    let lf = null;
+    try { lf = await laneFrontier(); } catch (e) { if (graphRefused(res, e)) return; throw e; }
+    if (lf && frontierRefused(res, lf.fr)) return;
+    if (lf?.fr.state === 'valid') {
       try {
-        graph = feedRowsFromBindings(await LOGBORN.query(feedQuery(graphAcked)));
+        ({ graph, history } = await lanePastFrontier(q.identity, limit, lf));
       } catch (e) {
         if (graphRefused(res, e)) return;
+        if (e?.code === 'HISTORY_COVERAGE_CHANGED') return sendJSON(res, 503, { error: e.message, code: e.code });
+        if (e?.code === 'HISTORY_LEGACY_POST_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code, seq: e.seq, entity: e.entity });
+        if (e?.code === 'HISTORY_SNAPSHOT_MOVED') return sendJSON(res, 503, { error: e.message, code: 'HISTORY_FRONTIER_INVALID' });
         throw e;
       }
+    } else {
+      const graphAcked = LOGBORN ? graphAckedOf(EVENT_LOG_DIR, q.identity) : null;
+      if (graphAcked != null) {
+        try {
+          graph = feedRowsFromBindings(await LOGBORN.query(feedQuery(graphAcked)));
+        } catch (e) {
+          if (graphRefused(res, e)) return;
+          throw e;
+        }
+      }
     }
-    const pull = serveFor(EVENT_LOG_DIR, q.identity, { limit, via: q.via || null, graph });
+    const pull = serveFor(EVENT_LOG_DIR, q.identity, { limit, via: q.via || null, graph, history });
     if (pull.refused === 'CURSOR_TOO_OLD') {
       // Refuse, never answer partially — the same contract /api/changes has had
       // since #679. Serving "whatever survived" would let the lane ack past

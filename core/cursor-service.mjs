@@ -115,9 +115,10 @@ export function headSeq(eventDir) {
  * a future enforcement card keys on: age catches a three-day-stale harness,
  * while divergence (`served != head`) fires constantly on a healthy room.
  */
-export function envelopeFor(eventDir, key, { state = null, head = null, graph = null } = {}) {
+export function envelopeFor(eventDir, key, { state = null, head = null, graph = null, history = null } = {}) {
   const st = state || loadCursors(eventDir);
-  const h = head == null ? headSeq(eventDir) : head;
+  // #1762 S4 — past a valid frontier the log is not read: its head is F.logSeq, and there is no retention floor
+  const h = head == null ? (history ? history.frontierLogSeq : headSeq(eventDir)) : head;
   const s = st.seats[key];
   const relocated = relocatedCursorFile(eventDir);   // #1762 S4 — named only when the relocated state is the one in use
   const base = {
@@ -140,7 +141,7 @@ export function envelopeFor(eventDir, key, { state = null, head = null, graph = 
     };
   }
   const logLag = Math.max(0, h - s.acked);
-  const gap = retentionGap(eventDir, s.acked);
+  const gap = history ? null : retentionGap(eventDir, s.acked);
   // #1571 — with the log-born unit ON the lane is also owed the executor rows past its
   // executor cursor. `graph.rows` is exactly that set (the server read it past
   // graph_acked), so the executor half of `lag` is a ROW count — not `through −
@@ -149,7 +150,7 @@ export function envelopeFor(eventDir, key, { state = null, head = null, graph = 
   const pending = graph ? graphPending(s, graph) : null;
   const lag = logLag + (pending ? pending.length : 0);
   const logOldest = logLag > 0 && !gap
-    ? (readEvents(eventDir, { sinceSeq: s.acked, limit: 1 })[0]?.recorded_at ?? null)
+    ? (history ? (history.events?.[0]?.recorded_at ?? null) : (readEvents(eventDir, { sinceSeq: s.acked, limit: 1 })[0]?.recorded_at ?? null))
     : null;
   const graphOldest = pending && pending.length
     ? pending.map((r) => r.at).reduce((m, x) => (x < m ? x : m))
@@ -157,6 +158,7 @@ export function envelopeFor(eventDir, key, { state = null, head = null, graph = 
   return {
     ...base,
     known: true,
+    ...(history ? { history: { frontierLogSeq: history.frontierLogSeq, frontierCommitSeq: history.frontierCommitSeq, logDrained: s.acked >= history.frontierLogSeq } } : {}),
     last_acked_seq: s.acked,
     last_served_seq: s.served,
     lag,
@@ -321,9 +323,9 @@ export function eventOfGraphRow(row) {
  * `graphHead` (flag ON) starts a FRESH lane's executor cursor at the executor's head,
  * as its log cursor starts at the log's; a known lane's executor cursor is never moved.
  */
-export function registerFor(eventDir, key, { now = new Date().toISOString(), graphHead = null, graphEpoch = null, graphEpochBase = null, graphIncarnation = null, graphIncarnationFrom = null, resync = null } = {}) {
+export function registerFor(eventDir, key, { now = new Date().toISOString(), graphHead = null, graphEpoch = null, graphEpochBase = null, graphIncarnation = null, graphIncarnationFrom = null, resync = null, logHead = null } = {}) {
   const state = loadCursors(eventDir);
-  const head = headSeq(eventDir);
+  const head = logHead ?? headSeq(eventDir);   // #1762 S4 — past a valid frontier a fresh lane's log half starts at F.logSeq
   const { cursor, fresh } = registerSeat(state, key, head, { now });
   const s = state.seats[key];
   if (fresh && Number.isSafeInteger(graphHead)) {
@@ -390,9 +392,11 @@ export function registerFor(eventDir, key, { now = new Date().toISOString(), gra
  * that only checks "the right events came back". Call `commit()` after the
  * response is fully written, and never before.
  */
-export function serveFor(eventDir, key, { limit = PULL_LIMIT, via = null, graph = null } = {}) {
+export function serveFor(eventDir, key, { limit = PULL_LIMIT, via = null, graph = null, history = null } = {}) {
   const state = loadCursors(eventDir);
-  const head = headSeq(eventDir);
+  // #1762 S4 — `history` (a valid, certified frontier): the log half was already read from the graph and PROVEN
+  // (core/history-lane.mjs); nothing here reads the event log, and its head is F.logSeq
+  const head = history ? history.frontierLogSeq : headSeq(eventDir);
   const s = state.seats[key];
   // ⛔ REFUSE rather than answer partially. If retention has trimmed events this
   // lane still needed, serving "whatever survives" lets it ack past events it
@@ -400,7 +404,7 @@ export function serveFor(eventDir, key, { limit = PULL_LIMIT, via = null, graph 
   // the #624 loss class arriving through the cure. Same contract as
   // /api/changes' CURSOR_TOO_OLD, which the card told us to reuse.
   // (#1571: the LOG side only — the executor has no retention trim today.)
-  const gap = s ? retentionGap(eventDir, s.acked) : null;
+  const gap = s && !history ? retentionGap(eventDir, s.acked) : null;
   if (gap) {
     return {
       events: [], known: true, refused: 'CURSOR_TOO_OLD', gap,
@@ -464,7 +468,10 @@ export function serveFor(eventDir, key, { limit = PULL_LIMIT, via = null, graph 
   // not that no further changes can arrive.
   let logRead = [];
   let logEvents = [];
-  if (s && !translation) {
+  if (s && history) {
+    logRead = history.events;      // #1762 S4 — proven against F's root, from the graph; the log is not read
+    logEvents = logRead;
+  } else if (s && !translation) {
     logRead = readEvents(eventDir, { sinceSeq: s.acked, limit });
     logEvents = logRead;
   } else if (s) {
@@ -487,19 +494,28 @@ export function serveFor(eventDir, key, { limit = PULL_LIMIT, via = null, graph 
   // `limit` serves each source a gap-free prefix of what it is owed: the two
   // high-waters below are exact, and the next page resumes from each.
   const pending = s && graph ? graphPending(s, graph) : [];
-  const page = mergeSources(
+  const merged = mergeSources(
     logEvents.map((ev) => ({ src: 'log', ev })),
     pending.map((row) => ({ src: 'graph', row })),
-  ).slice(0, limit);
+  );
+  const page = merged.slice(0, limit);
+  // #1762 S4 — a page never ends inside a COMMIT: acking a commitSeq says every part of it was served. A commit larger than
+  // the limit is served whole. (With one row per commit, as before S4, this adds nothing.)
+  const lastCommit = page.length && page.at(-1).src === 'graph' ? page.at(-1).row.graph.commitSeq : null;
+  while (lastCommit != null && page.length < merged.length && merged[page.length].src === 'graph' && merged[page.length].row.graph.commitSeq === lastCommit) {
+    page.push(merged[page.length]);
+  }
   const events = page.map((it) => (it.src === 'graph' ? eventOfGraphRow(it.row) : it.ev));
   const maxOf = (src, pos) => page.filter((it) => it.src === src).reduce((m, it) => Math.max(m ?? 0, pos(it)), null);
   // a skipped export counts toward the page's log high-water: a page of ONLY skipped exports
   // still returns an ack token, or the lane would be re-served the same empty page forever
-  const maxSeq = !graph && skipped ? logRead.reduce((m, ev) => Math.max(m, ev.seq), maxOf('log', (it) => it.ev.seq) ?? 0) : maxOf('log', (it) => it.ev.seq);
+  let maxSeq = !graph && skipped ? logRead.reduce((m, ev) => Math.max(m, ev.seq), maxOf('log', (it) => it.ev.seq) ?? 0) : maxOf('log', (it) => it.ev.seq);
+  // #1762 S4 A2 — a PROVEN covered tail (no owed node below F) moves the log half to F.logSeq, and only when this token is acked
+  if (history && !logEvents.length && history.logHigh != null) maxSeq = history.logHigh;
   const maxCommit = maxOf('graph', (it) => it.row.graph.commitSeq);
   return {
     events,
-    envelope: { ...envelopeFor(eventDir, key, { state, head, graph }),
+    envelope: { ...envelopeFor(eventDir, key, { state, head, graph, history }),
       ...(translation ? { translated_skipped: skipped, rollback_translation: { graph_acked: translation.graph_acked,
         graph_epoch: graphEpochOf(s), graph_incarnation: graphIncarnationOf(s), through_seq: translation.through } } : {}) },
     known: !!s,
