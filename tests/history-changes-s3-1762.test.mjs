@@ -30,7 +30,7 @@
  *   CH17 a KNOWN lane keeps its cursor when F appears, and /api/changes reads with F present never move it (a control: S3 changes no lane)
  *   CH18 a write that lands between the page's reads never yields a MIXED answer (one snapshot, or a 503); CH19 a post-F S2 refusal record is served, two of one
  *         entity are two rows; CH20 a receipt and its native activity are ONE row; CH21 the `since` cutoff compares the full instant; CH22 a frontierLogSeq past the
- *         safe integers, and a marker with no commitSeq or two, are refused 503 (a marker fault: HISTORY_FRONTIER_INVALID or GRAPH_EXECUTOR_UNAVAILABLE, not pinned); CH23 the F read failing after the cards guard passed is
+ *         safe integers, and a marker with no commitSeq or two, are refused 503 (a marker fault: HISTORY_FRONTIER_INVALID or GRAPH_EXECUTOR_UNAVAILABLE, not pinned); CH24 no F and an unreadable or malformed store marker is a 503 GRAPH_EXECUTOR_UNAVAILABLE, never a log-only answer; CH23 the F read failing after the cards guard passed is
  *         503 GRAPH_EXECUTOR_UNAVAILABLE (CH18-CH22 are the integration review's reproductions at e32b0c2; CH9 now runs LAST because it kills the executor)
  *   CH16 reproject: derived, history-only (never latest, not counted by default; op update / nativeOp reproject with history:true, counted)
  *   CH15 walking backward: every native row exactly once, no commit split across pages
@@ -767,6 +767,30 @@ test('#1762 S3 CH23 — the executor answers everything EXCEPT the frontier read
     assert.equal(r.json?.changes, undefined, 'and not a log-only answer');
   } finally { if (server) await server.stop(); await proxy.close(); }
 });
+
+// ── CH24 no F, but the store's marker is not readable ──
+const MARKER_ROW = (x) => x.src?.value === 'marker';
+for (const [label, rewrite] of [
+  ['the marker answers with NO rows at all', (b) => b.filter((x) => !MARKER_ROW(x))],
+  ['the marker answers with no commitSeq', (b) => b.filter((x) => !(MARKER_ROW(x) && x.p?.value === MARKER_COMMIT))],
+  ['the marker answers with TWO contradictory commitSeq values', (b) => [...b, { src: { type: 'literal', value: 'marker' }, p: { type: 'uri', value: MARKER_COMMIT }, o: { type: 'literal', datatype: `${XSD}integer`, value: '0' } }]],
+]) {
+  test(`#1762 S3 CH24 — NO frontier and ${label}: 503 GRAPH_EXECUTOR_UNAVAILABLE with no rows and no cursor, never a log-only answer (confirmed absence of F is not enough without a readable store marker)`, T, async () => {
+    await W.clearFrontier();
+    const proxy = await interpose({ rewrite: async (q, buf) => { if (!FRONTIER_READ(q)) return null; const j = JSON.parse(buf.toString()); j.results.bindings = rewrite(j.results.bindings); return Buffer.from(JSON.stringify(j)); } });
+    let server = null;
+    try {
+      server = await W.startRest({ SCRUM_GRAPH_EXECUTOR_URL: proxy.url });
+      proxy.state.rewritten = 0;
+      const r = await server.get(`/api/changes?since=${SINCE_ALL}&history=true`);
+      assert.ok(proxy.state.rewritten >= 1, `PRECONDITION: the interposer rewrote the marker read (${proxy.state.rewritten})`);
+      assert.equal(r.status, 503, `(got ${r.status}: ${r.text.slice(0, 200)})`);
+      assert.equal(r.json?.code, 'GRAPH_EXECUTOR_UNAVAILABLE', `named (got ${r.json?.code})`);
+      assert.equal(r.json?.changes, undefined, 'no rows (no log fallback)');
+      assert.equal(r.json?.cursor, undefined, 'and no cursor');
+    } finally { if (server) await server.stop(); await proxy.close(); }
+  });
+}
 
 // CH9 runs LAST: it kills the shared executor, so every row after it would fail for that reason alone
 // ── CH9 ──
