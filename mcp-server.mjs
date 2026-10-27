@@ -104,13 +104,8 @@ import { createDirectSegment } from './core/token-ring-direct.mjs';   // #1362
 // #1215 — the unregistered-thing emitter: the board announces a newly-seen
 // undeclared kind once, as itself. Reads the same standing[] the digest reads.
 import { emitterTick } from './core/unregistered-emitter.mjs';
-import { isGateArmed, decideCoveredAction } from './core/work-gate.mjs';
-import { openWorkObjectsAt } from './core/work-store.mjs';
-// #755 slice 2e — the INPUT PATH. Until this import existed, `core/work-tools.mjs`
-// had a green suite and zero callers, so no seat could create a work object and
-// signal 1 was unmeasurable BY CONSTRUCTION rather than merely unmeasured.
-import { workDeclare, workBid, workNobid, workContest, workGrant, workWithdraw, workList } from './core/work-tools.mjs';
-import { workLedgerSummary } from './core/in-flight.mjs';
+// #1763 — the retired work ledger's board_status summary: counts from the graph, never the file.
+import { retiredWorkLedger, WORK_LEDGER_COUNT_QUERY } from './core/in-flight.mjs';   // #1763
 // #755 BRANCH E — the claim throttle. Its own flag; see core/claim-throttle.mjs.
 import { decideThrottle, isThrottleArmed, COOLDOWN_MS } from './core/claim-throttle.mjs';
 import { validateConfig, DEFAULT_CONFIG } from './channel-config.mjs';
@@ -578,115 +573,9 @@ function buildMcpServer() {
     return { ok: true, seatId: result.seatId, epoch: result.epoch, supersededSession: result.supersededSession, cursor };
   });
 
-  // ── #755 slice 2b — the enforced adapter, chosen ONCE at registration ──
-  //
-  // FLAG-OFF MEANS NOT INSTALLED. isGateArmed() is read HERE, outside every
-  // request, to decide WHICH FUNCTION IS REGISTERED. The alternative — a
-  // flag check inside the handler that returns early — would put the gate
-  // permanently in card_create's path and make one inverted boolean the
-  // entire safety story, while the suite stayed green because tests run with
-  // the flag ON.
-  //
-  // It matters more than it looks: neither prod service has restarted since
-  // Aug 7/8, so an UNRELATED restart is when this code first loads in
-  // production. With absence, that restart is a non-event. With a branch, it
-  // is a live arming nobody scheduled and nobody witnessed.
-  //
-  // #755 slice 2d — the store is LIVE. This is the line that turned the
-  // adapter from tested-and-inert into live-when-armed.
-  //
-  // ⚠️ It is still gated by the flag: with the flag off, gatedCardCreate is
-  // never registered, so none of this is in the request path at all.
-  //
-  // ⚠️ A missing store directory reads as ZERO open work objects rather than
-  // throwing. A rail whose failure mode is "card_create stops working" is
-  // worse than the problem it solves.
-  // ⛔ NO DEFAULT. isGateArmed() refuses to arm without SCRUM_WORK_STORE and
-  // refuses a path inside the repo, so if we are here the value exists and is
-  // outside the tree we publish. The first version defaulted to
-  // <repo>/work-objects — a new data stream in the public clone, inert only
-  // because the gate had never been armed. Arming would have created it.
-  const WORK_STORE_DIR = process.env.SCRUM_WORK_STORE;
-  const openWorkObjects = () => openWorkObjectsAt(WORK_STORE_DIR, new Date().toISOString());
-
+  // #1763 — the #755 work gate and its ledger are RETIRED (owner, 2026-10-27: "let it go"). No work gate is installed
+  // in any request path, whatever SCRUM_WORK_GATE / SCRUM_WORK_STORE say: the new code is inert against the old plist.
   const plainCardCreate = async (args) => jsonResult(await apiCall('POST', '/api/cards', args));
-
-  const gatedCardCreate = async (args) => {
-    const decision = decideCoveredAction({
-      actor: args.createdBy,
-      workObjects: openWorkObjects(),
-      now: new Date().toISOString(),
-    });
-    if (!decision.allow) {
-      reportRefusal({ actor: args.createdBy, rule: '#755 work gate', reason: decision.reason,
-        entity: { kind: 'card', id: decision.workObjectId || 'create' }, request: args, route: 'mcp card_create' });
-      return jsonResult({
-        refused: true,
-        rule: '#755 work gate',
-        reason: decision.reason,
-        workObjectId: decision.workObjectId,
-      });
-    }
-    return plainCardCreate(args);
-  };
-
-  // ── #889 — THE CARD-TARGETING GATE, which is the one that can actually refuse
-  //
-  // ⛔ card_create was the wrong tool to wrap. A create BRINGS a card into
-  // existence and so names none at decision time, which meant a card-scoped
-  // gate could never match it: production read `0 / 39 · does not fire` for a
-  // population that could not contain a violation. The declared work happens on
-  // a card that ALREADY EXISTS, so update and move are the acts a window is a
-  // mutex over.
-  //
-  // ⚠️ TWO PROPERTIES THIS SHAPE BUYS, both deliberate:
-  //
-  // 1. THE HOT PATH PAYS NOTHING. card_update is the board's most common write.
-  //    `openWorkObjects()` is a local file read and it short-circuits: with no
-  //    open windows — the normal state — nothing else happens, and in particular
-  //    no shortId resolution round-trip. A rail whose steady-state cost sits in
-  //    front of every edit is how a safety mechanism becomes the outage.
-  //
-  // 2. A UUID IS RESOLVED, NOT WAVED THROUGH. `id` is documented as "Card UUID
-  //    or shortId" and work objects store a shortId, so comparing the raw
-  //    argument would fail open on every UUID — a bypass one card_get wide,
-  //    while the rail went on reporting itself armed. We resolve, and only when
-  //    a refusal is actually possible.
-  const resolveShortId = async (id) => {
-    if (/^\d+$/.test(String(id))) return Number(id);
-    try {
-      const card = await apiCall('GET', `/api/cards/${encodeURIComponent(id)}`);
-      return typeof card?.shortId === 'number' ? card.shortId : null;
-    } catch {
-      // ⚠️ FAIL OPEN, and say why: a gate that refuses because a lookup failed
-      // turns every REST hiccup into "the board stops accepting edits". The
-      // window still binds the seat's OTHER ops; this one call goes through.
-      return null;
-    }
-  };
-
-  const gateCardTargeting = (plain) => async (args) => {
-    const objects = openWorkObjects();
-    if (objects.length === 0) return plain(args);
-
-    const decision = decideCoveredAction({
-      actor: args.by,
-      workObjects: objects,
-      now: new Date().toISOString(),
-      card: await resolveShortId(args.id),
-    });
-    if (!decision.allow) {
-      reportRefusal({ actor: args.by, rule: '#755 work gate', reason: decision.reason,
-        entity: { kind: 'card', id: args.id }, request: args, route: 'mcp card-targeting gate' });
-      return jsonResult({
-        refused: true,
-        rule: '#755 work gate',
-        reason: decision.reason,
-        workObjectId: decision.workObjectId,
-      });
-    }
-    return plain(args);
-  };
 
   // ── #755 BRANCH E — the claim throttle ───────────────────────────────────
   //
@@ -765,140 +654,22 @@ function buildMcpServer() {
     }
     : (inner) => inner;
 
-  // #790 — read the flag ONCE and keep the ANSWER, not the artefact built from
-  // it. The old form asked `cardCreateHandler === gatedCardCreate` below to
-  // decide whether to register the work tools; `withThrottle` returns a WRAPPER
-  // when the throttle is armed, so that identity went false by construction and
-  // all six work tools silently vanished from a server whose every flag read
-  // `on`. Arming one flag deleted a different flag's entire tool surface.
-  const gateArmed = isGateArmed();
-  const cardCreateHandler = gateArmed ? withThrottle(gatedCardCreate) : withThrottle(plainCardCreate);
+  const cardCreateHandler = withThrottle(plainCardCreate);   // #1763 — the claim throttle stays; the work gate is retired
 
-  // #889 — same FLAG-OFF-MEANS-NOT-INSTALLED shape as card_create: `gateArmed`
-  // is the one answer isGateArmed() produced, never a second read, and with the
-  // gate off the plain handler is what gets registered — the gate is not in the
-  // request path at all rather than being a branch inside it.
   const plainCardUpdate = async ({ id, ...patch }) =>
     jsonResult(await apiCall('PATCH', `/api/cards/${encodeURIComponent(id)}`, patch));
-  // ⚠️ `by` is FORWARDED, not just accepted. #889 added the field so the gate
-  // could see the actor; dropping it here would have made card_move the one
+  // ⚠️ `by` is FORWARDED, not just accepted. #889 added the field (for the since-retired work gate) so the actor is known;
+  // dropping it here would have made card_move the one
   // write whose author the event log never learns — a field validated and then
   // discarded, which is the defect this room keeps finding in other people's
   // code. card_update has always passed it through.
   const plainCardMove = async ({ id, column, by }) =>
     jsonResult(await apiCall('PATCH', `/api/cards/${encodeURIComponent(id)}`, { column, ...(by ? { by } : {}) }));
 
-  const cardUpdateHandler = gateArmed ? gateCardTargeting(plainCardUpdate) : plainCardUpdate;
-  const cardMoveHandler = gateArmed ? gateCardTargeting(plainCardMove) : plainCardMove;
+  const cardUpdateHandler = plainCardUpdate;
+  const cardMoveHandler = plainCardMove;
 
-  // ── #755 slice 2e — Work tools: the INPUT PATH ───────────────────
-  //
-  // ⚠️ Registered ONLY when the gate is armed, and the condition is not a
-  // second read of the flag — it is the SAME answer card_create's selection
-  // used. `isGateArmed()` is called exactly once in this file (a test asserts
-  // the count), so the tools' presence and the gate's arming cannot drift
-  // apart the way ENFORCED_OPS and the wrapped tool did.
-  //
-  // ⛔ #790 — this used to compare `cardCreateHandler === gatedCardCreate`,
-  // which is the same intent expressed over the wrong object: the HANDLER is
-  // built from the flag AND the throttle, so it stopped naming the flag the
-  // moment a second wrapper existed. Share the ANSWER, never an artefact
-  // downstream of it — an artefact acquires new dependencies and says nothing
-  // when it does.
-  //
-  // ⇒ FLAG-OFF MEANS NOT INSTALLED here too: with the gate off there is no
-  //   SCRUM_WORK_STORE, so a declaration would have nowhere to go. A tool that
-  //   accepts a bid it cannot persist is worse than no tool.
-  //
-  // ⚠️ `now` is read HERE and nowhere below. work-auction, work-store and
-  // work-tools all refuse a missing clock on purpose — this adapter is the one
-  // boundary where the wall clock legitimately enters, which is what keeps
-  // DESIGN B (state derived at read time) from decaying back into DESIGN A (a
-  // live timer that a restart silently drops).
-  if (gateArmed) {
-    const withCtx = (fn) => async (args) => jsonResult(fn({ ...args, dir: WORK_STORE_DIR, now: new Date().toISOString() }));
-
-    // The seat key, declared not authenticated — same contract as createdBy.
-    const by = z.string().min(1).describe('REQUIRED — your seat key. Who is answering. Declared, not authenticated.');
-    const id = z.string().min(1).describe('Work object id — short, opaque, and yours to choose (e.g. "w-755-wiring")');
-
-    // ⛔ There is no title, description, or note field on this surface, in any
-    // tool, deliberately. The prose lives on the CARD, which is an
-    // already-guarded surface; a work object is a POINTER. That is what makes
-    // "no PII can reach the work-object log" a structural property rather than
-    // a habit — there is no field for it to arrive in. A test asserts it.
-    mcp.registerTool('work_declare', {
-      description: 'Declare that you intend to do a piece of work, and open a reply window on it. '
-        + 'The other required seats bid, nobid, or contest; silence at replyBy grants it to you. '
-        + 'While your window is open you may not take a covered action (see #755). '
-        + '⭐ #1284 — anchor it with `card` OR `sourceMessageId`. Most asks arrive as a message '
-        + 'with no card, and that is the case every recorded collision started from.',
-      inputSchema: {
-        id,
-        by,
-        // ⛔ #1284 — OPTIONAL, and it was the schema that made it mandatory.
-        // `declare()` has defaulted card to null since #755 slice 2e and says
-        // so in its own comment; this allowlist is what the seats can reach,
-        // and zod strips what it omits, so a field absent HERE does not exist
-        // for any caller no matter what the core accepts (#534's defect).
-        card: z.number().int().optional().describe('The card shortId this work is about — a pointer, not a description. Optional: give this OR sourceMessageId.'),
-        // ⛔⛔ SHAPE-CONSTRAINED ON PURPOSE, and the constraint is the PII guard.
-        // This surface has NO free-text field by design — that is what makes
-        // "no PII can reach the work-object log" structural rather than a
-        // habit, and a test walks every work_* property to enforce it. A bare
-        // z.string() here would have been a "just a short note" field with a
-        // respectable name: it went red on the first full run, correctly.
-        //
-        // ⇒ A commons message id is a UUID (verified across the live feed), so
-        //   pinning the pattern keeps the anchor reachable AND keeps prose
-        //   structurally unable to arrive in it. An opaque key, same class as
-        //   `id` and `by` — not an exemption from the rule.
-        sourceMessageId: z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
-          .optional()
-          .describe('The commons message id (UUID) this work answers — the anchor for an ASK, which is what most requests are when they arrive. A room-wide ask has no card yet, and by the time two seats would reach for card_claim each has already decided to act. Give this OR card.'),
-        required: z.array(z.string()).min(1).describe('Seat keys who should answer. Their silence at replyBy is what grants.'),
-        replyByMinutes: z.number().positive().describe('REQUIRED, no default — how long the window stays open. '
-          + 'A bid without a deadline is not a window, it is an intention that resolves when the bidder decides it has.'),
-      },
-    }, withCtx(workDeclare));
-
-    mcp.registerTool('work_bid', {
-      description: 'Contest by also bidding: you want this work too. Sends the window to arbitration at close.',
-      inputSchema: { id, by },
-    }, withCtx(workBid));
-
-    mcp.registerTool('work_nobid', {
-      description: 'Decline this work. Once every required seat has answered, the window closes early rather than waiting out the clock.',
-      inputSchema: { id, by },
-    }, withCtx(workNobid));
-
-    mcp.registerTool('work_contest', {
-      description: 'Object to the declaration — the work is wrong, already done, or not yours to take. Suspends the grant pending arbitration.',
-      inputSchema: { id, by },
-    }, withCtx(workContest));
-
-    mcp.registerTool('work_grant', {
-      description: 'Record an explicit grant, resolving a contested window.',
-      inputSchema: { id, by, to: z.string().min(1).describe('Seat key the work is granted to') },
-    }, withCtx(workGrant));
-
-    // #886 — the remedy the gate's refusal already named. Until this line the
-    // message said "withdraw the bid" and no such tool existed, so a blocked
-    // seat's only reachable options were waiting out the clock or routing
-    // around the rail. One real seat chose to grant the work to herself, which
-    // recorded a settlement that never happened.
-    mcp.registerTool('work_withdraw', {
-      description: 'Close your OWN open window without taking the work. Only the seat that declared it may '
-        + 'withdraw it, and the record is kept — the window leaves `open`, it is not erased.',
-      inputSchema: { id, by },
-    }, withCtx(workWithdraw));
-
-    mcp.registerTool('work_list', {
-      description: 'What is in play and what has settled. Both DERIVED at read time from the transition log — '
-        + 'nothing is stored, so a restart changes nothing.',
-      inputSchema: {},
-    }, withCtx(workList));
-  }
+  // #1763 — the work tools (work_declare/bid/nobid/contest/grant/withdraw/list) are RETIRED: never registered.
 
   // ── Card tools ───────────────────────────────────────────────────
   mcp.registerTool('card_create', {
@@ -2114,16 +1885,21 @@ function buildMcpServer() {
       + 'of work via an `apex:<label>` label, with their containment counts — "what lives here", no '
       + 'seat and no SPARQL needed). Bounded — safe as a first call. For full data use card_list / '
       + 'conversation_list, or the board-state resource. #1078: `inFlight` is THE answer to "what '
-      + 'is the room working on" — the claim is authoritative; the in-progress column and the '
-      + 'work-bid ledger are derived, and `inFlight.disagreements` names every card on which they '
-      + 'differ (stale leases, claimed-and-parked, in-progress-but-unclaimed). `workLedger` '
-      + 'summarises the bid/grant store work_list reads, with `dormant` computed rather than inferred.',
+      + 'is the room working on" — the claim is authoritative; the in-progress column is derived, and '
+      + '`inFlight.disagreements` names every card on which they differ (stale leases, claimed-and-parked, '
+      + 'in-progress-but-unclaimed). `workLedger` is `{retired: true, since, actions, workObjects}`: the #755 '
+      + 'work-bid ledger is RETIRED (#1763) and its tools no longer exist; the counts are its history in the '
+      + 'graph, or null with `unavailable` when the graph cannot be read.',
     inputSchema: {},
   }, async () => {
     const status = await apiCall('GET', '/api/board/status');
     // #1078 — the ledger lives on this process (SCRUM_WORK_STORE), not the REST
     // server, so the third surface is joined here. Absent store ⇒ says so.
-    const workLedger = workLedgerSummary(process.env.SCRUM_WORK_STORE, new Date().toISOString());
+    // #1763 — the ledger is retired: its counts come from the graph, and a graph that cannot answer leaves board_status whole
+    let workLedger;
+    // source: 'executor' — the graph that HOLDS the ledger. Never the in-process replica, whose empty answer would be a fabricated 0.
+    try { workLedger = retiredWorkLedger(await apiCall('POST', '/api/graph', { query: WORK_LEDGER_COUNT_QUERY, source: 'executor' })); }
+    catch (e) { workLedger = retiredWorkLedger({ error: e?.message || 'the graph query failed' }); }
     return jsonResult({ ...status, workLedger });
   });
 

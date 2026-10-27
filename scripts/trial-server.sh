@@ -77,7 +77,6 @@ SCRUM_EVENT_LOG_DIR=$DATA/events
 SCRUM_SEAT_TOKENS=$DATA/seat-tokens.json
 SCRUM_ROSTER_FILE=$DATA/roster.json
 SCRUM_ATTACHMENTS_DIR=$DATA/attachments
-SCRUM_WORK_STORE=$DATA/work-objects.jsonl
 SCRUM_WHISPER_STATE_FILE=$DATA/whisper-state.json
 SCRUM_WHISPER_POOL_FILE=$DATA/whisper-pool.json
 SCRUM_UNREGISTERED_STATE_FILE=$DATA/unregistered-state.json

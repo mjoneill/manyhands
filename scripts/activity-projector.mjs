@@ -30,7 +30,7 @@ function parse(argv) {
 }
 
 const args = parse(process.argv.slice(2));
-const missing = ['log', 'work', 'executor'].filter((k) => !args[k]);
+const missing = ['log', 'executor'].filter((k) => !args[k]);   // #1763 — --work is accepted and ignored
 if (args.bad || missing.length) {
   console.error(`activity-projector: ${args.bad ?? `missing ${missing.map((k) => `--${k}`).join(', ')}`} (no defaults: every input is passed explicitly)`);
   process.exit(2);
@@ -40,7 +40,8 @@ const tickMs = args['tick-ms'] ? Number(args['tick-ms']) : 1000;
 if (!Number.isInteger(batchSize) || batchSize < 1) { console.error('activity-projector: --batch must be a positive integer'); process.exit(2); }
 if (!Number.isInteger(tickMs) || tickMs < 100) { console.error('activity-projector: --tick-ms must be an integer >= 100'); process.exit(2); }
 
-const opts = { logDir: args.log, workDir: args.work, executorUrl: args.executor.replace(/\/$/, ''), batchSize };
+if (args.work) console.error('work ledger retired (#1763): --work ignored');
+const opts = { logDir: args.log, executorUrl: args.executor.replace(/\/$/, ''), batchSize };
 const log = (m) => console.log(`${new Date().toISOString()} activity-projector: ${m}`);
 
 if (args.once) {

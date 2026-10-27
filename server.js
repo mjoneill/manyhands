@@ -1573,7 +1573,6 @@ function writeWatermark() {
   return { generation: _graphGeneration, projectedThrough: _graphProjectedThrough };
 }
 // #1112 item 3 — one warning per boot when the ledger cannot be projected here.
-let _workStoreWarned = false;
 const GRAPH_QUERY_LOG = path.join(DATA_DIR, 'graph-query-log.jsonl');   // #1788
 // ── #1086 item 13 — QUERY → CARD retrieval, as a feature ──────────────────────
 // The embedder is CONFIGURED, never assumed: an unset URL/model answers
@@ -1772,7 +1771,7 @@ async function warmGraphStore() {
 
 async function warmGraphStoreOnce() {
   countLegacy('graphReplicaSync');
-  const { buildGraphStore, syncGraphStoreChunked, verifyHashCache, projectActivities, projectLabelAliases, projectWorkLedger } = await loadGraphModules();
+  const { buildGraphStore, syncGraphStoreChunked, verifyHashCache, projectActivities, projectLabelAliases } = await loadGraphModules();
   let rebuiltMs = null;
   if (_graphDirty || !_graphStore) {
     // #714 — INCREMENTAL. The old path threw the store away and re-projected
@@ -1895,26 +1894,7 @@ async function warmGraphStoreOnce() {
       console.error(`${new Date().toISOString()} graph-replica: ACTIVITIES NOT PROJECTED (${e?.message}) — traversal is unaffected, but prov:Activity is incomplete past seq ${_activitySeq}`);
     }
 
-    // #1112 item 3 — the WORK LEDGER is part of the graph (Decision 3956b66b).
-    // Same wiring lesson as the block above: projectWorkLedger existed for zero
-    // minutes before this call site, on purpose. The store is small (53 rows on
-    // 2026-08-30) and the projection is idempotent by (id, seq), so it re-runs
-    // whole on every sync — no cursor to hold. An UNSET env is a named absence,
-    // once per boot, not a silent zero: this server historically did not carry
-    // SCRUM_WORK_STORE (only the MCP process did), and a deploy that forgets
-    // the plist line must be discoverable from the log.
-    try {
-      const workDir = process.env.SCRUM_WORK_STORE;
-      if (workDir) {
-        const { readWorkObjectRows } = await import('./core/work-store.mjs');
-        projectWorkLedger(_graphStore, readWorkObjectRows(workDir));
-      } else if (!_workStoreWarned) {
-        _workStoreWarned = true;
-        console.error(`${new Date().toISOString()} graph-replica: WORK LEDGER NOT PROJECTED — SCRUM_WORK_STORE is unset on this process, so schema:Action answers zero for a protocol that has rows elsewhere`);
-      }
-    } catch (e) {
-      console.error(`${new Date().toISOString()} graph-replica: WORK LEDGER NOT PROJECTED (${e?.message}) — traversal is unaffected, but schema:Action is incomplete`);
-    }
+    // #1763 — the work ledger is RETIRED; its 53 transitions are already executor nodes, so nothing is projected here.
 
     // #949 — recorded from the stamp of the bytes we actually projected, NOT
     // from the log's head at this instant. If a write landed during the awaited

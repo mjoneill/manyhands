@@ -15,10 +15,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { inFlight, workLedgerSummary, STALE_AFTER_HOURS, DORMANT_AFTER_DAYS } from '../core/in-flight.mjs';
+import { inFlight, retiredWorkLedger, WORK_LEDGER_COUNT_QUERY, STALE_AFTER_HOURS } from '../core/in-flight.mjs';
 
 const NOW = '2026-08-29T13:10:00.000Z';
 const card = (shortId, over = {}) => ({
@@ -102,46 +99,21 @@ test('now is required — a defaulted clock is how a derived view stops reportin
   assert.throws(() => inFlight([], {}), /now/);
 });
 
-// ── the ledger ──────────────────────────────────────────────────────────────
+// ── the ledger: RETIRED (#1763) ──────────────────────────────────────────────
+// board_status's summary is counts from ONE graph query and nothing else; the file is never read.
 
-const line = (id, seq, at, kind = 'declare', extra = {}) => JSON.stringify({
-  id, seq, card: 1, declaredBy: 'ada', replyBy: '2026-08-10T00:20:00.000Z', required: ['bo'],
-  transition: { type: kind, at, by: 'ada', ...extra },
-}) + '\n';
-
-test('no store configured → available:false with the reason, never a confident zero', () => {
-  const r = workLedgerSummary(undefined, NOW);
-  assert.equal(r.available, false);
-  assert.match(r.reason, /SCRUM_WORK_STORE/);
-  assert.equal('open' in r, false);
+test('#1763 the retired ledger summary reports the graph\'s counts, read from either binding shape', () => {
+  assert.deepEqual(retiredWorkLedger({ source: 'executor', rows: [{ actions: '53', workObjects: '17' }] }), { retired: true, since: '2026-08-18', actions: 53, workObjects: 17 });
+  assert.deepEqual(retiredWorkLedger({ source: 'executor', rows: [{ actions: { value: '3' }, workObjects: { value: '2' } }] }), { retired: true, since: '2026-08-18', actions: 3, workObjects: 2 });
+  assert.match(WORK_LEDGER_COUNT_QUERY, /schema:Action/); assert.match(WORK_LEDGER_COUNT_QUERY, /scrum:WorkObject/);
 });
 
-test('an empty store is available, has never recorded a transition, and is NOT called dormant — dormant means "went quiet", not "never spoke"', () => {
-  const d = mkdtempSync(join(tmpdir(), 'inflight-'));
-  const r = workLedgerSummary(d, NOW);
-  assert.equal(r.available, true);
-  assert.equal(r.open, 0);
-  assert.equal(r.settled, 0);
-  assert.equal(r.lastTransitionAt, null);
-  assert.equal(r.dormant, false);
-  assert.equal(r.dormantAfterDays, DORMANT_AFTER_DAYS);
-});
-
-test('the #1078 ledger: last transition 11 days ago → dormant, with the date it went quiet', () => {
-  const d = mkdtempSync(join(tmpdir(), 'inflight-'));
-  writeFileSync(join(d, 'work-objects.jsonl'),
-    line('w1', 0, '2026-08-10T00:00:00.000Z') + line('w1', 1, '2026-08-18T00:00:00.000Z', 'withdraw'));
-  const r = workLedgerSummary(d, NOW);
-  assert.equal(r.open, 0);
-  assert.equal(r.settled, 1);
-  assert.equal(r.lastTransitionAt, '2026-08-18T00:00:00.000Z');
-  assert.equal(r.dormant, true);
-});
-
-test('a transition inside the window → not dormant', () => {
-  const d = mkdtempSync(join(tmpdir(), 'inflight-'));
-  writeFileSync(join(d, 'work-objects.jsonl'), line('w1', 0, '2026-08-28T00:00:00.000Z'));
-  const r = workLedgerSummary(d, NOW);
-  assert.equal(r.dormant, false);
-  assert.equal(r.lastTransitionAt, '2026-08-28T00:00:00.000Z');
+test('#1763 a graph that cannot answer is UNAVAILABLE with null counts — never a confident zero', () => {
+  for (const bad of [null, { error: 'the graph could not be read' }, { source: 'executor', rows: [] }, { source: 'executor', rows: [{ actions: 'x', workObjects: '1' }] },
+    { source: 'replica', rows: [{ actions: '0', workObjects: '0' }] }, { rows: [{ actions: '0', workObjects: '0' }] }]) {
+    const r = retiredWorkLedger(bad);
+    assert.equal(r.retired, true); assert.equal(r.actions, null); assert.equal(r.workObjects, null);
+    assert.equal(typeof r.unavailable, 'string', JSON.stringify(bad));
+  }
+  assert.equal(retiredWorkLedger({ error: 'boom' }).unavailable, 'boom', 'the reason is carried, not replaced');
 });
