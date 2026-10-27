@@ -84,6 +84,13 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:color': 'color',   // #1764 → a roster seat's hex colour (roster.json `color`)
   'scrum:glyph': 'glyph',   // #1764 → a roster seat's glyph (roster.json `glyph`)
   'scrum:aliases': 'aliases',   // #1764 → a roster seat's aliases, one literal each (roster.json `aliases`)
+  'scrum:ChannelConfig': null,              // #1784 — the type; the channel delivery config, one node
+  'scrum:channelMode': 'scrum:channelMode',   // #1784 → soft | hard | off | token-ring (a literal)
+  'scrum:softMinMs': 'scrum:softMinMs', 'scrum:softMaxMs': 'scrum:softMaxMs',   // #1784 → the soft window (xsd:integer ms)
+  'scrum:hardTimeoutMs': 'scrum:hardTimeoutMs', 'scrum:tokenRingTimeoutMs': 'scrum:tokenRingTimeoutMs',   // #1784 (xsd:integer ms)
+  'scrum:bearerSeat': 'scrum:bearerSeat',   // #1784 → a seat key that joins the token ring by bearer (a literal, repeated)
+  'scrum:residentReplyWakesPerPairPerHour': 'scrum:residentReplyWakesPerPairPerHour',   // #1784 (#1411's pair cap, xsd:integer)
+  'scrum:configImportedFrom': 'scrum:configImportedFrom', 'scrum:configImportedAt': 'scrum:configImportedAt',   // #1784 — the one-time file import
   'scrum:fencedAt': 'scrum:fencedAt',       // #1707 → when it was fenced (absent on an imported legacy fence)
   'scrum:with': 'scrum:with',               // → the seat a talk is with
   'scrum:conversation': 'scrum:conversation', // → the talk a post is tagged into (#1401)

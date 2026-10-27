@@ -55,6 +55,8 @@ const DECLARED_SINCE_GOLDEN = [
   'scrum:MoveFence', 'scrum:fencedMove', 'scrum:fencedAt',   // #1707 — the move fences
   'scrum:LabelAlias', 'scrum:aliasLabel', 'scrum:canonicalLabel',   // #1640 — label aliases as records
   'scrum:RosterSeat', 'scrum:RosterRoles', 'scrum:rosterOrder', 'scrum:kind', 'scrum:poSeat', 'scrum:color',   // #1764 — the configured roster
+  'scrum:ChannelConfig', 'scrum:channelMode', 'scrum:softMinMs', 'scrum:softMaxMs', 'scrum:hardTimeoutMs', 'scrum:tokenRingTimeoutMs',
+  'scrum:bearerSeat', 'scrum:residentReplyWakesPerPairPerHour', 'scrum:configImportedFrom', 'scrum:configImportedAt',   // #1784 — the channel config node
 ];
 const PREFIX = { scrum: 'https://scrumboard.local/ns#', schema: 'https://schema.org/', entity: 'https://scrumboard.local/entity/', column: 'https://scrumboard.local/column/' };
 const iri = (pfx) => { const [p, l] = pfx.split(':'); return PREFIX[p] ? `<${PREFIX[p]}${l}>` : null; };
