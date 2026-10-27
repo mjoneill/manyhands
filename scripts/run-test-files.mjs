@@ -6,6 +6,7 @@ import {
 } from './verdict-ledger.mjs';
 import fs from 'node:fs';
 import { createSuiteTmp, fileTmp, teardown, TOKEN_VAR } from './suite-tmp.mjs';
+import { hostGuardConfig, launchCheck, startGuard, HOST_GUARD_EXIT } from './host-guard.mjs';   // #1588
 
 const files = process.argv.slice(2);
 const startedAt = Date.now();
@@ -234,5 +235,22 @@ function launch() {
 }
 
 process.stdout.write('TAP version 13\n');
+// #1588 — the host-preservation guard: refuse to start into an overloaded host, and self-abort if it becomes one
+const guardCfg = hostGuardConfig();
+const atLaunch = launchCheck(guardCfg);
+if (atLaunch.line) process.stdout.write(`${atLaunch.line}\n`);
+if (atLaunch.refuse) {
+  settleTmp();
+  process.exit(HOST_GUARD_EXIT);
+}
+startGuard(guardCfg, {
+  rowsRun: () => testNumber,
+  abort(line) {
+    process.stdout.write(`${line}\n`);
+    reapAll();
+    settleTmp();   // the same ordered teardown as a signal: settle, report, remove
+    process.exit(HOST_GUARD_EXIT);
+  },
+});
 if (!files.length) finish();
 else launch();

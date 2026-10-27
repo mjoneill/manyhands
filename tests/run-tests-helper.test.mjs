@@ -103,6 +103,9 @@ function copyHelper(dir) {
   // ...and suite-tmp.mjs runs proc-env-owned.py on macOS to decide which processes are the run's
   const PROC_ENV = path.join(ROOT, 'scripts', 'proc-env-owned.py');
   if (fs.existsSync(PROC_ENV)) fs.copyFileSync(PROC_ENV, path.join(dir, 'scripts', 'proc-env-owned.py'));
+  // #1588 — and the host-preservation guard it consults before and during a full suite
+  const HOST_GUARD = path.join(ROOT, 'scripts', 'host-guard.mjs');
+  if (fs.existsSync(HOST_GUARD)) fs.copyFileSync(HOST_GUARD, path.join(dir, 'scripts', 'host-guard.mjs'));
 }
 
 test('positive control: a deliberately failing fixture exits nonzero and shows the failure', async () => {
