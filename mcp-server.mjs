@@ -4315,12 +4315,12 @@ process.on('unhandledRejection', (reason) => {
   console.error(`unhandledRejection — staying alive: ${reason}`);
 });
 
-// #1764 — the roster's first answer (or its deadline) before any session opens, then a refresh on a timer
+// #1764 / #1784 — the roster's and the channel config's first answers (or their deadlines) before any session opens, then
+// each refreshes on its own timer. Read IN PARALLEL: boot waits for the slowest (each bounded by its own 5 s deadline),
+// never their sum. In sequence, a slow REST made boot ~10 s and outlasted the test harness's 8 s readiness wait (#787).
 setInterval(() => { refreshRoster(); }, ROSTER_REFRESH_MS).unref();
-await refreshRoster();
-// #1784 — the first channel-config answer (or its deadline) before any session opens, then a refresh on a timer
 setInterval(() => { refreshChannelConfig(); }, CHANNEL_CONFIG_REFRESH_MS).unref();
-await refreshChannelConfig();
+await Promise.all([refreshRoster(), refreshChannelConfig()]);   // each catches its own failure and keeps its last value
 // #1785 — no session opens before the first tending read has answered (or timed out, closed): a session's tool surface is
 // fixed when it opens, so one opened earlier would keep the default (whisper tools absent) even with tending on.
 firstTendingRead.then(() => httpServer.listen(MCP_PORT, '127.0.0.1', () => {
