@@ -45,7 +45,7 @@
  *   R14 forty concurrent refusals: every one answers as before, and each is recorded or COUNTED (none vanishes)
  *   R14b with the executor STALLED, a server refusal still answers promptly (the audit is not on the response path)
  *   R15 entityId at the boundary: 64 characters stored, 65 or a dot absent
- *   R16 free text in the path of a route no router entry matches: nowhere; a record, if made, is scrum:unlisted
+ *   R16 a write to a route no router entry matches IS audited: one record, route and refusedAction scrum:unlisted, the marker nowhere
  *   R17 the record names its audit op with scrum:recordedBy (v2.2 section 8); the compiler's bookkeeping predicate is urn:ex:recordedBy
  *
  * CONTRACT v2.2 (commons/card #1762, 2026-10-27 00:45Z) is the reference: unknown code, rule, label or unmatched route is the IRI
@@ -638,15 +638,18 @@ test('#1762 S2 R15 — entityId at the boundary: 64 characters is stored, 65 cha
   });
 });
 
-// ── R16: free text in the PATH of an unmatched route (v2.2 section 1) ──
-test('#1762 S2 R16 — a refused write to a route no router entry matches: the marker in the path is nowhere, and a record, if one is made, says scrum:unlisted', T, async () => {
+// ── R16: a write to a route no router entry matches IS audited, as scrum:unlisted (v2.2 section 1) ──
+test('#1762 S2 R16 — a refused write to a route no router entry matches is audited: ONE record, scrum:route and scrum:refusedAction are scrum:unlisted, and the marker in the path is nowhere', T, async () => {
   await world(true, async ({ q, call, evdir }) => {
     const evBefore = await settledEv(evdir);
     const r = await call('PATCH', `/api/${MARK}-nothing-here`, { x: 1 });
     assert.ok(isRefusal(r), `PRECONDITION: a write to a route that does not exist is refused (${r.status} ${r.text.slice(0, 160)})`);
-    await sleep(1500);
-    assert.equal((await traces(q, MARK)).length, 0, 'R16: the marker in the path is nowhere in the graph');
-    for (const n of (await refusalRecords(q)).values()) assert.equal(one(n, RR.route, 'R16').value, UNLISTED, 'R16: a record for an unmatched route says scrum:route scrum:unlisted, never the raw path');
+    await sleep(2000);
+    const recs = [...(await refusalRecords(q)).values()];
+    assert.equal(recs.length, 1, `R16: the refusal is audited, one record (got ${recs.length})`);
+    assert.equal(one(recs[0], RR.route, 'R16').value, UNLISTED, 'R16: scrum:route is scrum:unlisted, never the raw path');
+    assert.equal(one(recs[0], RR.refusedAction, 'R16').value, UNLISTED, 'R16: and so is scrum:refusedAction');
+    assert.equal((await traces(q, MARK)).length, 0, 'R16: the marker in the path is nowhere');
     sameLog(evBefore, evState(evdir), 'R16');
   });
 });
