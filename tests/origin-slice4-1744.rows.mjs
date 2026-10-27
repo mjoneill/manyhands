@@ -1078,13 +1078,26 @@ test('#1744 (C2) every route OTHER than wiki-create still refuses a counter (wik
 // ── E: the sibling walk ──
 /** done-column setup through the public API: extra cards created and moved into done at explicit orders, no makeRoom */
 async function doneColumn(s, orders) {
-  const ids = [];
+  const ids = []; const shorts = [];
   for (const [k, ord] of orders.entries()) {
     const c = await s.call('POST', '/api/cards', { title: `sib ${k}`, createdBy: 'ada', requestId: `sib-${k}-${process.pid}` });
     assert.ok(ok2xx(c.status), `PRECONDITION: sibling ${k} created (${c.status} ${c.text.slice(0, 200)})`);
     const m = await s.call('PATCH', `/api/cards/${c.json.id}`, { column: 'done', order: ord, ifVersion: c.json.version, by: 'ada' });
     assert.equal(m.status, 200, `PRECONDITION: sibling ${k} moved into done at ${ord} (${m.status} ${m.text.slice(0, 200)})`);
     ids.push(c.json.id);
+    shorts.push(c.json.shortId);
+  }
+  // #1778 — each move into done publishes a "✅ #N done" announcement that the server does NOT await ("the publish never holds the PATCH"). Left to land on its
+  // own it can arrive AFTER a row's no-effect baseline, which reads as a refused write that added a post: measured under load, `posts: 3` where 2 were expected,
+  // the new post `✅ #4 done — what's the next pull?` recorded by an origin that was neither the row's control nor its forged submission, i.e. this setup's own
+  // move. So every row's baseline is taken only once its setup's announcements have landed (bounded: an announcement that never comes must not hang the row).
+  const t0 = Date.now();
+  for (const n of shorts) {
+    for (;;) {
+      const found = (await s.q(`SELECT ?s WHERE { ?s <https://schema.org/text> ?t FILTER(STRSTARTS(STR(?t), "✅ #${n} done")) }`)).length;
+      if (found > 0 || Date.now() - t0 > 20000) break;
+      await new Promise((r) => setTimeout(r, 25));
+    }
   }
   return ids;
 }
