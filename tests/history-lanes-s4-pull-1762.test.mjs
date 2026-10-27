@@ -15,8 +15,9 @@
  *   LP4a a genuine hole INSIDE the range (the log has no line at 3 or 4; nothing was deleted) is skipped by existing-node paging: a page is the next `limit` EXISTING nodes after
  *        `acked` (A-LP2, settled by the contract author), nothing is re-served or lost across a whole walk, and the token's `log` is the highest N served. It PASSES on main, whose log
  *        path already pages by existing events: it is there to bind the F path to the same rule
- *   LP4b HELD: a COVERED TAIL (no node left in (acked, F.logSeq] while acked < F.logSeq) is an empty page whose token has log = F.logSeq, the lane moving only when it is acked. SKIPPED until the
- *        proof that makes an empty tail safe is ruled (a count is not enough; the reviewer asked for a verifiable range proof): this oracle's fixture deletes a node, which is absence, not proof
+ *   LP4b (placed with the proof rows below, after the proof design was ruled): a COVERED TAIL, F.logSeq beyond the last committed node and the lane acked at it, is an empty page whose token has log = F.logSeq; the lane
+ *        moves only when it is acked, then the log half is drained
+ *   PR00/PR0/PA1-PA17/LP4b  the PROOF rows (S4 v1.6, v1.6.1, v1.6.2): a lane's log-half advance is verified against F's committed Merkle root; the rows build the certified world themselves (helpers/history-merkle-1762.mjs)
  *   LG1  GRAPH half, whole-commit pages: a multi-part native commit larger than `limit` is served WHOLE in one page (every part of it, nothing of any other commit), and the token's graph half is
  *        that commit's commitSeq (a page never ends inside a commit)
  *   LG2  repeat-before-ACK: the same pull again returns the same parts and the same token, and the lane's graph half has not moved
@@ -47,6 +48,7 @@ import { fileURLToPath } from 'node:url';
 import { HAVE_PY, PY, killExecutor } from './helpers/graph-executor-proc.mjs';
 import { wholeBoardWorld, WB_DATASET } from './helpers/whole-board-1645.mjs';
 import { startRestServer } from './helpers/harness.mjs';
+import * as M from './helpers/history-merkle-1762.mjs';
 import { mintToken, hashToken } from '../core/credentials.mjs';
 import { WRITE_PROTOCOL, WRITE_PROTOCOL_HEADER, createGraphClient } from '../core/graph-client.mjs';
 
@@ -249,7 +251,8 @@ const seqsOf = (r) => r.json.events.map((e) => e.seq).filter((n) => Number.isInt
 const nodeSeqs = (n) => readLog().filter((e) => e.seq <= n && e.entity?.id).map((e) => e.seq);
 const range = (a, b) => Array.from({ length: Math.max(0, b - a + 1) }, (_, i) => a + i);
 /** F planted at the settled log head, with that logSeq */
-async function plantAtHead() { const n = await settle(); const h = await W.plantFrontier({ logSeq: `"${n}"^^<${XSD}integer>` }); return { n, h: h.h }; }
+/** F planted at the settled log head, CERTIFIED (S4 v1.6.2): the tree graph and the five history predicates are written too */
+async function plantAtHead() { const n = await settle(); const c = await certify({ logSeq: n }); return { n, h: c.h, cert: c }; }
 
 test('#1762 S4 LP0 CONTROL — with NO frontier a lane acked at 2 is served log events 3.. from the log, and the envelope carries no history block (green on main by design)', T, async () => {
   await W.clearFrontier();
@@ -321,24 +324,6 @@ test('#1762 S4 LP4a — a genuine hole INSIDE the range (the log has no line at 
   assert.deepEqual(seen, nodeSeqs(n).filter((x) => x > 2), `every existing node in (2, ${n}] exactly once: none lost across the gap, none served twice`);
 });
 
-test('#1762 S4 LP4b — HELD (the empty-tail proof is being ruled: F may carry a node count) — a COVERED TAIL (no node left in (acked, F.logSeq] while acked < F.logSeq) is an EMPTY page whose ack_token has log = F.logSeq; the lane moves only when it is acked, and then the log half is drained (A2)', { ...T, skip: 'HELD: S4 v1.3 (F carries a coverage proof) is awaiting the reviewer\'s ruling; this oracle deletes data, which is absence and not proof' }, async () => {
-  const { n } = await plantAtHead();
-  await W.update(`DELETE WHERE { <${node(n)}> ?p ?o }`);                                              // the last node is gone: nothing remains above n-1
-  await seedLane('lp4b', n - 1);
-  const first = await pull('lp4b', 50);
-  assert.equal(first.status, 200, `(${first.status}: ${first.text.slice(0, 200)})`);
-  assert.deepEqual(seqsOf(first).filter((s) => s <= n), [], 'no node remains in (acked, F.logSeq]: the page is empty');
-  assert.ok(first.json.ack_token, 'but it still returns an ack_token, or the lane is served the same empty page forever');
-  assert.equal(tokenOf(first).log, n, 'whose log half is F.logSeq');
-  assert.equal(laneState('lp4b').acked, n - 1, 'and nothing advanced: not on the serve');
-  assert.equal(tokenOf(await pull('lp4b', 50)).log, n, 'the same pull again returns a token at F.logSeq');
-  assert.equal(laneState('lp4b').acked, n - 1, 'and still nothing advanced: not on a read, not on a repeat');
-  assert.equal(first.json.envelope.history?.logDrained, false, 'the log half is not drained before the ack');
-  assert.equal((await ack('lp4b', first.json.ack_token)).status, 200, 'acking the empty page is accepted');
-  assert.equal(laneState('lp4b').acked, n, 'and now the lane has moved to F.logSeq');
-  assert.equal((await pull('lp4b', 50)).json.envelope.history?.logDrained, true, 'and the log half is drained');
-});
-
 test('#1762 S4 LP5 — a lane registered AFTER F starts with its log half at F.logSeq, not at the log\'s head', T, async () => {
   const n = await settle();
   const extra = await W.send('POST', '/api/cards', { title: 'after the settle', description: 'x', createdBy: 'ada' });
@@ -379,22 +364,6 @@ test('#1762 S4 LP7 — a token whose log half is beyond F.logSeq cannot have bee
   assert.equal(a.status, 409, `(${a.status}: ${a.text.slice(0, 200)})`);
   assert.equal(a.json?.code, 'ACK_BEYOND_SERVED');
   assert.equal(JSON.stringify(laneState('lp7')), before, 'the lane did not move');
-});
-
-test('#1762 S4 LP8 — a conversation node whose post node is ABSENT refuses the pull 503 HISTORY_LEGACY_POST_MISSING {seq, entity}: nothing served, the lane unchanged', T, async () => {
-  const { missing } = LEGACY_POSTS;
-  const { n } = await plantAtHead();
-  await W.update(`DELETE WHERE { <${ENT}${missing.id}> ?p ?o }`);                      // the conversation seq-node stays; its post node is gone
-  await seedLane('lp8', missing.seq - 1);
-  const before = JSON.stringify(laneState('lp8'));
-  const r = await pull('lp8', 500);
-  assert.equal(r.status, 503, `(${r.status}: ${r.text.slice(0, 200)})`);
-  assert.equal(r.json?.code, 'HISTORY_LEGACY_POST_MISSING');
-  assert.equal(r.json?.seq, missing.seq, 'naming the seq');
-  assert.ok(String(JSON.stringify(r.json?.entity)).includes(missing.id), 'and the entity');
-  assert.equal(r.json?.events, undefined, 'nothing is served');
-  assert.equal(JSON.stringify(laneState('lp8')), before, 'and the lane is exactly as it was');
-  assert.ok(missing.seq <= n, 'PRECONDITION: the node is legacy');
 });
 
 // ══ the graph half: whole-commit pages (the reviewer asked for these before the lane build) ══
@@ -493,3 +462,338 @@ test('#1762 S4 LG4 — no sibling part is lost: two multi-part commits walked wi
   assert.equal(laneState('lg4').graph_acked, c2.commitSeq, 'the lane is at the second commit');
   assert.deepEqual(graphEvents(await pull('lg4', 1)).filter((e) => [c1.opId, c2.opId].includes(e.graph.opId)), [], 'and nothing of either is served again');
 });
+
+// ══ the lane proof (S4 v1.6, v1.6.1, v1.6.2): a lane's log-half advance is verified against F's committed Merkle root ══
+// The rows build the certified tree and F THEMSELVES with the independent reference (helpers/history-merkle-1762.mjs) over v1.6.2's vocabulary, so they depend on no construction code.
+const NS = 'urn:ex:';
+const X = (v) => `"${v}"^^<${XSD}integer>`;
+const HEX = (b) => M.hex(b);
+let buildSeq = 0;
+/** the live canonical seq-nodes at or below `logSeq`, as certificate entries (ascending N) */
+async function liveEntries(logSeq) {
+  const rows = await W.q(`SELECT ?a ?u ?op ?k WHERE { ?a <${PROV}used> ?u ; <${RS}op> ?op ; <${RS}entityKind> ?k . FILTER(STRSTARTS(STR(?a), "${ACT}seq-")) }`);
+  const out = [];
+  for (const b of rows) {
+    const m = /^seq-(\d+)$/.exec(b.a.value.slice(ACT.length)); if (!m) continue;
+    const N = Number(m[1]); if (N <= logSeq) out.push({ N, used: b.u.value, op: b.op.value, entityKind: b.k.value });
+  }
+  return out.sort((a, b) => a.N - b.N);
+}
+const leafIri = (tree, rank) => `${tree}/leaf/${rank}`, nodeIri = (tree, s0, e0) => `${tree}/node/${s0}-${e0}`;
+const lit = (v) => JSON.stringify(String(v));
+const leafTriples = (tree, rank, e, leafHex) => `<${leafIri(tree, rank)}> <${NS}htRank> ${X(rank)} ; <${NS}htN> ${X(e.N)} ; <${NS}htUsed> <${e.used}> ; <${NS}htOp> ${lit(e.op)} ; <${NS}htKind> ${lit(e.entityKind)} ; <${NS}htLeaf> ${lit(leafHex)} .`;
+/** the internal subtrees RFC 6962's split names, as [start, end) ranges (a size-1 range is the leaf entry itself) */
+function internalRanges(L) { const out = []; const rec = (a, b) => { if (b - a < 2) return; out.push([a, b]); let k = 1; while (k * 2 < b - a) k *= 2; rec(a, a + k); rec(a + k, b); }; rec(0, L); return out; }
+/** write a tree graph for `entries`; returns what a test needs to tamper with it */
+async function writeTree(entries, { tree = `urn:scrum:history-tree:hb${++buildSeq}-${crypto.randomUUID().slice(0, 6)}`, header = true } = {}) {
+  const built = M.build(entries);
+  const lines = [];
+  if (header) lines.push(`<${tree}> <${NS}htFormat> "hist-v1" ; <${NS}htLeafCount> ${X(built.L)} ; <${NS}htRoot> ${lit(built.root)} .`);
+  entries.forEach((e, i) => lines.push(leafTriples(tree, i, e, HEX(built.leaves[i]))));
+  const ranges = internalRanges(built.L);
+  for (const [a, b] of ranges) lines.push(`<${nodeIri(tree, a, b)}> <${NS}htStart> ${X(a)} ; <${NS}htEnd> ${X(b)} ; <${NS}htHash> ${lit(HEX(M.mth(built.leaves.slice(a, b))))} .`);
+  await W.update(`INSERT DATA { GRAPH <${tree}> { ${lines.join('\n')} } }`);
+  return { tree, built, entries, ranges };
+}
+const HIST_F = ['Root', 'LeafCount', 'Tree', 'Format', 'Commitment'];
+/** F (the five S3 fields) plus the five history fields, over a freshly built tree of the live nodes at or below `logSeq` */
+async function certify({ logSeq, entries = null, tamper = null } = {}) {
+  const live = entries ?? await liveEntries(logSeq);
+  const t = await writeTree(live);
+  const { h } = await W.plantFrontier({ logSeq: X(logSeq) });
+  const f = { root: t.built.root, L: t.built.L, tree: t.tree, format: 'hist-v1' };
+  const commitment = M.commitment({ epoch: h.epoch, incarnation: W.hex(h.incarnation), logSeq, commitSeq: h.commitSeq, L: f.L, tree: f.tree, root: f.root });
+  const fields = { Root: lit(f.root), LeafCount: X(f.L), Tree: `<${f.tree}>`, Format: lit(f.format), Commitment: lit(commitment), ...(tamper?.F ?? {}) };
+  await W.update(`INSERT DATA { GRAPH <${BK}> { ${HIST_F.map((k) => `<${FR}> <${NS}frontierHistory${k}> ${fields[k]} .`).join('\n')} } }`);
+  return { ...t, h, logSeq, f, commitment };
+}
+const setObj = (g, s0, p, newTermSparql) => W.update(`DELETE { GRAPH <${g}> { <${s0}> <${p}> ?o } } INSERT { GRAPH <${g}> { <${s0}> <${p}> ${newTermSparql} } } WHERE { GRAPH <${g}> { <${s0}> <${p}> ?o } }`);
+const flip = (hexStr) => `${hexStr[0] === '0' ? '1' : '0'}${hexStr.slice(1)}`;
+const liveNodeTriples = async (N) => (await W.q(`SELECT ?p ?o WHERE { <${node(N)}> ?p ?o }`));
+const termSparql = (b) => (b.type === 'uri' ? `<${b.value}>` : b.datatype ? `${lit(b.value)}^^<${b.datatype}>` : lit(b.value));
+async function restoreNode(N, triples) { if (triples.length) await W.update(`INSERT DATA { ${triples.map((t) => `<${node(N)}> <${t.p.value}> ${termSparql(t.o)} .`).join('\n')} }`); }
+/** a lane that has acked nothing, owed the whole certified range */
+const proofLane = async (name, acked = 0) => seedLane(name, acked);
+async function expectCoverageRefused(name, label) {
+  const before = JSON.stringify(laneState(name));
+  const r = await pull(name, 500);
+  assert.equal(r.status, 503, `${label}: refused, not served (got ${r.status}: ${r.text.slice(0, 200)})`);
+  assert.equal(r.json?.code, 'HISTORY_COVERAGE_CHANGED', `${label}: named (got ${r.json?.code})`);
+  assert.equal(r.json?.events, undefined, `${label}: no events`);
+  assert.equal(r.json?.ack_token, undefined, `${label}: no ack_token`);
+  assert.equal(JSON.stringify(laneState(name)), before, `${label}: the lane is byte-identical`);
+}
+const ownSeqs = (r, n) => seqsOf(r).filter((x) => x <= n);
+
+test('#1762 S4 PR00 CONTROL — the certified world is what v1.6.2 says (read back from the executor, checked with the reference only): F carries each history field once, the stored entries and subtrees recompute to F\'s root, every audit path verifies, and the commitment recomputes (no product code is involved: this holds on main by design)', T, async () => {
+  const { n, cert } = await plantAtHead();
+  const fRows = await W.q(`SELECT ?p ?o WHERE { GRAPH <${BK}> { <${FR}> ?p ?o } }`);
+  const one = (name) => { const v = fRows.filter((r) => r.p.value === `${NS}frontierHistory${name}`); assert.equal(v.length, 1, `F carries frontierHistory${name} exactly once (${v.length})`); return v[0].o; };
+  const root = one('Root').value, L = Number(one('LeafCount').value), tree = one('Tree').value, format = one('Format').value, commitment = one('Commitment').value;
+  assert.equal(one('Tree').type, 'uri', 'the tree is an IRI'); assert.equal(one('LeafCount').datatype, `${XSD}integer`); assert.equal(format, 'hist-v1');
+  assert.match(root, /^[0-9a-f]{64}$/); assert.match(commitment, /^[0-9a-f]{64}$/);
+  const entries = {}; const g = await W.q(`SELECT ?s ?p ?o WHERE { GRAPH <${tree}> { ?s ?p ?o } }`);
+  for (const r of g) (entries[r.s.value] ||= {})[r.p.value.replace(NS, '')] = r.o.value;
+  const leaves = [];
+  for (let i = 0; i < L; i++) { const e = entries[leafIri(tree, i)]; assert.ok(e, `entry ${i} exists`); assert.equal(Number(e.htRank), i); leaves.push(e); }
+  const recomputed = leaves.map((e) => M.leafHash({ N: Number(e.htN), used: e.htUsed, op: e.htOp, entityKind: e.htKind }));
+  leaves.forEach((e, i) => assert.equal(e.htLeaf, HEX(recomputed[i]), `entry ${i}: the stored hash is the hash of its tuple`));
+  assert.equal(HEX(M.mth(recomputed)), root, 'the entries recompute to F\'s root');
+  for (const [a, b] of internalRanges(L)) assert.equal(entries[nodeIri(tree, a, b)]?.htHash, HEX(M.mth(recomputed.slice(a, b))), `subtree [${a},${b}) is the hash of its range`);
+  for (let i = 0; i < L; i++) assert.equal(HEX(M.rootFromPath(recomputed[i], i, L, M.auditPath(recomputed, i))), root, `rank ${i}: its audit path verifies`);
+  const h = await W.health();
+  assert.equal(commitment, M.commitment({ epoch: h.epoch, incarnation: W.hex(h.incarnation), logSeq: n, commitSeq: cert.h.commitSeq, L, tree, root }), 'and the commitment recomputes from F\'s own fields');
+  assert.deepEqual(leaves.map((e) => Number(e.htN)), cert.entries.map((e) => e.N), 'the committed N are exactly the live canonical nodes at or below F.logSeq');
+  assert.equal(entries[tree]?.htRoot, root, 'the header agrees (untrusted, but honest here)');
+});
+
+test('#1762 S4 PR0 CONTROL — a CERTIFIED F with an untouched tree serves a lane acked at 0 every committed node, once each, ascending: the proof does not refuse a healthy lane', T, async () => {
+  const { n, cert } = await plantAtHead();
+  await proofLane('pr0');
+  const r = await pull('pr0', 500);
+  assert.equal(r.status, 200, `(${r.status}: ${r.text.slice(0, 300)})`);
+  assert.deepEqual(ownSeqs(r, n), cert.entries.map((e) => e.N), 'every committed node, ascending, once each');
+  assert.ok(r.json.ack_token, 'and a token');
+});
+
+test('#1762 S4 PA1 — a REWRITTEN SIBLING: changing the stored hash of ANY internal subtree makes a full-range pull refuse 503 HISTORY_COVERAGE_CHANGED, the lane byte-identical (every internal node is in some audit path)', T, async () => {
+  const { cert } = await plantAtHead();
+  await proofLane('pa1');
+  assert.ok(cert.ranges.length >= 5, `PRECONDITION: the tree has internal nodes (${cert.ranges.length})`);
+  for (const [a, b] of cert.ranges) {
+    const orig = HEX(M.mth(cert.built.leaves.slice(a, b)));
+    await setObj(cert.tree, nodeIri(cert.tree, a, b), `${NS}htHash`, lit(flip(orig)));
+    await expectCoverageRefused('pa1', `node [${a},${b}) rewritten`);
+    await setObj(cert.tree, nodeIri(cert.tree, a, b), `${NS}htHash`, lit(orig));
+  }
+  assert.equal((await pull('pa1', 500)).status, 200, 'CONTROL: with every sibling restored the same lane is served');
+});
+
+test('#1762 S4 PA2 — a REWRITTEN LEAF HASH (the tuple intact): a certificate entry whose htLeaf is not the hash of its own tuple is refused, at the first, a middle and the last rank', T, async () => {
+  const { cert } = await plantAtHead();
+  await proofLane('pa2');
+  const L = cert.built.L;
+  for (const rank of [0, Math.floor(L / 2), L - 1]) {
+    const orig = HEX(cert.built.leaves[rank]);
+    await setObj(cert.tree, leafIri(cert.tree, rank), `${NS}htLeaf`, lit(flip(orig)));
+    await expectCoverageRefused('pa2', `leaf ${rank} htLeaf rewritten`);
+    await setObj(cert.tree, leafIri(cert.tree, rank), `${NS}htLeaf`, lit(orig));
+  }
+});
+
+test('#1762 S4 PA3 — a RELABELLED N beside a valid hash: an entry whose htN is changed while its other fields and htLeaf are intact is refused (P1: N is authenticated from the full tuple, never metadata beside a hash)', T, async () => {
+  const { cert } = await plantAtHead();
+  await proofLane('pa3');
+  const rank = 3; const e = cert.entries[rank];
+  await setObj(cert.tree, leafIri(cert.tree, rank), `${NS}htN`, X(e.N + 1));
+  await expectCoverageRefused('pa3', `entry ${rank} relabelled N ${e.N} -> ${e.N + 1}`);
+});
+
+test('#1762 S4 PA4 — a SELF-CONSISTENT rewritten entry (a new N and the hash recomputed from the new tuple) is refused: it no longer authenticates to F\'s root', T, async () => {
+  const { cert } = await plantAtHead();
+  await proofLane('pa4');
+  const rank = 4; const e = { ...cert.entries[rank], N: cert.entries[rank].N + 1 };
+  await W.update(`DELETE WHERE { GRAPH <${cert.tree}> { <${leafIri(cert.tree, rank)}> ?p ?o } } ; INSERT DATA { GRAPH <${cert.tree}> { ${leafTriples(cert.tree, rank, e, HEX(M.leafHash(e)))} } }`);
+  await expectCoverageRefused('pa4', `entry ${rank} rewritten consistently`);
+});
+
+test('#1762 S4 PA5 — REORDERED certificate entries (two adjacent ranks swap their whole tuples and hashes) are refused: the audit path no longer authenticates them', T, async () => {
+  const { cert } = await plantAtHead();
+  await proofLane('pa5');
+  const i = 2; const [a, b] = [cert.entries[i], cert.entries[i + 1]];
+  await W.update(`DELETE WHERE { GRAPH <${cert.tree}> { <${leafIri(cert.tree, i)}> ?p ?o } } ; DELETE WHERE { GRAPH <${cert.tree}> { <${leafIri(cert.tree, i + 1)}> ?p ?o } } ; INSERT DATA { GRAPH <${cert.tree}> { ${leafTriples(cert.tree, i, b, HEX(M.leafHash(b)))}\n${leafTriples(cert.tree, i + 1, a, HEX(M.leafHash(a)))} } }`);
+  await expectCoverageRefused('pa5', 'adjacent entries swapped');
+});
+
+test('#1762 S4 PA6 — a certified node DELETED from the live graph inside the owed range is refused (a missing expected node), never skipped', T, async () => {
+  const { cert } = await plantAtHead();
+  await proofLane('pa6');
+  const victim = cert.entries[5].N; const saved = await liveNodeTriples(victim);
+  try {
+    await W.update(`DELETE WHERE { <${node(victim)}> ?p ?o }`);
+    await expectCoverageRefused('pa6', `live node ${victim} deleted`);
+  } finally { await restoreNode(victim, saved); }
+});
+
+test('#1762 S4 PA7 — a certified node whose live FACTS were replaced (its op changed) is refused: the leaf recomputed from the live node is not the committed one', T, async () => {
+  const { cert } = await plantAtHead();
+  await proofLane('pa7');
+  const victim = cert.entries[4];
+  await W.update(`DELETE { <${node(victim.N)}> <${RS}op> ?o } INSERT { <${node(victim.N)}> <${RS}op> "forged-op" } WHERE { <${node(victim.N)}> <${RS}op> ?o }`);
+  try { await expectCoverageRefused('pa7', `live node ${victim.N} op replaced`); }
+  finally { await W.update(`DELETE { <${node(victim.N)}> <${RS}op> ?o } INSERT { <${node(victim.N)}> <${RS}op> ${lit(victim.op)} } WHERE { <${node(victim.N)}> <${RS}op> ?o }`); }
+});
+
+test('#1762 S4 PA8 — the reviewer\'s counterexample: an owed node is REPLACED by another inserted into a permitted gap (N = 5 deleted, a node of the same facts inserted at N = 3): a lane acked at 2 is refused, never served past the loss', T, async () => {
+  const { cert } = await plantAtHead();
+  const target = cert.entries.find((e) => e.N === 5); assert.ok(target, 'PRECONDITION: node 5 is committed');
+  await proofLane('pa8', 2);
+  const saved = await liveNodeTriples(5);
+  try {
+    await W.update(`DELETE WHERE { <${node(5)}> ?p ?o }`);
+    await W.update(`INSERT DATA { ${saved.map((t) => `<${node(3)}> <${t.p.value}> ${termSparql(t.o)} .`).join('\n')} }`);
+    await expectCoverageRefused('pa8', 'node 5 replaced by a node at 3');
+  } finally { await W.update(`DELETE WHERE { <${node(3)}> ?p ?o }`); await restoreNode(5, saved); }
+});
+
+test('#1762 S4 PA9 — a node INSERTED into a gap with the certificate unchanged is never served: the page is the committed ranks (v1.6 section 2)', T, async () => {
+  const { n, cert } = await plantAtHead();
+  await proofLane('pa9', 2);
+  const saved = await liveNodeTriples(5);
+  try {
+    await W.update(`INSERT DATA { ${saved.map((t) => `<${node(4)}> <${t.p.value}> ${termSparql(t.o)} .`).join('\n')} }`);
+    const r = await pull('pa9', 500);
+    assert.equal(r.status, 200, `(${r.status}: ${r.text.slice(0, 200)})`);
+    assert.deepEqual(ownSeqs(r, n), cert.entries.map((e) => e.N).filter((x) => x > 2), 'exactly the committed ranks after 2: the inserted node 4 is not among them');
+  } finally { await W.update(`DELETE WHERE { <${node(4)}> ?p ?o }`); }
+});
+
+test('#1762 S4 PA10 — a certificate entry with a DUPLICATE rank value, a MISSING entry, or a rank that disagrees with its subject is refused (malformed paths and impossible indices fail closed)', T, async () => {
+  const { cert } = await plantAtHead();
+  await proofLane('pa10');
+  const rank = 3; const e = cert.entries[rank]; const entryIri = leafIri(cert.tree, rank);
+  await W.update(`INSERT DATA { GRAPH <${cert.tree}> { <${entryIri}> <${NS}htRank> ${X(rank + 1)} } }`);
+  await expectCoverageRefused('pa10', 'two htRank values on one entry');
+  await W.update(`DELETE WHERE { GRAPH <${cert.tree}> { <${entryIri}> <${NS}htRank> ?o } } ; INSERT DATA { GRAPH <${cert.tree}> { <${entryIri}> <${NS}htRank> ${X(rank)} } }`);
+  await setObj(cert.tree, entryIri, `${NS}htRank`, X(rank + 5));
+  await expectCoverageRefused('pa10', 'an entry whose rank disagrees with its subject');
+  await setObj(cert.tree, entryIri, `${NS}htRank`, X(rank));
+  await W.update(`DELETE WHERE { GRAPH <${cert.tree}> { <${entryIri}> ?p ?o } }`);
+  await expectCoverageRefused('pa10', 'an entry missing');
+  await W.update(`INSERT DATA { GRAPH <${cert.tree}> { ${leafTriples(cert.tree, rank, e, HEX(cert.built.leaves[rank]))} } }`);
+  assert.equal((await pull('pa10', 500)).status, 200, 'CONTROL: with the entry restored the lane is served');
+});
+
+test('#1762 S4 PA11 — a MISSING audit node (an internal subtree\'s triples removed) is refused, never recomputed around', T, async () => {
+  const { cert } = await plantAtHead();
+  await proofLane('pa11');
+  const [a, b] = cert.ranges[1];
+  await W.update(`DELETE WHERE { GRAPH <${cert.tree}> { <${nodeIri(cert.tree, a, b)}> ?p ?o } }`);
+  await expectCoverageRefused('pa11', `subtree [${a},${b}) removed`);
+});
+
+test('#1762 S4 PA12 — the PREDECESSOR comes from the certificate: a lane acked at 2 is served from the next committed node even when the live node at 2 is gone', T, async () => {
+  const { n, cert } = await plantAtHead();
+  await proofLane('pa12', 2);
+  const saved = await liveNodeTriples(2);
+  try {
+    await W.update(`DELETE WHERE { <${node(2)}> ?p ?o }`);
+    const r = await pull('pa12', 500);
+    assert.equal(r.status, 200, `a deleted ACKED node is outside what the proof covers (v1.6 section 3), so it does not refuse (got ${r.status}: ${r.text.slice(0, 200)})`);
+    assert.deepEqual(ownSeqs(r, n), cert.entries.map((e) => e.N).filter((x) => x > 2), 'and the committed ranks after 2 are served');
+  } finally { await restoreNode(2, saved); }
+});
+
+test('#1762 S4 PA13 — an INTERIOR boundary at a hole: a lane acked at 3 (the log has no line at 3 or 4) is served from the committed node at 5, not refused as a missing start', T, async () => {
+  const { n, cert } = await plantAtHead();
+  await proofLane('pa13', 3);
+  const r = await pull('pa13', 500);
+  assert.equal(r.status, 200, `(${r.status}: ${r.text.slice(0, 200)})`);
+  assert.deepEqual(ownSeqs(r, n), cert.entries.map((e) => e.N).filter((x) => x > 3), 'from the next committed rank');
+});
+
+test('#1762 S4 PA14 — the TREE F names: a missing graph, a header with no entries, and a different self-consistent tree whose root is not F\'s are all refused; an unreferenced complete tree beside it changes nothing', T, async () => {
+  const { n, cert } = await plantAtHead();
+  await proofLane('pa14');
+  const named = (r) => r.status === 503 && ['HISTORY_COVERAGE_CHANGED', 'HISTORY_FRONTIER_INVALID'].includes(r.json?.code) && r.json.events === undefined && r.json.ack_token === undefined;
+  const other = await writeTree(cert.entries.slice(0, -1));                                          // a complete, self-consistent tree over FEWER nodes: not unreferenced noise, a rival
+  assert.equal((await pull('pa14', 500)).status, 200, 'CONTROL: a complete tree F does not name changes nothing');
+  await setObj(BK, FR, `${NS}frontierHistoryTree`, `<${other.tree}>`);
+  const rival = await pull('pa14', 500);
+  assert.ok(named(rival), `F naming a self-consistent tree with another root (and a commitment over the old tree) is refused (got ${rival.status} ${rival.json?.code})`);
+  const empty = await writeTree(cert.entries, { header: true }); await W.update(`DELETE WHERE { GRAPH <${empty.tree}> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "${empty.tree}/")) } }`);
+  const hdr = await W.plantFrontier({ logSeq: X(n) });
+  const fields = { Root: lit(empty.built.root), LeafCount: X(empty.built.L), Tree: `<${empty.tree}>`, Format: lit('hist-v1'), Commitment: lit(M.commitment({ epoch: hdr.h.epoch, incarnation: W.hex(hdr.h.incarnation), logSeq: n, commitSeq: hdr.h.commitSeq, L: empty.built.L, tree: empty.tree, root: empty.built.root })) };
+  await W.update(`INSERT DATA { GRAPH <${BK}> { ${HIST_F.map((k) => `<${FR}> <${NS}frontierHistory${k}> ${fields[k]} .`).join('\n')} } }`);
+  const partial = await pull('pa14', 500);
+  assert.ok(named(partial), `F naming a tree with a header and no entries is refused (got ${partial.status} ${partial.json?.code})`);
+  await W.update(`DELETE WHERE { GRAPH <${empty.tree}> { ?s ?p ?o } }`);
+  const gone = await pull('pa14', 500);
+  assert.ok(named(gone), `F naming a tree graph that does not exist is refused (got ${gone.status} ${gone.json?.code})`);
+});
+
+test('#1762 S4 PA15 — F\'s COMMITMENT is checked: changing ANY committed field after the digest was computed (root, leaf count, tree IRI, format) makes F invalid, refused 503 HISTORY_FRONTIER_INVALID on a lane pull and on /api/changes', T, async () => {
+  const { n } = await plantAtHead();
+  await proofLane('pa15');
+  const variants = [
+    ['root', `${NS}frontierHistoryRoot`, (c) => lit(flip(c.f.root))],
+    ['leaf count', `${NS}frontierHistoryLeafCount`, (c) => X(c.f.L + 1)],
+    ['tree IRI', `${NS}frontierHistoryTree`, () => `<urn:scrum:history-tree:forged-${crypto.randomUUID().slice(0, 6)}>`],
+    ['format', `${NS}frontierHistoryFormat`, () => lit('hist-v2')],
+  ];
+  for (const [label, pred, make] of variants) {
+    const c = await certify({ logSeq: n });
+    await setObj(BK, FR, pred, make(c));
+    const r = await pull('pa15', 500);
+    assert.equal(r.status, 503, `${label}: refused (got ${r.status}: ${r.text.slice(0, 200)})`);
+    assert.equal(r.json?.code, 'HISTORY_FRONTIER_INVALID', `${label}: F is invalid, named (got ${r.json?.code})`);
+    const c2 = await W.get(`/api/changes?since=${SINCE_ALL}&history=true`);
+    assert.equal(c2.status, 503, `${label}: /api/changes refuses too (S3's validator recomputes the commitment) (got ${c2.status}: ${c2.text.slice(0, 160)})`);
+    assert.equal(c2.json?.code, 'HISTORY_FRONTIER_INVALID');
+  }
+});
+
+test('#1762 S4 PA16 — a SECOND F carrying a forged root, and an F with two values for a history field, are invalid (HISTORY_FRONTIER_INVALID), not "the first one wins"', T, async () => {
+  const { n } = await plantAtHead();
+  await proofLane('pa16');
+  const c = await certify({ logSeq: n });
+  await W.update(`INSERT DATA { <${FR}> <${NS}frontierHistoryRoot> ${lit(flip(c.f.root))} . }`);          // the same F, in the default graph too: a second frontier
+  const second = await pull('pa16', 500);
+  assert.equal(second.status, 503, `(${second.status}: ${second.text.slice(0, 200)})`);
+  assert.equal(second.json?.code, 'HISTORY_FRONTIER_INVALID');
+  await W.update(`DELETE WHERE { <${FR}> <${NS}frontierHistoryRoot> ?o }`);
+  const c3 = await certify({ logSeq: n });
+  await W.update(`INSERT DATA { GRAPH <${BK}> { <${FR}> <${NS}frontierHistoryRoot> ${lit(flip(c3.f.root))} } }`);
+  const dup = await pull('pa16', 500);
+  assert.equal(dup.status, 503, `(${dup.status}: ${dup.text.slice(0, 200)})`);
+  assert.equal(dup.json?.code, 'HISTORY_FRONTIER_INVALID', 'two roots on one F');
+});
+
+test('#1762 S4 LP4b — a COVERED TAIL: F.logSeq lies beyond the last committed node, the lane is acked at that node, and the proof (the last leaf, authenticated) makes the empty page safe: an EMPTY page whose token has log = F.logSeq, the lane moving only on its ack (A2)', T, async () => {
+  const head = await settle();
+  const logSeq = head + 3;                                                                   // the log has no line above `head`: a genuine tail with no nodes
+  const cert = await certify({ logSeq });
+  const lastN = cert.entries.at(-1).N;
+  assert.equal(lastN, head, `PRECONDITION: the last committed node is the log head (${lastN} vs ${head})`);
+  await seedLane('lp4b', lastN);
+  const first = await pull('lp4b', 50);
+  assert.equal(first.status, 200, `(${first.status}: ${first.text.slice(0, 200)})`);
+  assert.deepEqual(first.json.events.filter((e) => Number.isInteger(e.seq) && e.seq <= logSeq), [], 'nothing is owed in (acked, F.logSeq]: the page is empty');
+  assert.ok(first.json.ack_token, 'but it returns an ack_token, or the lane is served the same empty page forever');
+  assert.equal(tokenOf(first).log, logSeq, 'whose log half is F.logSeq');
+  assert.equal(laneState('lp4b').acked, lastN, 'and nothing advanced: not on the serve');
+  assert.equal(tokenOf(await pull('lp4b', 50)).log, logSeq, 'the same pull again returns a token at F.logSeq');
+  assert.equal(laneState('lp4b').acked, lastN, 'and still nothing advanced: not on a read, not on a repeat');
+  assert.equal(first.json.envelope.history?.logDrained, false, 'the log half is not drained before the ack');
+  assert.equal((await ack('lp4b', first.json.ack_token)).status, 200, 'the empty-tail ack is accepted');
+  assert.equal(laneState('lp4b').acked, logSeq, 'and now the lane is at F.logSeq');
+  const after = await pull('lp4b', 50);
+  assert.deepEqual(after.json.events.filter((e) => Number.isInteger(e.seq) && e.seq <= logSeq), [], 'a repeat after the empty-tail ack serves nothing from the log half');
+  assert.equal(after.json.envelope.history?.logDrained, true, 'and the log half is drained');
+});
+
+test('#1762 S4 PA17 — the empty tail is NOT issued over a rewritten last leaf: with F.logSeq beyond the last node and the last entry\'s hash rewritten, the lane is refused and gets no token', T, async () => {
+  const head = await settle();
+  const cert = await certify({ logSeq: head + 3 });
+  const rank = cert.built.L - 1;
+  await seedLane('pa17', cert.entries.at(-1).N);
+  await setObj(cert.tree, leafIri(cert.tree, rank), `${NS}htLeaf`, lit(flip(HEX(cert.built.leaves[rank]))));
+  await expectCoverageRefused('pa17', 'tail with the last leaf rewritten');
+});
+
+test('#1762 S4 LP8 — a conversation node whose post node is ABSENT refuses the pull 503 HISTORY_LEGACY_POST_MISSING {seq, entity}: nothing served, the lane unchanged', T, async () => {
+  const { missing } = LEGACY_POSTS;
+  const { n } = await plantAtHead();
+  await W.update(`DELETE WHERE { <${ENT}${missing.id}> ?p ?o }`);                      // the conversation seq-node stays; its post node is gone
+  await seedLane('lp8', missing.seq - 1);
+  const before = JSON.stringify(laneState('lp8'));
+  const r = await pull('lp8', 500);
+  assert.equal(r.status, 503, `(${r.status}: ${r.text.slice(0, 200)})`);
+  assert.equal(r.json?.code, 'HISTORY_LEGACY_POST_MISSING');
+  assert.equal(r.json?.seq, missing.seq, 'naming the seq');
+  assert.ok(String(JSON.stringify(r.json?.entity)).includes(missing.id), 'and the entity');
+  assert.equal(r.json?.events, undefined, 'nothing is served');
+  assert.equal(JSON.stringify(laneState('lp8')), before, 'and the lane is exactly as it was');
+  assert.ok(missing.seq <= n, 'PRECONDITION: the node is legacy');
+});
+
