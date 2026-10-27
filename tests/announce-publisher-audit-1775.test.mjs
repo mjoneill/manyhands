@@ -9,7 +9,7 @@
  *   A4 the LOOP (#1775 done-when 3): with every unfiltered read failing, scans keep completing (scanCount rises) and a
  *      newly pending entry is still attempted; the audit is retried no more often than --audit-every-ms.
  */
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -48,7 +48,10 @@ const item = (mut, mode, { entry = {}, origin = {}, ...rest } = {}) => ({ o: { .
 const withServer = async (board, env, body) => { const s = await startRestServer({ board, env }); try { return await body(s); } finally { await s.stop(); } };
 // the server refuses to build the graph slice without a dataset id when an executor URL is set (#1567 fencing)
 const FLAG = { SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_GRAPH_DATASET_ID: 'g12-test' };
-const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'g12-pub-'));
+// every temp dir this file makes is removed after the file (the suite's leak check refuses a new leak)
+const madeDirs = [];
+const tmp = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'pub1775-')); madeDirs.push(d); return d; };
+after(() => { for (const d of madeDirs) fs.rmSync(d, { recursive: true, force: true }); });
 const at = (iso, ms) => new Date(Date.parse(iso) + ms).toISOString();
 const MIN = 60_000, HOUR = 3_600_000;
 // A fixed injected instant, deliberately far from the wall clock: a fix that mixes wall time into backoff shows up.
