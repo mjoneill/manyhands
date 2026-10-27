@@ -210,7 +210,9 @@ test('#1762 S4 RC6 — REST serves from the NEW file: a known lane keeps its cur
 test('#1762 S4 RC7 — a CORRUPT relocated file: pull, ack and register all refuse 503 CURSOR_STATE_INVALID naming the file; nothing starts fresh; no file is rewritten', async () => {
   await world(async (w) => {
     fs.writeFileSync(w.newFile, '{ this is not json');
-    const before = [snap(w.evdir), snap(w.datadir)];
+    const cursorFiles = () => [sha(fs.readFileSync(w.oldFile)), sha(fs.readFileSync(w.newFile))];
+    const logLines = () => fs.readdirSync(w.evdir).filter((f) => /^events-.*\.jsonl$/.test(f)).sort().flatMap((f) => fs.readFileSync(path.join(w.evdir, f), 'utf8').split('\n').filter(Boolean));
+    const before = cursorFiles(); const logBefore = logLines();
     const srv = await w.startRest(); const call = w.mk(srv);
     const pull = await call('GET', `/api/cursors/pull?identity=${encodeURIComponent(w.lane('rc.a'))}`);
     assert.equal(pull.status, 503, `pull is refused (got ${pull.status}: ${pull.text.slice(0, 200)})`);
@@ -221,7 +223,10 @@ test('#1762 S4 RC7 — a CORRUPT relocated file: pull, ack and register all refu
     const reg = await call('POST', '/api/cursors/register', { registrySeatId: 'rc.brand-new' });
     assert.equal(reg.status, 503, 'and registering a NEW lane is refused: nothing starts a fresh state over a corrupt one'); assert.equal(reg.json.code, 'CURSOR_STATE_INVALID');
     await srv.stop(); owned.servers = owned.servers.filter((s) => s !== srv);
-    assert.deepEqual([snap(w.evdir), snap(w.datadir)], before.map((s) => s), 'no file was rewritten by any of those');
+    assert.deepEqual(cursorFiles(), before, 'neither cursors.json was rewritten by any of those');
+    // the event log MAY grow: a refused write is itself recorded (#1217: refused rows), which is today's behaviour and not cursor state. It may gain refusals and nothing else.
+    const gained = logLines().slice(logBefore.length).map((l) => JSON.parse(l));
+    assert.ok(gained.every((e) => e.op === 'refused'), `the only thing the event log gained is refusal records (got ${JSON.stringify(gained.map((e) => e.op))})`);
   });
 });
 test('#1762 S4 RC8 — both files present, the old not yet archived, and they DISAGREE: 503 CURSOR_STATE_INVALID, both files untouched', async () => {
