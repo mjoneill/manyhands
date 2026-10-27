@@ -175,6 +175,7 @@
   "tests/whisper-guards-graph-1786.test.mjs",
   "tests/whisper-guards-handoff-1786.test.mjs",
   "tests/whisper-guards-silence-1786.test.mjs",
+  "tests/work-ledger-retired-1763.test.mjs",
   "tests/write-protocol-client-1748.test.mjs",
   "tests/write-protocol-floor-1748.test.mjs",
   "tests/write-protocol-guard-1748.test.mjs"

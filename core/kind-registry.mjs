@@ -317,7 +317,7 @@ export const KIND_DECLARATIONS = Object.freeze([
   },
   {
     name: 'scrum:WorkObject', eventKind: null, collection: null,
-    createdBy: 'work_declare / work_bid / work_grant',
+    createdBy: 'no longer created: the #755 work ledger is retired (#1763, 2026-10-27); the 17 that exist are history (the tools were work_declare / work_bid / work_grant)',
     definition: 'A bid-and-reply object for coordinating who takes a piece of work: it carries '
       + '`scrum:declaredBy`, one or more `scrum:required` people, a `scrum:replyBy` deadline and a '
       + 'shortId of the card it concerns. NOT a claim — a claim is first-write-wins on the card '
