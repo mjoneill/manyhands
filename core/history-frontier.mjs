@@ -1,0 +1,68 @@
+/**
+ * #1762 S3 — the history FRONTIER F: the one node that says "card history below this point lives in the graph".
+ *
+ * F is `<urn:ex:history/frontier>` in the bookkeeping graph, written once by S6 after a verified backfill. /api/changes
+ * switches to the graph iff F exists and is VALID (contract v2 §1). This module only READS and CLASSIFIES it:
+ *
+ *   { state: 'absent' }                       confirmed zero F triples anywhere: today's path, byte-for-byte
+ *   { state: 'valid', frontier, marker }      every field present once, well-typed, in range, and the store's own identity
+ *   { state: 'invalid', reason }              → 503 HISTORY_FRONTIER_INVALID
+ *   { state: 'mismatch', reason }             → 503 HISTORY_FRONTIER_STORE_MISMATCH (another epoch or incarnation)
+ *
+ * A query that cannot be answered THROWS (code GRAPH_EXECUTOR_UNAVAILABLE): "couldn't tell whether F exists" must never
+ * take the old path. F and the marker are read in ONE query, so they come from one store snapshot.
+ */
+export const BOOKKEEPING_GRAPH = 'urn:scrum:bookkeeping:executor';
+export const FRONTIER = 'urn:ex:history/frontier';
+const MARKER = 'urn:ex:dataset';
+const XSD = 'http://www.w3.org/2001/XMLSchema#';
+export const FRONTIER_PREDICATES = Object.freeze({
+  logSeq: 'urn:ex:frontierLogSeq', commitSeq: 'urn:ex:frontierCommitSeq', recordedAt: 'urn:ex:frontierRecordedAt',
+  epoch: 'urn:ex:frontierEpoch', incarnation: 'urn:ex:frontierIncarnation',
+});
+
+/** One query: every F triple in ANY graph (default included, so a second F is visible), and the marker's identity. */
+export const FRONTIER_QUERY = `SELECT ?src ?p ?o WHERE {
+  { GRAPH <${BOOKKEEPING_GRAPH}> { <${FRONTIER}> ?p ?o } BIND("bk" AS ?src) }
+  UNION { GRAPH ?g { <${FRONTIER}> ?p ?o } FILTER(?g != <${BOOKKEEPING_GRAPH}>) BIND("other" AS ?src) }
+  UNION { <${FRONTIER}> ?p ?o BIND("default" AS ?src) }
+  UNION { GRAPH <${BOOKKEEPING_GRAPH}> { <${MARKER}> ?p ?o } FILTER(?p IN (<urn:ex:epoch>, <urn:ex:incarnation>, <urn:ex:commitSeq>)) BIND("marker" AS ?src) }
+}`;
+
+const hex = (s) => String(s).replace(/-/g, '').toLowerCase();
+const isInt = (b) => b && b.type !== 'uri' && b.datatype === `${XSD}integer` && /^-?\d+$/.test(b.value);
+
+/** Classify the bindings of FRONTIER_QUERY. Pure: the caller runs the query. */
+export function classifyFrontier(bindings) {
+  const f = {}; const marker = {}; let elsewhere = 0;
+  for (const b of bindings) {
+    const src = b.src?.value, p = b.p?.value;
+    if (src === 'marker') { (marker[p] ||= []).push(b.o); continue; }
+    if (src === 'bk') { (f[p] ||= []).push(b.o); continue; }
+    elsewhere++;   // F in the default graph or another named graph
+  }
+  const fTriples = Object.values(f).reduce((n, v) => n + v.length, 0);
+  if (!fTriples && !elsewhere) return { state: 'absent' };
+  if (elsewhere) return { state: 'invalid', reason: 'the frontier also appears outside the bookkeeping graph (two frontiers)' };
+  const one = (k) => {
+    const v = f[FRONTIER_PREDICATES[k]] || [];
+    if (v.length !== 1) throw new Error(`frontier ${k} has ${v.length} values (exactly one is required)`);
+    return v[0];
+  };
+  let fr;
+  try {
+    const logSeq = one('logSeq'), commitSeq = one('commitSeq'), recordedAt = one('recordedAt'), epoch = one('epoch'), incarnation = one('incarnation');
+    if (!isInt(logSeq) || Number(logSeq.value) < 1) throw new Error('frontierLogSeq must be an xsd:integer of at least 1');
+    if (!isInt(commitSeq) || Number(commitSeq.value) < 0) throw new Error('frontierCommitSeq must be an xsd:integer of at least 0');
+    if (recordedAt.type === 'uri' || recordedAt.datatype !== `${XSD}dateTime` || !Number.isFinite(Date.parse(recordedAt.value))) throw new Error('frontierRecordedAt must be a valid xsd:dateTime');
+    if (!isInt(epoch) || Number(epoch.value) < 1) throw new Error('frontierEpoch must be an xsd:integer of at least 1');
+    if (incarnation.type === 'uri' || !/^[0-9a-f]{32}$/.test(incarnation.value)) throw new Error('frontierIncarnation must be 32 lowercase hex');
+    fr = { logSeq: Number(logSeq.value), commitSeq: Number(commitSeq.value), recordedAt: recordedAt.value, epoch: Number(epoch.value), incarnation: incarnation.value };
+  } catch (e) { return { state: 'invalid', reason: e.message }; }
+  const m = (p) => marker[p]?.[0]?.value ?? null;
+  const mk = { epoch: m('urn:ex:epoch'), incarnation: m('urn:ex:incarnation'), commitSeq: m('urn:ex:commitSeq') };
+  if (mk.epoch == null || String(fr.epoch) !== String(Number(mk.epoch))) return { state: 'mismatch', reason: `the frontier's epoch ${fr.epoch} is not the store's (${mk.epoch})` };
+  if (mk.incarnation == null || fr.incarnation !== hex(mk.incarnation)) return { state: 'mismatch', reason: 'the frontier names another store incarnation' };
+  if (mk.commitSeq != null && fr.commitSeq > Number(mk.commitSeq)) return { state: 'invalid', reason: `frontierCommitSeq ${fr.commitSeq} is beyond the store's commitSeq ${mk.commitSeq}` };
+  return { state: 'valid', frontier: fr, marker: mk };
+}

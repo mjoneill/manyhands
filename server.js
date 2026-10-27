@@ -112,6 +112,8 @@ import { queryCards, facetCards, excerptOf, EXCERPT_CEILING } from './core/cards
 import { similarCards } from './core/similar-cards.mjs';
 import { queryChangesFromLog, parseSince, EPOCH_CHANGED } from './core/changes-log-query.mjs';
 import { feedQuery, feedRowsFromBindings, postFeedQuery, postFeedRows, REDACTED_IDS_QUERY, redactedIdsFrom } from './core/logborn-feed.mjs';   // #1561 — the unit's writes in the change feed
+import { FRONTIER_QUERY, classifyFrontier } from './core/history-frontier.mjs';   // #1762 S3 — card history from the graph past F
+import { legacyQuery, legacyEventsFromBindings, nativeQuery, nativeRowsFromBindings } from './core/history-graph-read.mjs';
 import { readEvents, nextSeq, oldestRetainedAt, seqAsOf, seqOfEntityEvent, activityReadWindow, advanceActivityCursor } from './core/event-log.mjs';
 import { writeSnapshot, readSnapshot, sweepSnapshotTemps, snapshotPaths } from './core/graph-snapshot.mjs';   // #884 · #1386 reads the sidecar
 import { staleClaims, STALE_CLAIM_HOURS } from './core/stale-claims.mjs';   // #455
@@ -9176,6 +9178,21 @@ async function handleChanges(req, res) {
     // previous reply (one position per source). The log is read synchronously, so
     // its high-water and its rows come from one moment.
     const from = parseSince(q.since);
+    const convQuery = ANNOUNCE_EXECUTOR ? async (sparql) => {
+      const r = await POSTS_READER.query(sparql);
+      if (!r.ok) throw Object.assign(new Error(`the graph could not be read: ${r.reason || 'unreadable'}`), { code: 'GRAPH_EXECUTOR_UNAVAILABLE' });
+      return r.rows;
+    } : null;
+    // #1762 S3 — a VALID history frontier F moves card-side history to the graph. Read before anything else, and read
+    // every time: only a CONFIRMED absence keeps today's path; an unreadable F is a 503, never a guess.
+    const histQuery = LOGBORN ? (sparql) => logbornFeedQuery(sparql) : convQuery;
+    if (histQuery) {
+      let fr;
+      try { fr = classifyFrontier(await histQuery(FRONTIER_QUERY)); } catch (e) { if (graphRefused(res, e)) return; throw e; }
+      if (fr.state === 'invalid') return sendJSON(res, 503, { error: `the history frontier is invalid: ${fr.reason}`, code: 'HISTORY_FRONTIER_INVALID' });
+      if (fr.state === 'mismatch') return sendJSON(res, 503, { error: `the history frontier belongs to another store: ${fr.reason}`, code: 'HISTORY_FRONTIER_STORE_MISMATCH' });
+      if (fr.state === 'valid') return await handleChangesFromGraph(res, { q, from, F: fr.frontier, histQuery, convQuery, unsupported });
+    }
     const events = from.cursor
       ? readEvents(EVENT_LOG_DIR, { sinceSeq: from.log })
       : readEvents(EVENT_LOG_DIR, { sinceDate: q.since });
@@ -9208,11 +9225,6 @@ async function handleChanges(req, res) {
     // #1574 C1–C6 — with the conversations unit ON, posts and redactions are graph receipts too, and the log's older
     // conversation rows are projected through the graph's tombstones. Either unit makes the executor a REQUIRED source:
     // unreadable is a 503, never a log-only answer.
-    const convQuery = ANNOUNCE_EXECUTOR ? async (sparql) => {
-      const r = await POSTS_READER.query(sparql);
-      if (!r.ok) throw Object.assign(new Error(`the graph could not be read: ${r.reason || 'unreadable'}`), { code: 'GRAPH_EXECUTOR_UNAVAILABLE' });
-      return r.rows;
-    } : null;
     if (LOGBORN || convQuery) {
       try {
         const after = from.cursor ? from.graph : 0;
@@ -9271,6 +9283,67 @@ async function handleChanges(req, res) {
     console.error('GET /api/changes:', e.message);
     sendJSON(res, 500, { error: 'Failed to compute changes' });
   }
+}
+
+/**
+ * #1762 S3 — /api/changes with a VALID history frontier F (contract v2 + v2.1–v2.3 on #1762). Card-side history (every kind
+ * but posts) comes from the GRAPH: the projected seq-nodes ≤ F.logSeq with the backfill's facts, and S1's native
+ * ChangeActivities past F.commitSeq. Posts and log-born receipts come from the same graph feed as today. NO event-log file
+ * is opened on this path (the no-log-access recorder pins it), and the envelope, cursors and paging are today's code.
+ */
+async function handleChangesFromGraph(res, { q, from, F, histQuery, convQuery, unsupported }) {
+  // posts live with the conversations unit; without it a graph-only answer cannot include them, so it is refused, never partial
+  if (!convQuery) return sendJSON(res, 503, { error: 'a history frontier is present but the conversations unit is off: posts cannot be served from the graph, and the log is not read past F', code: 'HISTORY_CONFIG_UNSUPPORTED' });
+  if (from.cursor && from.log > F.logSeq) {
+    return sendJSON(res, 409, { error: `this cursor's log half (${from.log}) is past the history frontier (${F.logSeq}): no board minted it`, code: 'CURSOR_BEYOND_FRONTIER' });
+  }
+  let sinceIso = null;
+  if (!from.cursor && q.since != null && q.since !== '') {   // a missing since is today's MISSING_SINCE, raised by the query below
+    const t = Date.parse(q.since);
+    if (!Number.isFinite(t)) return sendJSON(res, 400, { error: `since must be an ISO timestamp or a cursor (got ${JSON.stringify(String(q.since ?? '').slice(0, 80))})` });
+    sinceIso = new Date(t).toISOString();   // windows compare INSTANTS: one canonical form on both sides
+  }
+  let graph, redactedPostIds, legacy, native;
+  try {
+    if (!from.cursor && sinceIso == null) return queryChangesFromLog([], { since: q.since });   // throws MISSING_SINCE (400), as today
+    legacy = legacyEventsFromBindings(await histQuery(legacyQuery({ logSeqMax: F.logSeq, sinceIso, afterSeq: from.cursor ? from.log : null })));
+    const after = from.cursor ? from.graph : 0;
+    graph = feedRowsFromBindings(await (LOGBORN ? logbornFeedQuery(feedQuery(after)) : convQuery(feedQuery(after))));
+    graph.rows = [...graph.rows, ...postFeedRows(await convQuery(postFeedQuery(after)), graph.through)];
+    redactedPostIds = redactedIdsFrom(await convQuery(REDACTED_IDS_QUERY));
+    native = nativeRowsFromBindings(await histQuery(nativeQuery({ afterCommitSeq: F.commitSeq, through: graph.through })));
+    // the reads above are separate queries: F must be exactly the one this answer started from, or nothing is served
+    const again = classifyFrontier(await histQuery(FRONTIER_QUERY));
+    if (again.state !== 'valid' || JSON.stringify(again.frontier) !== JSON.stringify(F)) {
+      return sendJSON(res, 503, { error: 'the history frontier changed while this answer was being read; ask again', code: 'HISTORY_FRONTIER_INVALID' });
+    }
+  } catch (e) {
+    if (graphRefused(res, e)) return;
+    throw e;
+  }
+  // a reproject part is DERIVED (a re-written namer): history:true serves it; the default latest view neither shows nor counts it
+  const history = q.history === 'true';
+  if (!history) native = native.filter((r) => r.graph.nativeOp !== 'reproject');
+  const result = queryChangesFromLog(legacy, {
+    redactedPostIds,
+    graphRows: [...graph.rows, ...native],
+    graphThrough: graph.through,
+    graphEpoch: graph.epoch,
+    graphEpochBase: graph.epochBase,
+    graphIncarnation: graph.incarnation,
+    graphIncarnationFrom: graph.incarnationFrom,
+    logThrough: F.logSeq,          // the log half stops at F: nothing past it is log history
+    oldestRetainedSeq: null,       // the graph keeps every pre-F row; there is no retention floor to refuse at
+    since: from.cursor ? q.since : sinceIso,
+    before: q.before,
+    oldestRetained: null,
+    history,
+    entity: q.entity,
+    actor: q.actor,
+    limit: { cards: q.limitCards ?? q.limit, posts: q.limitPosts ?? q.limit },
+  });
+  if (unsupported.length) result.unsupported = unsupported;
+  return sendJSON(res, 200, result);
 }
 
 /**
