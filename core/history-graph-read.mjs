@@ -143,6 +143,31 @@ function cardFact(term, name, unknown) {
 }
 const withUnknown = (row, unknown) => (unknown.length ? { ...row, unknown } : row);
 
+/**
+ * The BOUNDED facts a legacy seq-node carries, as S3's public row spells them (S4 lane events use the same mapping, so the
+ * two reads cannot drift). `term(predicateIri)` returns the node's one term or null. A refusal keeps reason / status and
+ * names route / request / response / rule as never held (the projector never had them, graph-replica.mjs #1217); a card
+ * keeps column / holder (scrum:none → null, scrum:unknown or missing → null and named). Nothing is recovered from the
+ * current record. Returns { shortId, facts, unknown }.
+ */
+export const LEGACY_FACT_PREDICATES = Object.freeze([P.shortId, P.columnAfter, P.holderAtWrite, P.reason, P.httpStatus]);
+export function legacyFacts(kind, op, term) {
+  const n = { t: {} };
+  for (const p of LEGACY_FACT_PREDICATES) { const v = term(p); if (v) n.t[p] = [v]; }
+  const unknown = [];
+  if (op === 'refused') {
+    const shortId = shortIdOf(n, unknown);
+    unknown.push('route', 'request', 'response', 'rule');
+    return { shortId, facts: { reason: first(n, P.reason)?.value ?? null, status: first(n, P.httpStatus)?.value ?? null, route: null, request: null, response: null, rule: null }, unknown };
+  }
+  if (kind === 'card') {
+    const shortId = shortIdOf(n, unknown);
+    return { shortId, facts: { column: cardFact(first(n, P.columnAfter), 'column', unknown), holder: cardFact(first(n, P.holderAtWrite), 'holder', unknown) }, unknown };
+  }
+  const s = first(n, P.shortId);
+  return { shortId: s && /^\d+$/.test(s.value) ? Number(s.value) : null, facts: {}, unknown };
+}
+
 /** LEGACY bindings → synthetic, seq-ascending events whose `historyRow` is the finished public row. */
 export function legacyEventsFromBindings(bindings) {
   const out = [];
@@ -151,20 +176,8 @@ export function legacyEventsFromBindings(bindings) {
     const kind = first(n, P.entityKind)?.value ?? null;
     const op = first(n, P.op)?.value ?? null;
     const at = isoAtFull(first(n, P.logRecordedAt).value);
-    const unknown = [];
-    const base = { kind, op, seq, id: idOf(first(n, P.used)), shortId: null, title: null, column: null, by: seatOf(first(n, P.actor)), at, graph: null };
-    let row;
-    if (op === 'refused') {
-      base.shortId = shortIdOf(n, unknown);
-      row = { ...base, reason: first(n, P.reason)?.value ?? null, status: first(n, P.httpStatus)?.value ?? null, route: null, request: null, response: null, rule: null };
-      unknown.push('route', 'request', 'response', 'rule');   // the projector never held them (graph-replica.mjs, #1217)
-    } else if (kind === 'card') {
-      base.shortId = shortIdOf(n, unknown);
-      row = { ...base, column: cardFact(first(n, P.columnAfter), 'column', unknown), holder: cardFact(first(n, P.holderAtWrite), 'holder', unknown) };
-    } else {
-      const s = first(n, P.shortId);
-      row = { ...base, shortId: s && /^\d+$/.test(s.value) ? Number(s.value) : null };
-    }
+    const { shortId, facts, unknown } = legacyFacts(kind, op, (p) => first(n, p));
+    const row = { kind, op, seq, id: idOf(first(n, P.used)), shortId, title: null, column: null, by: seatOf(first(n, P.actor)), at, graph: null, ...facts };
     out.push({ seq, op, actor: row.by, recorded_at: at, entity: { kind, id: row.id, shortId: row.shortId }, historyRow: withUnknown(row, unknown) });
   }
   return out.sort((a, b) => a.seq - b.seq);

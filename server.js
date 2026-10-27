@@ -13294,18 +13294,22 @@ function queryGuard(req, res, extra = CURSOR_PARAMS) {
 }
 
 /** GET /api/cursors — the reachability projection, inbound-evidence only. */
-function handleCursorReport(req, res) {
+async function handleCursorReport(req, res) {
   const q = queryGuard(req, res, new Set(['as', 'inputs', 'streamOpen']));
   if (!q) return;
   try {
+    // #1762 S4 — past a valid F the lag is against F.logSeq and the retired log is not read
+    const lf = await lifecycleFrontier(res);
+    if (lf === undefined) return;
+    const head = lf?.fr.state === 'valid' ? lf.fr.frontier.logSeq : null;
     // `inputs=stream_open` is the card's POSITIVE CONTROL and nothing else: the
     // banned instrument, kept runnable so its disagreement with the inbound
     // projection can be demonstrated rather than argued. It scored a seat
     // healthy for eight hours while it received nothing.
     const report = reachabilityReport(EVENT_LOG_DIR, {
-      inputs: q.inputs === 'stream_open' ? 'stream_open' : 'inbound',
+      inputs: q.inputs === 'stream_open' ? 'stream_open' : 'inbound', head,
     });
-    sendJSON(res, 200, { head_seq: headSeq(EVENT_LOG_DIR), lanes: report });
+    sendJSON(res, 200, { head_seq: head ?? headSeq(EVENT_LOG_DIR), lanes: report });
   } catch (e) {
     if (e?.code === CURSOR_STATE_INVALID) return sendJSON(res, 503, { error: e.message, code: e.code, file: e.file });   // #1762 S4
     console.error('GET /api/cursors:', e.message);
@@ -13344,10 +13348,23 @@ function laneHistoryQuery() {
   if (ANNOUNCE_EXECUTOR) return async (sparql) => { const r = await POSTS_READER.query(sparql); if (!r.ok) throw Object.assign(new Error(`the graph could not be read: ${r.reason || 'unreadable'}`), { code: 'GRAPH_EXECUTOR_UNAVAILABLE' }); return r.rows; };
   return null;
 }
+const laneConvQuery = () => (ANNOUNCE_EXECUTOR ? async (sparql) => { const r = await POSTS_READER.query(sparql); if (!r.ok) throw Object.assign(new Error(`the graph could not be read: ${r.reason || 'unreadable'}`), { code: 'GRAPH_EXECUTOR_UNAVAILABLE' }); return r.rows; } : null);
 async function laneFrontier() {
   const query = laneHistoryQuery();
   if (!query) return null;
-  return { query, fr: classifyFrontier(await query(FRONTIER_QUERY)) };
+  return { query, convQuery: laneConvQuery(), fr: classifyFrontier(await query(FRONTIER_QUERY)) };
+}
+/** the history object a lifecycle envelope takes past a valid F (no page read: the log half's age is reported unknown) */
+const laneHistoryOf = (lf) => (lf?.fr.state === 'valid' ? { frontierLogSeq: lf.fr.frontier.logSeq, frontierCommitSeq: lf.fr.frontier.commitSeq } : null);
+/**
+ * #1762 S4 — the frontier for a cursor LIFECYCLE route (register / inbound / ack / listing / push mark): null when no executor is
+ * configured or F is absent. A refused or unreadable F has already been answered (503) when this returns `undefined`.
+ */
+async function lifecycleFrontier(res) {
+  let lf = null;
+  try { lf = await laneFrontier(); } catch (e) { if (graphRefused(res, e)) return undefined; throw e; }
+  if (lf && frontierRefused(res, lf.fr)) return undefined;
+  return lf;
 }
 /**
  * #1762 S4 — one lane page past F: the PROVEN log half (core/history-lane.mjs) and the graph half (log-born receipts, S1's
@@ -13362,6 +13379,9 @@ async function lanePastFrontier(identity, limit, lf) {
     const logPage = lane ? await lanePageFromHistory({ query, readPost: readGraphPost, F, acked: lane.acked, limit }) : { events: [], logHigh: null };
     const feed = LOGBORN ? feedRowsFromBindings(await LOGBORN.query(feedQuery(graphAcked))) : null;
     const through = feed ? feed.through : startHw;
+    // #1762 S4 (review of 60a02f8, finding 1) — graph-born POST receipts are owed from the lane's OWN graph position, below F as
+    // well as above it: a pre-F post has no legacy seq-node, so F must not be what erases it. Cut to the same high-water.
+    const posts = postFeedRows(await lf.convQuery(postFeedQuery(graphAcked)), through);
     const nativeB = await query(nativeQuery({ afterCommitSeq: F.commitSeq, through }));
     const refusalB = await query(refusalQuery({ afterCommitSeq: F.commitSeq, through }));
     const again = classifyFrontier(await query(FRONTIER_QUERY));
@@ -13369,8 +13389,22 @@ async function lanePastFrontier(identity, limit, lf) {
       && [through, markerOf(nativeB), markerOf(refusalB), again.marker.commitSeq].every((h) => Number(h) === startHw);
     if (!same) return null;
     const native = nativeRowsFromBindings(nativeB);
-    const nativeOps = new Set(native.map((r) => r.graph.opId));
-    const rows = [...(feed ? feed.rows.filter((r) => !(r.graph && nativeOps.has(r.graph.opId))) : []), ...native, ...refusalRowsFromBindings(refusalB)]
+    // ONE ROW PER (opId, part), as /api/changes does: a non-post receipt with a native twin is not served again (the native
+    // row carries its provenance); a POST keeps its receipt row (the conversations unit's row is the authoritative one) with
+    // the native provenance folded into it, and the content-free native duplicate is dropped
+    const nativeByOp = new Map();
+    for (const r of native) (nativeByOp.get(r.graph.opId) || nativeByOp.set(r.graph.opId, []).get(r.graph.opId)).push(r);
+    const folded = new Set();
+    const receipts = [];
+    for (const r of [...(feed ? feed.rows : []), ...posts]) {
+      const twins = r.graph ? nativeByOp.get(r.graph.opId) : null;
+      if (!twins) { receipts.push(r); continue; }
+      if (r.kind !== 'conversation') continue;
+      const twin = twins.find((t) => t.kind === 'conversation' && t.id === r.id) ?? twins[0];
+      folded.add(twin);
+      receipts.push({ ...r, graph: { ...r.graph, part: twin.graph.part, nativeOp: twin.graph.nativeOp } });
+    }
+    const rows = [...receipts, ...native.filter((r) => !folded.has(r)), ...refusalRowsFromBindings(refusalB)]
       .sort((a, b) => a.graph.commitSeq - b.graph.commitSeq || (a.graph.part ?? 0) - (b.graph.part ?? 0));
     const graph = feed ? { ...feed, rows } : { rows, through, epoch: Number(fr.marker.epoch), epochBase: null, incarnation: incarnationTag(fr.marker.incarnation), incarnationFrom: null };
     return { graph, history: { events: logPage.events, logHigh: logPage.logHigh, frontierLogSeq: F.logSeq, frontierCommitSeq: F.commitSeq } };
@@ -13414,6 +13448,7 @@ async function handleCursorRegister(req, res) {
       graphHead: head?.through ?? null, graphEpoch: head?.epoch ?? null, graphEpochBase: head?.epochBase ?? null,
       graphIncarnation: head?.incarnation ?? null, graphIncarnationFrom: head?.incarnationFrom ?? null,   // #1577
       resync: body.resync === 'epoch' ? 'epoch' : body.resync === 'rollback' ? 'rollback' : null,   // #1561 rollback
+      history: laneHistoryOf(lf),   // #1762 S4 — the envelope reads no log past F
     });
     sendJSON(res, 200, { identity: id, ...out });
   } catch (e) {
@@ -13459,6 +13494,8 @@ async function handleCursorPull(req, res) {
     try { lf = await laneFrontier(); } catch (e) { if (graphRefused(res, e)) return; throw e; }
     if (lf && frontierRefused(res, lf.fr)) return;
     if (lf?.fr.state === 'valid') {
+      // posts live with the conversations unit; without it a lane page past F cannot include them, so it is refused, never partial
+      if (!lf.convQuery) return sendJSON(res, 503, { error: 'a history frontier is present but the conversations unit is off: posts cannot be served from the graph, and the log is not read past F', code: 'HISTORY_CONFIG_UNSUPPORTED' });
       try {
         ({ graph, history } = await lanePastFrontier(q.identity, limit, lf));
       } catch (e) {
@@ -13557,7 +13594,9 @@ async function handleCursorAck(req, res) {
       }
       store = { epoch: head.epoch, incarnation: head.incarnation ?? null };
     }
-    const out = ackFor(EVENT_LOG_DIR, key, body.token, { store });
+    const lf = await lifecycleFrontier(res);   // #1762 S4 — past F the success envelope reads no log
+    if (lf === undefined) return;
+    const out = ackFor(EVENT_LOG_DIR, key, body.token, { store, history: laneHistoryOf(lf) });
     if (out.ok) return sendJSON(res, 200, out);
     if (out.code === ACK_FENCED) {
       console.warn(`[#1576] ${ACK_FENCED} identity=${key} — an ack for a range since served to another session; re-serving`);
@@ -13580,8 +13619,12 @@ async function handleCursorInbound(req, res) {
     const key = body.identity || deliveryIdentity(body)?.key;
     if (!key) return sendJSON(res, 400, { error: 'identity is required', code: 'NO_DELIVERY_IDENTITY' });
     // #1571 — a lane adopted HERE (first inbound) starts at the executor head too.
+    cursorsPath(EVENT_LOG_DIR);   // #1762 S4 — an unusable relocated state refuses BEFORE anything else is read or written
+    // #1762 S4 — past a valid F, liveness and a fresh lane's ADOPTION take the log head as F.logSeq, and the log is not read
+    const lf = await lifecycleFrontier(res);
+    if (lf === undefined) return;
     const head = LOGBORN && graphAckedOf(EVENT_LOG_DIR, key) == null ? await graphHeadOrNull() : null;
-    const out = noteInbound(EVENT_LOG_DIR, key, { via: body.via ?? null, graphHead: head?.through ?? null, graphEpoch: head?.epoch ?? null, graphIncarnation: head?.incarnation ?? null });
+    const out = noteInbound(EVENT_LOG_DIR, key, { via: body.via ?? null, graphHead: head?.through ?? null, graphEpoch: head?.epoch ?? null, graphIncarnation: head?.incarnation ?? null, history: laneHistoryOf(lf) });
     sendJSON(res, 200, out);
   } catch (e) {
     if (e?.code === CURSOR_STATE_INVALID) return sendJSON(res, 503, { error: e.message, code: e.code, file: e.file });   // #1762 S4
@@ -13603,6 +13646,10 @@ async function handleCursorServed(req, res) {
     const key = body.identity || deliveryIdentity(body)?.key;
     if (!key) return sendJSON(res, 400, { error: 'identity is required', code: 'NO_DELIVERY_IDENTITY' });
     if (!body.conversationId) return sendJSON(res, 400, { error: 'conversationId is required', code: 'NO_CONVERSATION' });
+    // #1762 S4 — a push mark is a LOG seq; past a valid F the log is retired and not read, so the mark is answered, never resolved
+    const lf = await lifecycleFrontier(res);
+    if (lf === undefined) return;
+    if (lf?.fr.state === 'valid') return sendJSON(res, 200, { served: false, advanced: false, code: 'HISTORY_FRONTIER_PRESENT', identity: key, error: 'push marks name a log seq, and past the history frontier the event log is not read: nothing was recorded' });
     const seq = seqOfEntityEvent(EVENT_LOG_DIR, { kind: 'conversation', id: String(body.conversationId), op: 'post' });
     if (seq == null) return sendJSON(res, 200, { served: false, advanced: false, code: 'EVENT_NOT_FOUND', identity: key });
     // #1576 — a PUSH mark is reported (`push_served`), never an ack and never a pull serve:

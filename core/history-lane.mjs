@@ -18,6 +18,8 @@
  * facts already acked.
  */
 import { leafHash, auditRanges, verifiesAt, HISTORY_FORMAT } from './history-proof.mjs';
+import { legacyFacts, LEGACY_FACT_PREDICATES } from './history-graph-read.mjs';
+import { isoAtFull } from './instant.mjs';
 
 const PROV = 'http://www.w3.org/ns/prov#';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
@@ -72,16 +74,17 @@ function treeReader(query, tree) {
   return { entry };
 }
 
-/** The live canonical nodes for the given N, by a bounded query: N -> { used, op, kind, actor, shortId, at } */
+/** The live canonical nodes for the given N, by a bounded query: N -> { used, op, kind, actor, at, [fact predicate IRI] } */
 async function liveNodes(query, Ns) {
   if (!Ns.length) return new Map();
-  const P = { used: `${PROV}used`, op: `${RS}op`, kind: `${RS}entityKind`, actor: `${PROV}wasAssociatedWith`, shortId: `${RS}shortId`, at: `${RS}logRecordedAt` };
-  const rows = await query(`SELECT ?a ?p ?o WHERE { VALUES ?a { ${Ns.map((n) => `<${ACT}seq-${n}>`).join(' ')} } ?a ?p ?o . FILTER(?p IN (${Object.values(P).map((x) => `<${x}>`).join(', ')})) }`);
+  const P = { used: `${PROV}used`, op: `${RS}op`, kind: `${RS}entityKind`, actor: `${PROV}wasAssociatedWith`, at: `${RS}logRecordedAt` };
+  const want = [...Object.values(P), ...LEGACY_FACT_PREDICATES];
+  const rows = await query(`SELECT ?a ?p ?o WHERE { VALUES ?a { ${Ns.map((n) => `<${ACT}seq-${n}>`).join(' ')} } ?a ?p ?o . FILTER(?p IN (${want.map((x) => `<${x}>`).join(', ')})) }`);
   const by = new Map();
   for (const b of rows) {
     const n = Number(b.a.value.slice(`${ACT}seq-`.length));
     const t = by.get(n) || {}; by.set(n, t);
-    const k = Object.keys(P).find((x) => P[x] === b.p.value);
+    const k = Object.keys(P).find((x) => P[x] === b.p.value) ?? b.p.value;
     (t[k] ||= []).push(b.o);
   }
   return by;
@@ -126,20 +129,29 @@ export async function lanePageFromHistory({ query, readPost, F, acked, limit }) 
       throw coverage(`the live node N=${e.N} does not match its committed entry (rank ${r + j})`, { rank: r + j });
     }
     const id = e.used.startsWith(ENT) ? e.used.slice(ENT.length) : e.used;
-    const actor = one('actor'); const sid = one('shortId'); const at = one('at');
+    const actor = one('actor'); const at = one('at');
+    // the lane wire (S4 v1.7): S3's BOUNDED facts sit BESIDE `state`, under the same names S3's rows use, with `unknown`
+    // naming each one never held. `state` stays null: a seq-node holds no record, and none is recovered from the current one.
+    const { shortId, facts, unknown } = legacyFacts(e.kind, e.op, (p) => one(p));
+    if (e.op === 'refused' && typeof facts.status === 'string' && /^\d+$/.test(facts.status)) facts.status = Number(facts.status);
     const ev = {
       seq: e.N, op: e.op, actor: actor && actor.value.startsWith(PERSON) ? decodeURIComponent(actor.value.slice(PERSON.length)) : null,
-      recorded_at: at ? at.value : null,
-      entity: { kind: e.kind, id, shortId: sid && /^\d+$/.test(sid.value) ? Number(sid.value) : null },
+      recorded_at: at ? isoAtFull(at.value) : null,
+      entity: { kind: e.kind, id, shortId },
       state: null,
+      ...facts,
     };
     if (e.kind === 'conversation') {
-      // A1 — a legacy post is served from the conversations unit; a redacted one is still an event, its text withheld
+      // A1 — a legacy post is served from the conversations unit; a redacted one is still an event, its text withheld. The
+      // backfill writes no logRecordedAt for a conversation node, so the time is the post's own (a tombstone has none: named).
       const p = await readPost(id);
       if (p.unavailable) throw Object.assign(new Error(`the graph could not be read: ${p.unavailable}`), { code: 'GRAPH_EXECUTOR_UNAVAILABLE' });
       if (p.absent) throw Object.assign(new Error(`the legacy post ${id} (seq ${e.N}) is missing from the conversations unit`), { code: 'HISTORY_LEGACY_POST_MISSING', seq: e.N, entity: id });
       ev.state = p.redacted ? { id, redacted: true } : p.post;
-    }
+      if (ev.recorded_at == null && !p.redacted && p.post.createdAt) ev.recorded_at = isoAtFull(p.post.createdAt);
+      if (ev.recorded_at == null) unknown.push('recorded_at');
+    } else if (ev.recorded_at == null) unknown.push('recorded_at');
+    if (unknown.length) ev.unknown = unknown;
     events.push(ev);
   }
   return { events, logHigh: events.at(-1).seq };
