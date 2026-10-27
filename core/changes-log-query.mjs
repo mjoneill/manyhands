@@ -349,7 +349,8 @@ export function queryChangesFromLog(events, {
   let gRows = (graphRows || []).filter((r) => (from.cursor ? r.graph.commitSeq > from.graph : r.at >= since));
   if (entity != null) { logEvs = logEvs.filter((ev) => ev.entity?.shortId === Number(entity)); gRows = gRows.filter((r) => r.shortId === Number(entity)); }
   if (actor != null) { logEvs = logEvs.filter((ev) => ev.actor === actor); gRows = gRows.filter((r) => r.by === actor); }
-  gRows = [...gRows].sort((a, b) => a.graph.commitSeq - b.graph.commitSeq);
+  // #1762 S3 — a commit can hold several parts (one row each): they stay in part order, so a page never reorders a commit
+  gRows = [...gRows].sort((a, b) => a.graph.commitSeq - b.graph.commitSeq || (a.graph.part ?? 0) - (b.graph.part ?? 0));
 
   let rows = mergeSources(logEvs.map((ev) => ({ src: 'log', ev })), gRows.map((row) => ({ src: 'graph', row })));
 
@@ -416,9 +417,11 @@ export function queryChangesFromLog(events, {
   // Newest tail per kind (the page a returning seat wants), re-merged into
   // one ordered list — the interleaving IS the deliverable (R1).
   const cut = {
-    cards: buckets.cards.slice(-quota.cards),
-    posts: buckets.posts.slice(-quota.posts),
+    cards: wholeCommitTail(buckets.cards, quota.cards),
+    posts: wholeCommitTail(buckets.posts, quota.posts),
   };
+  // #1762 S3 — a commit larger than the quota is served WHOLE and named: `returned` may exceed the limit, never a split commit
+  const over = [cut.cards, cut.posts].flatMap((c, i) => (c.length > [quota.cards, quota.posts][i] && c[0]?.src === 'graph' ? [c[0].row.graph.commitSeq] : []));
   const truncated = {
     cards: totals.cards > cut.cards.length,
     posts: totals.posts > cut.posts.length,
@@ -439,7 +442,8 @@ export function queryChangesFromLog(events, {
   }) : null;
 
   return {
-    changes: merged.map((it) => (it.src === 'graph' ? it.row : withoutRedactedText(toRow(it.ev), redactedPostIds))),
+    // #1762 S3 — a legacy row read from the graph carries its finished public row (no title: an activity stores no content)
+    changes: merged.map((it) => (it.src === 'graph' ? it.row : it.ev.historyRow ?? withoutRedactedText(toRow(it.ev), redactedPostIds))),
     window: { since },
     newest: merged.length ? itemAt(merged.at(-1)) : null,
     oldest: merged.length ? itemAt(merged[0]) : null,
@@ -456,5 +460,23 @@ export function queryChangesFromLog(events, {
     // from both sources; page older rows of THIS window with `before: nextBefore`.
     cursor: forwardCursor(lt, outEpoch, from.cursor && graphRows == null ? from.graph : gt, outInc),
     nextBefore,
+    ...(over.length ? { oversizedCommit: over[0] } : {}),
   };
+}
+
+/**
+ * #1762 S3 — the newest `quota` items of one bucket, widened backwards so the oldest item's COMMIT is whole: the parts of a
+ * multi-part commit are adjacent in presentation order (one commit time, part order), and a page must never end inside one.
+ * With one row per commit (every source before S3) this is exactly `list.slice(-quota)`.
+ */
+function wholeCommitTail(list, quota) {
+  if (!(quota > 0)) return list.slice(-quota);   // today's exact result for 0 / NaN (slice(-0) is the whole list)
+  if (list.length <= quota) return list;
+  let start = list.length - quota;
+  const f = list[start];
+  if (f && f.src === 'graph') {
+    const c = f.row.graph.commitSeq;
+    while (start > 0 && list[start - 1].src === 'graph' && list[start - 1].row.graph.commitSeq === c) start--;
+  }
+  return list.slice(start);
 }
