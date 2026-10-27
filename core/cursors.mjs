@@ -77,9 +77,16 @@ const emptyState = () => ({ version: 1, seats: {} });
 // CURSOR_STATE_INVALID naming the file. It never reads as empty: an empty state silently restarts every lane at head.
 // With no relocated file the old path and its lenient rule below are exactly as before.
 let relocatedDir = null;
+let ownedFile = null;   // S4 v1.1 A3 (corrected): CONFIGURED ownership, independent of any directory S6 retires
 export const CURSOR_STATE_INVALID = 'CURSOR_STATE_INVALID';
 /** The data folder the relocated state lives in (server.js sets it at boot from SCRUM_DATA_DIR). null = not relocatable. */
 export function setCursorsDataDir(dir) { relocatedDir = dir || null; }
+/**
+ * #1762 S4 — the configured owner of the lane state (server.js sets it from SCRUM_CURSORS_FILE). Once set, that file is the ONLY
+ * state: missing or unreadable refuses CURSOR_STATE_INVALID, and no other path, archive or empty state is ever read. This is
+ * the durable proof of relocation: it lives in the configuration, not beside the event-log directory S6 retires.
+ */
+export function setCursorsOwnedFile(file) { ownedFile = file || null; }
 const stateInvalid = (file, why) => Object.assign(new Error(`cursor state ${file} is not usable: ${why} — nothing is served, acked or registered until it is repaired`), { code: CURSOR_STATE_INVALID, file });
 const strictSeats = (p) => {
   let j;
@@ -90,6 +97,11 @@ const strictSeats = (p) => {
 const sameSeats = (a, b) => JSON.stringify(Object.entries(a).sort(([x], [y]) => (x < y ? -1 : 1))) === JSON.stringify(Object.entries(b).sort(([x], [y]) => (x < y ? -1 : 1)));
 /** The relocated file when it is in use (validated), else null. Throws CURSOR_STATE_INVALID. */
 function relocatedFile(eventDir) {
+  if (ownedFile) {
+    if (!existsSync(ownedFile)) throw stateInvalid(ownedFile, 'it is the configured lane state (SCRUM_CURSORS_FILE) and it is missing');
+    strictSeats(ownedFile);
+    return ownedFile;
+  }
   if (!relocatedDir) return null;
   const p = join(relocatedDir, 'cursors.json');
   const old = join(eventDir, 'cursors.json');
