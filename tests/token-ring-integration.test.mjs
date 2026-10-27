@@ -34,14 +34,16 @@ async function startTokenRingPair(extraEnv = {}) {
   const mcpPort = await freePort();
   const cfgFile = path.join(os.tmpdir(), `token-ring-int-${process.pid}-${restPort}.json`);
   fs.writeFileSync(cfgFile, JSON.stringify(TOKEN_RING_CONFIG));
+  // #1784 — the mode is REST's (GET /api/config), which MCP reads; MCP opens no config file of its own
   const rest = await startRestServer({
     port: restPort,
     mcpNotifyUrl: `http://127.0.0.1:${mcpPort}/internal/notify`,
+    channelConfigFile: cfgFile,
   });
   const mcp = await startMcpServer({
     port: mcpPort,
     restApiBase: rest.baseUrl,
-    env: { SCRUM_CHANNEL_STAGGER: '', SCRUM_CHANNEL_CONFIG_FILE: cfgFile, ...extraEnv },
+    env: { SCRUM_CHANNEL_STAGGER: '', ...extraEnv },
   });
   return {
     rest, mcp,

@@ -168,8 +168,6 @@ test('#455 unasked/episodeKey — the key changes on every holder write and ever
  */
 test('#455 SEAM — the adapter asks once about a silent claim, never reclaims, and the answer clears it', async () => {
   const stateFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'stale-455-')), 'state.json');
-  const tendingFile = path.join(path.dirname(stateFile), 'tending.json');
-  fs.writeFileSync(tendingFile, JSON.stringify({ enabled: true, quietAfterMinutes: 69 }));
   const board = makeBoardFixture({
     cards: [
       held('silent', 10, 'bo', -3),        // claimed 3 h before the fixture's "now" (the server's clock is real, so: 3 h ago)
@@ -184,9 +182,11 @@ test('#455 SEAM — the adapter asks once about a silent claim, never reclaims, 
 
   const pair = await startPair({
     board,
-    mcpEnv: { SCRUM_TENDING_CONFIG_FILE: tendingFile, SCRUM_STALE_CLAIM_STATE_FILE: stateFile, MCP_WHISPER_TICK_MS: '400' },
+    mcpEnv: { SCRUM_STALE_CLAIM_STATE_FILE: stateFile, MCP_WHISPER_TICK_MS: '400' },
   });
   const { rest, mcp } = pair;
+  // #1785 — tending is graph state the adapter reads through REST, so the row opens it there (the old tending file is not read)
+  { const t = await fetch(`${rest.baseUrl}/api/tending-config`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: true, quietAfterMinutes: 69 }) }); if (t.status !== 200) throw new Error(`tending on: ${t.status}`); }
   const asks = async () => {
     const all = await (await fetch(`${rest.baseUrl}/api/conversations`)).json();
     return all.filter((m) => m.author === 'board' && /^🕰 #/.test(m.body || ''));

@@ -300,6 +300,7 @@ export const TENDING_TYPES = Object.freeze([
   'scrum:TendingState',          // enabled/paused, with actor provenance
   'scrum:TendingSilence',        // the causal key a mint answers
   'scrum:TendingMint',           // one offer, attached to its silence
+  'scrum:TendingWindowReservation',   // #1786 — the board may send ONE prompt per window (reserved before the send)
   'scrum:TendingClaimAttempt',   // EVERY attempt — grants and refusals alike
   // Pause/resume as EVENTS, not only as current state. A mutable
   // `paused:false` erases the interval it was true, and archaeology then

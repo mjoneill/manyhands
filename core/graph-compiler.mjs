@@ -401,6 +401,12 @@ export function staticCheck(sparql, opId) {
     return m ? m[1].split('\n').filter((l) => l.trim()) : [];
   };
   const where = block('WHERE').join('\n');
+  // #1791 / #1781 — the three TEXTUAL scans below (a second operation, a named graph, a bookkeeping predicate in the WHERE)
+  // read the request with its string literals BLANKED: a literal is data, never syntax, and a post or record quoting
+  // "…; delete the card", "GRAPH ?g {" or "?op <urn:ex:commitSeq> ?c" was refused as if it were the request's own. The
+  // compiler's literals are double-quoted with \-escapes on one line (recLit, psqLit, JSON.stringify), so the bounds are exact.
+  const unquote = (t) => t.replace(/"(?:[^"\\\n]|\\.)*"/g, '""');
+  const bareSparql = unquote(sparql), bareWhere = unquote(where);
   // every ?d_ variable must be defined only as IF(BOUND(?ok), x, ?u)
   const dDefs = {};
   // [^\n], never `.`: a JS `.` stops at U+2028/U+2029, which a JSON literal carries raw, so `.*` silently missed such a BIND
@@ -417,26 +423,26 @@ export function staticCheck(sparql, opId) {
   }
   if ((where.match(/BIND\(true AS \?ok\)/g) || []).length !== 1) errors.push('?ok must be bound exactly once');
   if (!new RegExp(`^\\s*OPTIONAL \\{ GRAPH ${escRe(BK)} \\{ <[^>]+> <urn:ex:digest> \\?dup \\} \\}\\n\\s*FILTER\\(!BOUND\\(\\?dup\\)\\)`).test(where)) errors.push(`duplicate guard missing, not first, or not read from GRAPH ${BK}`);
-  if (/;\s*(INSERT|DELETE)/i.test(sparql)) errors.push('multi-operation request');
+  if (/;\s*(INSERT|DELETE)/i.test(bareSparql)) errors.push('multi-operation request');
   // one plain DELETE { } INSERT { } WHERE { } request: no WITH / USING / FROM redirecting the default graph
   if (!/^DELETE \{\n[\s\S]*?\n\}\nINSERT \{\n[\s\S]*?\n\}\nWHERE \{\n/.test(sparql)) errors.push('not a plain DELETE/INSERT/WHERE request (WITH, USING and FROM are not accepted)');
   // the only named graph anywhere in the request is the bookkeeping graph; #1749 (A7 v2) the recovery graph may be READ in WHERE
   // (the allocator guard asks whether a hold exists) and is never a template's target
-  for (const m of sparql.matchAll(/\bGRAPH\s+(\S+)\s*\{/g)) {
+  for (const m of bareSparql.matchAll(/\bGRAPH\s+(\S+)\s*\{/g)) {
     if (m[1] === BK) continue;
-    if (m[1] === POSTSEQ_TERMS.RECOVERY_GRAPH && where.includes(m[0]) && !block('DELETE').join('\n').includes(m[0]) && !block('INSERT').join('\n').includes(m[0])) continue;
+    if (m[1] === POSTSEQ_TERMS.RECOVERY_GRAPH && bareWhere.includes(m[0]) && !unquote(block('DELETE').join('\n')).includes(m[0]) && !unquote(block('INSERT').join('\n')).includes(m[0])) continue;
     errors.push(`named graph ${m[1]} is not accepted: the only named graph is ${BK}`);
   }
   // WHERE: a bookkeeping predicate is read only inside GRAPH <bk> { … } (strip those blocks, then look for it in triple position)
   {
     const open = `GRAPH ${BK} {`;
     let rest = '';
-    for (let i = 0; i < where.length;) {
-      const j = where.indexOf(open, i);
-      if (j < 0) { rest += where.slice(i); break; }
-      rest += where.slice(i, j);
+    for (let i = 0; i < bareWhere.length;) {
+      const j = bareWhere.indexOf(open, i);
+      if (j < 0) { rest += bareWhere.slice(i); break; }
+      rest += bareWhere.slice(i, j);
       let d = 1; let k = j + open.length;
-      while (k < where.length && d > 0) { if (where[k] === '{') d++; else if (where[k] === '}') d--; k++; }
+      while (k < bareWhere.length && d > 0) { if (bareWhere[k] === '{') d++; else if (bareWhere[k] === '}') d--; k++; }
       i = k;
     }
     for (const p of BOOKKEEPING_PREDICATES) {
@@ -1631,6 +1637,10 @@ function cardStructureBranches(iri, k, [xs, xp, xo] = ['?xs', '?xp', '?xo'], x =
     `    { ${I} ${ref(`${CW.scrum}hasCheck`)} ${xs} . ${xs} ${xp} ${xo} }`,
     `    { ${xs} ${ref(`${CW.scrum}dependsOn`)} ${I} BIND(${ref(`${CW.scrum}dependsOn`)} AS ${xp}) BIND(${I} AS ${xo}) }`,
     `    { ${I} ?${x}l${k} ?${x}h${k} FILTER(isBlank(?${x}h${k})) ?${x}h${k} ${ref(CW.rdfRest)}* ${xs} . ${xs} ${xp} ${xo} }`,
+    // #1787 — the card's attachment nodes, ALL of their triples, whatever they hold: proven owned twice (linked to this card
+    // by attachmentOf AND under its /attachment/ prefix, as the post path does). Without this a write deleted only the
+    // triples its prior projection named, so a stale or extra attachment fact survived every rewrite (#138 review).
+    `    { ${xs} ${ref(`${CW.scrum}attachmentOf`)} ${I} . FILTER(STRSTARTS(STR(${xs}), ${JSON.stringify(`${iri}/attachment/`)})) ${xs} ${xp} ${xo} }`,
   ];
 }
 

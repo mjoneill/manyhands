@@ -66,12 +66,14 @@ import { KIND_DECLARATIONS, PROJECTED_TYPES, divergence } from './core/kind-regi
 import { SHAPE_QUERY, withObjectShapes } from './core/predicate-shapes.mjs';
 import { shortenTypeIri, PERSON_IRI_BASE } from './core/jsonld.mjs';
 // #805 — the boot migration's inputs (the live flat sources) and its builder.
-import { readPool, recentWhispers, DEFAULT_POOL, poolFilePath } from './whisper-store.mjs';
-import { readTendingConfig, writeTendingConfig } from './tending-config.mjs';
+import { readPool, recentWhispers, DEFAULT_POOL, poolFilePath, whisperStateFilePath } from './whisper-store.mjs';
+import { readTendingConfig, validateTendingConfig, tendingConfigFilePath } from './tending-config.mjs';   // #1785 — the file is read ONCE, by the boot import
 import { buildTendingEntities, person as personIri } from './core/tending-bootstrap.mjs';
 import { resolvePool as resolveWhisperPool, bagState } from './core/tending-pool.mjs';
 import { mintId } from './core/tending-ids.mjs';
-import { createPrompt, editPrompt, setEnabled, reorderPlaylist, removePrompt, setShuffle, readShuffle, assertSlug } from './core/tending-authoring.mjs';
+import { windowReserved, reservationEntity, claimStateFor, grantEntity, claimHistory } from './core/whisper-graph.mjs';   // #1786
+import { claimWhisper, HOUR_MS } from './core/whisper-window.mjs';   // #1786 — the claim decision, unchanged, over graph state
+import { createPrompt, editPrompt, setEnabled, reorderPlaylist, removePrompt, setShuffle, readShuffle, assertSlug, readTendingConfigFrom, setTendingConfig, tendingConfigImported } from './core/tending-authoring.mjs';
 import { resolveProvenance } from './core/tending-provenance.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
 import { moveFenceIds, moveFenceEntity } from './core/move-fences.mjs';   // #1707
@@ -92,7 +94,8 @@ import { commentMetadata } from './core/card-comments.mjs';
 import { cardOutline } from './core/card-outline.mjs';
 import { roleSectionFor, heldRoleKey } from './core/role-section.mjs';   // #1376
 import { validateDeclaration, seatState, tendingEligibility, declarationsFromRows, UNKNOWN as SEAT_UNKNOWN } from './core/seat-state.mjs';
-import { readConfig, writeConfig, LIMITS } from './channel-config.mjs';
+import { readConfig, writeConfig, validateConfig, configFilePath, LIMITS } from './channel-config.mjs';
+import { channelConfigEntity, channelConfigFrom, channelConfigInGraph, CHANNEL_CONFIG_IRI } from './core/channel-config-graph.mjs';   // #1784
 import { droppedAgentSeats, loadRoster, writeRoster, rosterFilePath, loadRosterRoles } from './core/roster-config.mjs';
 import { extractMentions as extractMentionsFromRoster } from './core/people.mjs';
 // #868 — the graph modules are imported LAZILY, at the bottom of this file's
@@ -250,14 +253,24 @@ const ALLOWED_HOSTS = parseAllowedHosts(process.env.SCRUM_ALLOWED_HOSTS);
 // loopback client that names its port. Set in the listen callback.
 let BOUND_PORT = PORT;
 const PROJECT_DIR = path.dirname(fileURLToPath(import.meta.url));
-const BOARD_DATA_FILE = process.env.SCRUM_BOARD_FILE || path.join(PROJECT_DIR, 'board-data.json');
+// #1788 — ONE data folder. SCRUM_DATA_DIR names it, and the board file defaults into it; unset, the folder is the board file's
+// own (every path below is then exactly what it was before). Every explicit per-file variable still wins.
+const BOARD_DATA_FILE = process.env.SCRUM_BOARD_FILE || path.join(process.env.SCRUM_DATA_DIR || PROJECT_DIR, 'board-data.json');
+const DATA_DIR = process.env.SCRUM_DATA_DIR || path.dirname(BOARD_DATA_FILE);
+// the event log and the misses log are named for the board file's IDENTITY (#669: two boards never share a log). Its basename
+// suffices only when the board lives IN the data folder (two files in one folder cannot share a name); a board kept elsewhere
+// adds a short hash of its absolute path, so two `board.json` files from different folders cannot collide in one DATA_DIR.
+// Production (board inside its folder) keeps exactly its existing names.
+const BOARD_STEM = path.basename(BOARD_DATA_FILE).replace(/\.json$/, '')
+  + (path.resolve(path.dirname(BOARD_DATA_FILE)) === path.resolve(DATA_DIR) ? ''
+    : `-${crypto.createHash('sha256').update(path.resolve(BOARD_DATA_FILE)).digest('hex').slice(0, 8)}`);
 
 // #1343 — seat credentials. Env-var-else-BESIDE-THE-BOARD: the file the MCP
 // adapter reads (SCRUM_SEAT_TOKENS) is this one; with no env it is the board
 // file's sibling, which is where the deployment keeps it. Absent = DORMANT.
 // The mode is per PROCESS, read once at boot, and a misspelling THROWS here
 // rather than running open (core/credentials.mjs readAuthMode).
-const SEAT_TOKENS_PATH = process.env.SCRUM_SEAT_TOKENS || path.join(path.dirname(BOARD_DATA_FILE), 'seat-tokens.json');
+const SEAT_TOKENS_PATH = process.env.SCRUM_SEAT_TOKENS || path.join(DATA_DIR, 'seat-tokens.json');   // #1788
 const AUTH_MODE = readAuthMode(process.env.SCRUM_AUTH);
 const authStats = { refused: 0, unknownBearers: 0, expiredBearers: 0, mismatched: 0 };
 let _creds = null, _credsMtime = -1, _credsCheckedAt = 0;
@@ -296,7 +309,7 @@ const INSTANCE_ID = process.env.SCRUM_INSTANCE_ID || '';
 // two stores in one directory silently share a log, which is the worst possible
 // failure for an append-only record. Day-segmented files land inside.
 const EVENT_LOG_DIR = process.env.SCRUM_EVENT_LOG_DIR
-  || `${BOARD_DATA_FILE.replace(/\.json$/, '')}-events`;
+  || path.join(DATA_DIR, `${BOARD_STEM}-events`);   // #1788 — in the data folder; unset, that is the board file's folder
 // Root directory for static file serving. Defaults to the project dir;
 // overridable so tests can exercise the traversal guard in isolation.
 const STATIC_DIR = process.env.SCRUM_STATIC_DIR || PROJECT_DIR;
@@ -1514,7 +1527,7 @@ let _graphProjectedThrough = null;
 // events may pass before the next one. 0 = no snapshot written by this
 // process yet (a warm boot sets it to the loaded snapshot's seq).
 const GRAPH_SNAPSHOT_EVERY = Number(process.env.SCRUM_GRAPH_SNAPSHOT_EVERY || 500);
-const GRAPH_SNAPSHOT_DIR = path.dirname(BOARD_DATA_FILE);
+const GRAPH_SNAPSHOT_DIR = DATA_DIR;   // #1788
 let _graphSnapshotSeq = 0;
 // #1386 — what the store meter reads about the boot that built this replica:
 // which path (warm|cold), how long, and the first sync after it (the replay
@@ -1582,7 +1595,7 @@ function writeWatermark() {
 }
 // #1112 item 3 — one warning per boot when the ledger cannot be projected here.
 let _workStoreWarned = false;
-const GRAPH_QUERY_LOG = path.join(path.dirname(BOARD_DATA_FILE), 'graph-query-log.jsonl');
+const GRAPH_QUERY_LOG = path.join(DATA_DIR, 'graph-query-log.jsonl');   // #1788
 // ── #1086 item 13 — QUERY → CARD retrieval, as a feature ──────────────────────
 // The embedder is CONFIGURED, never assumed: an unset URL/model answers
 // {available:false, reason} — this week's silent-zero theme must not arrive in
@@ -1591,8 +1604,8 @@ const GRAPH_QUERY_LOG = path.join(path.dirname(BOARD_DATA_FILE), 'graph-query-lo
 // board content — .gitignored in the same commit that creates them).
 const SEARCH_EMBED_URL = process.env.SEARCH_EMBED_URL || '';
 const SEARCH_EMBED_MODEL = process.env.SEARCH_EMBED_MODEL || '';
-const SEARCH_INDEX_FILE = path.join(path.dirname(BOARD_DATA_FILE), 'search-index.jsonl');
-const SEARCH_LOG_FILE = path.join(path.dirname(BOARD_DATA_FILE), 'search-log.jsonl');
+const SEARCH_INDEX_FILE = path.join(DATA_DIR, 'search-index.jsonl');   // #1788
+const SEARCH_LOG_FILE = path.join(DATA_DIR, 'search-log.jsonl');   // #1788
 const numEnv = (name, dflt) => { const v = Number(process.env[name]); return Number.isFinite(v) ? v : dflt; };
 const SEARCH_ABSTAIN_BELOW = numEnv('SEARCH_ABSTAIN_BELOW', 0.5);
 const SEARCH_ASK_WITHIN = numEnv('SEARCH_ASK_WITHIN', 0.03);
@@ -2025,10 +2038,13 @@ function readSnapshotMeta() {
 // #1386 — the meter as one object: readings + crossed ceilings. Throws when the
 // replica is not built (a boot that has not built it yet is an error, not zero rows).
 function graphStoreMeter() {
+  // #1789 — with the in-process copy retired (mode off/read-off) there is no store to meter, and the snapshot it would
+  // describe was last written before the cutover: refuse BEFORE reading graph-snapshot.json, so nothing touches it.
+  if (!DOCUMENT_READS) throw Object.assign(new Error(`the in-process copy is retired under SCRUM_BOARD_DOCUMENT=${BOARD_DOCUMENT}: no store to meter`), { code: 'REPLICA_RETIRED' });
   return readStoreMeter({ store: _graphStore, memory: process.memoryUsage(), boot: _graphBoot, replayTailMs: _graphReplayTailMs, snapshot: readSnapshotMeta(), ceilings: meterCeilings() });
 }
-// One line an hour so the trend is in the log without anyone polling /api/checks.
-setInterval(() => {
+// One line an hour so the trend is in the log without anyone polling /api/checks. #1789 — only while the copy exists.
+if (DOCUMENT_READS) setInterval(() => {
   try { const m = graphStoreMeter(); console.error(`${new Date().toISOString()} ${meterLine(m.readings, m.crossed)}`); } catch { /* not built yet — the boot line covers it */ }
 }, Number(process.env.SCRUM_METER_LOG_MS ?? 3_600_000)).unref();
 
@@ -7022,7 +7038,7 @@ async function handleListDecisions(req, res) {
 //
 // ⭐ And the automatic capture it said was unavailable had already shipped one
 // endpoint over. This makes it durable and queryable instead of stderr-only.
-const MISS_LOG_FILE = BOARD_DATA_FILE.replace(/\.json$/, '') + '-misses.jsonl';
+const MISS_LOG_FILE = path.join(DATA_DIR, `${BOARD_STEM}-misses.jsonl`);   // #1788
 
 function recordMisses(params, seat, url) {
   const at = new Date().toISOString();
@@ -9602,9 +9618,13 @@ function handleGetConfigLimits(req, res) {
   sendJSON(res, 200, LIMITS);
 }
 
+// #1784 — with the collections unit on, the config is the `channelConfig` family's one node and channel-config.json is a
+// one-time import (below, before listen); off, the file is read and written exactly as before.
+const channelConfigHeld = () => !!(COLLECTIONS && COLLECTIONS.keys.includes('channelConfig'));
+
 function handleGetConfig(req, res) {
   try {
-    sendJSON(res, 200, readConfig());
+    sendJSON(res, 200, channelConfigHeld() ? channelConfigFrom(readBoard().channelConfig) : readConfig());
   } catch (e) {
     console.error('GET /api/config:', e.message);
     sendJSON(res, 500, { error: 'Failed to read config' });
@@ -9616,9 +9636,19 @@ async function handleSetConfig(req, res) {
     const body = JSON.parse(await readBody(req));
     let clean;
     try {
-      clean = writeConfig(body); // validates; throws on out-of-bounds input
+      clean = channelConfigHeld() ? validateConfig(body) : writeConfig(body); // validates; throws on out-of-bounds input
     } catch (ve) {
       return sendJSON(res, 400, { error: ve.message });
+    }
+    if (channelConfigHeld()) {
+      // #1784 — the graph node, through the collections unit's guarded write; the file is never touched
+      await withWriteLock(async () => {
+        const data = readBoard();
+        const prior = (Array.isArray(data.channelConfig) ? data.channelConfig : []).find((e) => e && e['@id'] === CHANNEL_CONFIG_IRI) ?? null;
+        const entity = channelConfigEntity(clean, { prior });
+        data.channelConfig = [entity];
+        writeBoard(data, [{ op: prior ? 'update' : 'create', actor: body.by || null, entity: { kind: 'board-meta', id: CHANNEL_CONFIG_IRI }, state: entity }]);
+      });
     }
     sendJSON(res, 200, clean);
   } catch (e) {
@@ -9643,9 +9673,10 @@ async function handleSetConfig(req, res) {
 // Deliberately mirrors /api/config (#263) rather than inventing a shape: same
 // loopback trust model, same validate-then-persist, same 400-with-the-
 // validator's-own-message. One pattern on one page beats two.
+// #1785 — the switch and the threshold are graph state (TendingState); the file is no longer read or written by a route.
 function handleGetTendingConfig(req, res) {
   try {
-    sendJSON(res, 200, readTendingConfig());
+    sendJSON(res, 200, readTendingConfigFrom(tendingEntities()));
   } catch (e) {
     console.error('GET /api/tending-config:', e.message);
     sendJSON(res, 500, { error: 'Failed to read tending config' });
@@ -9657,13 +9688,15 @@ async function handleSetTendingConfig(req, res) {
     const body = JSON.parse(await readBody(req));
     let clean;
     try {
-      // Validates and refuses; a rejected write leaves the previous file
+      // Validates and refuses; a rejected write leaves the previous state
       // untouched, so a typo cannot silently become the room's threshold.
-      clean = writeTendingConfig(body);
+      clean = validateTendingConfig(body);
     } catch (ve) {
       return sendJSON(res, 400, { error: ve.message });
     }
-    sendJSON(res, 200, clean);
+    const at = new Date().toISOString();
+    await withWriteLock(async () => { writeTendingEntities(setTendingConfig(tendingEntities(), { ...clean, at }), { actor: typeof body.by === 'string' ? body.by : null, op: 'update' }); });
+    sendJSON(res, 200, readTendingConfigFrom(tendingEntities()));
   } catch (e) {
     console.error('POST /api/tending-config:', e.message);
     sendJSON(res, 500, { error: 'Failed to save tending config' });
@@ -9814,6 +9847,58 @@ async function handleCreateMint(req, res) {
     console.error('POST /api/tending/mints:', e.message);
     sendJSON(res, 500, { error: 'Failed to record mint' });
   }
+}
+
+// ── #1786 — the whisper's two once-per-window guards, as graph state decided under the write lock (core/whisper-graph.mjs).
+// REST is the one writer, so the check and the write cannot interleave: two MCP processes or ticks racing one window get
+// one 201 and one 409 (a send), or one grant and one refusal (a whisper). The MCP no longer keeps whisper-state.json.
+const periodOf = (v) => (Number.isSafeInteger(v) && v > 0 ? v : HOUR_MS);
+async function handleReserveWindow(req, res) {
+  try {
+    const raw = await readBody(req);
+    const { window, by } = raw ? JSON.parse(raw) : {};
+    if (!window || typeof window !== 'string') return sendJSON(res, 400, { error: 'window is required' });
+    const out = await withWriteLock(async () => {
+      if (windowReserved(tendingEntities(), window)) return { already: true };
+      writeTendingEntities([reservationEntity(window, new Date().toISOString())], { actor: by || 'board', op: 'create' });
+      return { reserved: true };
+    });
+    return out.already ? sendJSON(res, 409, { already: true, window }) : sendJSON(res, 201, { reserved: true, window });
+  } catch (e) {
+    console.error('POST /api/tending/windows:', e.message);
+    sendJSON(res, 500, { error: 'Failed to reserve the window' });
+  }
+}
+async function handleClaimWhisper(req, res) {
+  try {
+    const raw = await readBody(req);
+    const body = raw ? JSON.parse(raw) : {};
+    const { window, seat } = body;
+    if (!window || !seat) return sendJSON(res, 400, { error: 'window and seat are required' });
+    const receivedAt = typeof body.receivedAt === 'string' ? body.receivedAt : new Date().toISOString();
+    let r;
+    try {
+      r = await withWriteLock(async () => {
+        const ents = tendingEntities();
+        const now = new Date().toISOString();
+        const d = claimWhisper({ state: claimStateFor(ents, window), prompt: { window }, seat, now, periodMs: periodOf(body.periodMs) });
+        if (d.granted) writeTendingEntities([grantEntity({ ents, window, seat, receivedAt, completedAt: now, reached: body.reached })], { actor: seat, op: 'create' });
+        return d;
+      });
+    } catch (e) {
+      if (/claimWhisper:/.test(e.message)) return sendJSON(res, 400, { granted: false, reason: 'invalid', error: e.message });
+      throw e;
+    }
+    const { state: _state, ...answer } = r;   // the settlement state is the graph's, not the caller's
+    sendJSON(res, 200, answer);
+  } catch (e) {
+    console.error('POST /api/tending/claims:', e.message);
+    sendJSON(res, 500, { error: 'Failed to settle the claim' });
+  }
+}
+function handleGetClaims(req, res) {
+  const limit = Math.min(200, Math.max(1, Number(new URL(req.url, 'http://x').searchParams.get('limit')) || 24));
+  sendJSON(res, 200, { history: claimHistory(tendingEntities(), limit) });
 }
 
 function handleGetWhispers(req, res) {
@@ -13415,6 +13500,9 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/tending\/order$/,        fn: (req, res) => applyTendingOp(req, res, (e, b, at) => reorderPlaylist(e, { slugs: b.slugs, at })) },
   { method: 'POST',   re: /^\/api\/tending\/shuffle$/,      fn: (req, res) => applyTendingOp(req, res, (e, b, at) => setShuffle(e, { shuffle: b.shuffle === true, at })) },
   { method: 'POST',   re: /^\/api\/tending\/mints$/,        fn: (req, res) => handleCreateMint(req, res) },
+  { method: 'POST',   re: /^\/api\/tending\/windows$/,      fn: (req, res) => handleReserveWindow(req, res) },   // #1786
+  { method: 'POST',   re: /^\/api\/tending\/claims$/,       fn: (req, res) => handleClaimWhisper(req, res) },    // #1786
+  { method: 'GET',    re: /^\/api\/tending\/claims$/,       fn: (req, res) => handleGetClaims(req, res) },       // #1786
   { method: 'POST',   re: /^\/api\/tending-config$/,       fn: (req, res) => handleSetTendingConfig(req, res) },
   { method: 'POST',   re: /^\/api\/roster$/,               fn: (req, res) => handleSetRoster(req, res) },   // #506
   { method: 'GET',    re: /^\/api\/people$/,               fn: (req, res) => handleListPeople(req, res) },       // #619
@@ -14321,7 +14409,66 @@ function migrateTendingIfNeeded() {
 }
 
 migrateBoardIfNeeded();
-migrateTendingIfNeeded();
+// #1786 — UNDER THE WRITE LOCK, awaited before listen(): with the collections unit on, a collection write outside the lock
+// throws (#1624), and an unmigrated graph with whisper-state.json or whisper-pool.json present refused to boot. The function's
+// own failure path (refuse to serve) is unchanged.
+await withWriteLock(async () => migrateTendingIfNeeded());
+// #1786 (#139 review) — the legacy file guard's LAST CONSUMED send window carries into the graph, once, as a reservation (no
+// TendingMint is invented: a burned window was never delivered). Before this guard, mintOnce consumed lastMintedWindow in
+// whisper-state.json BEFORE posting, so a window can be spent with no mint at all; without this the first boot of the new
+// MCP could send it again. Idempotent: the reservation's IRI is the window's. A malformed or absent file carries nothing.
+try {
+  await withWriteLock(async () => {
+    let st = null;
+    try { st = JSON.parse(fs.readFileSync(whisperStateFilePath(), 'utf8')); } catch { return; }
+    const w = typeof st?.lastMintedWindow === 'string' ? st.lastMintedWindow : null;
+    if (!w || windowReserved(tendingEntities(), w)) return;
+    writeTendingEntities([reservationEntity(w, typeof st.lastMintedAt === 'string' ? st.lastMintedAt : new Date().toISOString())], { actor: 'board', op: 'create' });
+    console.error(`${new Date().toISOString()} #1786 the legacy whisper-state.json's last consumed window ${w} is reserved in the graph`);
+  });
+} catch (e) {
+  console.error(`#1786 carrying the legacy send window FAILED — refusing to serve (the window could be sent twice): ${e.message}`);
+  process.exit(1);
+}
+// #1785 — ONE-TIME import of the file's switch and threshold onto TendingState, stamped (scrum:configImportedAt) so it never
+// runs twice and a later file edit can never override the graph. A malformed file imports OFF (readTendingConfig fails closed).
+// UNDER THE WRITE LOCK and awaited before listen(): with the collections unit on, a collection write outside the lock THROWS
+// (#1624), and an import that swallowed it would silently drop the file's values. So a failed import refuses to serve.
+try {
+  await withWriteLock(async () => {
+    // a fresh clone has no file and no state: it imports nothing and writes nothing (tending-boot-migration's fresh-clone row)
+    if (tendingConfigImported(tendingEntities()) || !fs.existsSync(tendingConfigFilePath())) return;
+    const fromFile = readTendingConfig();
+    const at = new Date().toISOString();
+    writeTendingEntities(setTendingConfig(tendingEntities(), { ...fromFile, at, importedFrom: 'tending-config.json' }), { actor: 'board', op: 'update' });
+    console.error(`${at} #1785 tending config imported onto TendingState from tending-config.json: enabled=${fromFile.enabled} quietAfterMinutes=${fromFile.quietAfterMinutes}`);
+  });
+} catch (e) {
+  console.error(`#1785 tending config import FAILED — refusing to serve (the file's values would be silently lost): ${e.message}`);
+  process.exit(1);
+}
+
+// #1784 — ONE-TIME import of channel-config.json onto the `channelConfig` node, stamped (scrum:configImportedFrom/At). Only when
+// NO node exists: a node saved from Settings is never overwritten by a file, and after the import the file is never read or
+// written again. Under the write lock and awaited before listen() (a collection write outside the lock cannot commit, #1624);
+// a failed import refuses to serve rather than run the scheduler on a mode nobody chose.
+if (channelConfigHeld()) {
+  try {
+    await withWriteLock(async () => {
+      const data = readBoard();
+      if (channelConfigInGraph(data.channelConfig) || !fs.existsSync(configFilePath())) return;
+      const fromFile = validateConfig(JSON.parse(fs.readFileSync(configFilePath(), 'utf8')));
+      const at = new Date().toISOString();
+      const entity = channelConfigEntity(fromFile, { imported: { from: path.basename(configFilePath()), at } });
+      data.channelConfig = [entity];
+      writeBoard(data, [{ op: 'create', actor: 'board', entity: { kind: 'board-meta', id: CHANNEL_CONFIG_IRI }, state: entity }]);
+      console.error(`${at} #1784 channel config imported onto ${CHANNEL_CONFIG_IRI} from ${path.basename(configFilePath())}: mode=${fromFile.mode}`);
+    });
+  } catch (e) {
+    console.error(`#1784 channel config import FAILED — refusing to serve (the scheduler would run on a mode nobody chose): ${e.message}`);
+    process.exit(1);
+  }
+}
 
 // ── Start Server ──
 const server = http.createServer(handleRequest);

@@ -192,6 +192,12 @@ export const KIND_DECLARATIONS = Object.freeze([
       + 'holder is the OPEN interval, never the newest node by date.',
   },
   {
+    name: 'scrum:ChannelConfig', eventKind: null, collection: null,
+    createdBy: 'POST /api/config (Settings → channel delivery, #263/#1784), and once at boot from channel-config.json',
+    definition: 'The channel delivery settings as one node: the mode (soft, hard, off, token-ring), its timings, the seats that join '
+      + 'the token ring by bearer, and the residents\' pair cap. REST serves it at GET /api/config; the MCP scheduler reads it there.',
+  },
+  {
     name: 'scrum:LabelAlias', eventKind: null, collection: null,
     createdBy: 'POST /api/labels/aliases (a seat declaring that one label spelling means another, #857/#1640)',
     definition: 'One label spelling declared to mean another: card creation stores an aliased label on its canonical, and '
@@ -458,6 +464,12 @@ export const KIND_DECLARATIONS = Object.freeze([
     createdBy: 'the tending scheduler',
     definition: 'Current scheduler state for tending: what has fired, when the room was last '
       + 'active, and what the quiet window is.',
+  },
+  {
+    name: 'scrum:TendingWindowReservation', eventKind: null, collection: null,
+    createdBy: 'POST /api/tending/windows, by the tending scheduler before it sends (#1786)',
+    definition: 'One window reserved for a send: the board sends at most one tending prompt per window, and this node is '
+      + 'how every process knows the window is taken. Not a firing: a reservation whose send failed leaves no TendingMint.',
   },
   {
     name: 'scrum:TendingMint', eventKind: null, collection: null,

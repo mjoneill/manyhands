@@ -49,9 +49,11 @@ async function boot({ mode = 'off', bearerSeats = ['alpha'] } = {}) {
   const cfg = tmpFile('channel-config.json', { mode, soft: { minMs: 60000, maxMs: 120000 }, hard: { timeoutMs: 300000 }, tokenRing: { timeoutMs: 90000, bearerSeats } });
   const restPort = await freePort();
   const mcpPort = await freePort();
-  const rest = await startRestServer({ port: restPort, board: makeBoardFixture({ cards: [], conversations: [] }), mcpNotifyUrl: `http://127.0.0.1:${mcpPort}/internal/notify` });
+  // #1784 — MCP reads the channel config from REST (refreshed every MCP_CHANNEL_CONFIG_REFRESH_MS), never a file of its own; the
+  // config file is REST's (unit off, REST reads it live), so a rewrite reaches MCP within one refresh.
+  const rest = await startRestServer({ port: restPort, channelConfigFile: cfg, board: makeBoardFixture({ cards: [], conversations: [] }), mcpNotifyUrl: `http://127.0.0.1:${mcpPort}/internal/notify` });
   const mcp = await startMcpServer({ port: mcpPort, restApiBase: rest.baseUrl, env: {
-    SCRUM_SEAT_TOKENS: tokens, SCRUM_CHANNEL_STAGGER: '', SCRUM_CHANNEL_CONFIG_FILE: cfg, MCP_DEAF_GRACE_MS: String(GRACE_MS),
+    SCRUM_SEAT_TOKENS: tokens, SCRUM_CHANNEL_STAGGER: '', MCP_CHANNEL_CONFIG_REFRESH_MS: '100', MCP_DEAF_GRACE_MS: String(GRACE_MS),
   } });
   return { rest, mcp, async stop() { await mcp.stop(); await rest.stop(); } };
 }
