@@ -80,6 +80,13 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:attachmentOf': 'attachments',   // #1787 → a card's (or post's) attachment node names its owner; one node per attachments[] entry
   'scrum:attachmentIndex': 'attachments[] (position)',   // #1787 → the entry's index in attachments[] (xsd:integer)
   'schema:contentSize': 'attachments[].size',   // #1787 → the attachment's size in bytes (xsd:integer)
+  'scrum:ChannelConfig': null,              // #1784 — the type; the channel delivery config, one node
+  'scrum:channelMode': 'scrum:channelMode',   // #1784 → soft | hard | off | token-ring (a literal)
+  'scrum:softMinMs': 'scrum:softMinMs', 'scrum:softMaxMs': 'scrum:softMaxMs',   // #1784 → the soft window (xsd:integer ms)
+  'scrum:hardTimeoutMs': 'scrum:hardTimeoutMs', 'scrum:tokenRingTimeoutMs': 'scrum:tokenRingTimeoutMs',   // #1784 (xsd:integer ms)
+  'scrum:bearerSeat': 'scrum:bearerSeat',   // #1784 → a seat key that joins the token ring by bearer (a literal, repeated)
+  'scrum:residentReplyWakesPerPairPerHour': 'scrum:residentReplyWakesPerPairPerHour',   // #1784 (#1411's pair cap, xsd:integer)
+  'scrum:configImportedFrom': 'scrum:configImportedFrom', 'scrum:configImportedAt': 'scrum:configImportedAt',   // #1784 — the one-time file import
   'scrum:fencedAt': 'scrum:fencedAt',       // #1707 → when it was fenced (absent on an imported legacy fence)
   'scrum:with': 'scrum:with',               // → the seat a talk is with
   'scrum:conversation': 'scrum:conversation', // → the talk a post is tagged into (#1401)
