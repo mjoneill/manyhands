@@ -12,10 +12,17 @@
  *   LP2  the ack token's `log` is the highest N served (<= F.logSeq); acking it moves the lane there; the next pull reports logDrained TRUE and serves nothing from the log half
  *   LP3  A1: a legacy CONVERSATION owed to a lane is served by its seq, from the conversations unit (its text present); a REDACTED one is still served (never dropped, or the
  *        lane could ack past it) with its text absent
- *   LP4a a gap INSIDE the range (no node at N = 3, 4) is skipped by existing-node paging: a page is the next `limit` EXISTING nodes after `acked` (A-LP2, settled by the
- *        contract author), nothing is re-served or lost across a whole walk, and the token's `log` is the highest N served
- *   LP4b A2: a COVERED TAIL, no node left in (acked, F.logSeq] while acked < F.logSeq, is an EMPTY page whose ack_token has `log` = F.logSeq; the lane moves only when that token is
- *        acked (not on the serve, not on a repeat), and then the log half is drained
+ *   LP4a a genuine hole INSIDE the range (the log has no line at 3 or 4; nothing was deleted) is skipped by existing-node paging: a page is the next `limit` EXISTING nodes after
+ *        `acked` (A-LP2, settled by the contract author), nothing is re-served or lost across a whole walk, and the token's `log` is the highest N served. It PASSES on main, whose log
+ *        path already pages by existing events: it is there to bind the F path to the same rule
+ *   LP4b HELD: a COVERED TAIL (no node left in (acked, F.logSeq] while acked < F.logSeq) is an empty page whose token has log = F.logSeq, the lane moving only when it is acked. SKIPPED until the
+ *        proof that makes an empty tail safe is ruled (a count is not enough; the reviewer asked for a verifiable range proof): this oracle's fixture deletes a node, which is absence, not proof
+ *   LG1  GRAPH half, whole-commit pages: a multi-part native commit larger than `limit` is served WHOLE in one page (every part of it, nothing of any other commit), and the token's graph half is
+ *        that commit's commitSeq (a page never ends inside a commit)
+ *   LG2  repeat-before-ACK: the same pull again returns the same parts and the same token, and the lane's graph half has not moved
+ *   LG3  ACK and RESTART: a restart before the ack serves the same page; an ack across a restart is accepted and moves the lane to that commit; after a further restart none of the
+ *        commit's parts is served again
+ *   LG4  no sibling part is lost: two multi-part commits walked with `limit` 1 and an ack per page give each commit's every part exactly once, in commit order, and then nothing
  *   LP5  a lane registered AFTER F starts with its log half at F.logSeq (not the log's head)
  *   LP6  an INVALID F refuses the pull (503 HISTORY_FRONTIER_INVALID / HISTORY_FRONTIER_STORE_MISMATCH) and the lane is exactly as it was
  *   LP7  a token whose log half is beyond F.logSeq cannot have been served: 409 ACK_BEYOND_SERVED, the lane unchanged (a CONTROL: green on main by design)
@@ -59,7 +66,7 @@ const SOURCES = { SCRUM_GRAPH_QUERY_SOURCE: 'executor', SCRUM_GRAPH_READY_SOURCE
 // ── the hand-built log ──
 const cardEv = (seq, op, id, shortId, state, at, extra = {}) => ({ seq, op, actor: 'ada', recorded_at: at, ...extra, entity: { kind: 'card', id, shortId }, state: { id, shortId, ...state } });
 const T0 = (n) => `2026-10-20T10:${String(n).padStart(2, '0')}:00.000Z`;
-const EVENTS = [
+const EVENTS_RAW = [
   cardEv(1, 'create', 'uuid-a', 101, { column: 'backlog', claimedBy: null, title: 'Title one' }, T0(1)),
   cardEv(2, 'update', 'uuid-a', 101, { column: 'in-progress', claimedBy: 'ada', title: 'Title one' }, T0(2)),
   cardEv(3, 'create', 'uuid-b', 102, { column: 'planned', claimedBy: null, title: 'Title two' }, T0(3)),
@@ -78,10 +85,14 @@ const EVENTS = [
     seq: 14 + i, op: 'post', actor: who, recorded_at: T0(14 + i), entity: { kind: 'conversation', id }, state: { id, author: who, body, createdAt: T0(14 + i) },
   })),
 ];
+// a GENUINE hole in the log: no event, and so no node, at seq 3 or 4 (the log was never written there). Everything from the third event on shifts up by two.
+const SKIP = (n) => (n <= 2 ? n : n + 2);
+const EVENTS = EVENTS_RAW.map((e) => ({ ...e, seq: SKIP(e.seq) }));
 const NONCARD_SEQS = [9, 10, 11, 12, 13];
-const K = EVENTS.length;
+const K = EVENTS.at(-1).seq;
 /** what the backfill's facts say per card seq-node (the holder is BEFORE the write) */
-const FACTS = { 1: ['backlog', NONE], 2: ['in-progress', NONE], 3: ['planned', NONE], 4: ['done', `${PERSON}ada`], 5: ['planned', NONE], 7: ['backlog', UNKNOWN], 8: ['review', NONE] };
+const FACTS_RAW = { 1: ['backlog', NONE], 2: ['in-progress', NONE], 3: ['planned', NONE], 4: ['done', `${PERSON}ada`], 5: ['planned', NONE], 7: ['backlog', UNKNOWN], 8: ['review', NONE] };
+const FACTS = Object.fromEntries(Object.entries(FACTS_RAW).map(([k, v]) => [SKIP(Number(k)), v]));
 const SINCE_ALL = encodeURIComponent('2026-10-20T10:01:00.000Z');
 const ROW_KEYS = ['at', 'by', 'column', 'graph', 'holder', 'id', 'kind', 'op', 'seq', 'shortId', 'title'];
 const instant = (s) => Date.parse(s);
@@ -191,7 +202,8 @@ const sorted = (a) => [...a].sort();
 
 
 // ══ lanes ══
-const LEGACY_POSTS = { visible: { id: 'LP-P1', seq: 14, body: 'LEGACY VISIBLE POST TEXT' }, redacted: { id: 'LP-P2', seq: 15, body: 'LEGACY REDACTED POST SECRET' }, missing: { id: 'LP-P3', seq: 16, body: 'LEGACY MISSING POST TEXT' } };
+const seqOfFixture = (id) => EVENTS.find((e) => e.entity?.id === id).seq;
+const LEGACY_POSTS = { visible: { id: 'LP-P1', seq: seqOfFixture('LP-P1'), body: 'LEGACY VISIBLE POST TEXT' }, redacted: { id: 'LP-P2', seq: seqOfFixture('LP-P2'), body: 'LEGACY REDACTED POST SECRET' }, missing: { id: 'LP-P3', seq: seqOfFixture('LP-P3'), body: 'LEGACY MISSING POST TEXT' } };
 /** the unit's post nodes for the legacy conversations (imported, as the backfill of posts does), and one redacted afterwards */
 async function importLegacyPosts() {
   const client = createGraphClient({ baseUrl: W.exec.baseUrl, expectedDatasetId: WB_DATASET });
@@ -233,6 +245,8 @@ const pull = (name, limit = 200) => W.get(`/api/cursors/pull?identity=${encodeUR
 const ack = (name, token) => W.send('POST', '/api/cursors/ack', { identity: `registry:${name}`, token });
 const tokenOf = (r) => JSON.parse(Buffer.from(r.json.ack_token, 'base64url').toString('utf8'));
 const seqsOf = (r) => r.json.events.map((e) => e.seq).filter((n) => Number.isInteger(n));
+/** the seqs that have a node at or below `n`: every log line that names an entity (a hole in the log has none) */
+const nodeSeqs = (n) => readLog().filter((e) => e.seq <= n && e.entity?.id).map((e) => e.seq);
 const range = (a, b) => Array.from({ length: Math.max(0, b - a + 1) }, (_, i) => a + i);
 /** F planted at the settled log head, with that logSeq */
 async function plantAtHead() { const n = await settle(); const h = await W.plantFrontier({ logSeq: `"${n}"^^<${XSD}integer>` }); return { n, h: h.h }; }
@@ -242,7 +256,9 @@ test('#1762 S4 LP0 CONTROL — with NO frontier a lane acked at 2 is served log 
   await seedLane('lp0', 2);
   const r = await pull('lp0', 50);
   assert.equal(r.status, 200, `(${r.status}: ${r.text.slice(0, 200)})`);
-  assert.deepEqual(seqsOf(r).slice(0, K - 2), range(3, K), 'the first events are the hand-built log\'s 3..K, in order');
+  const owed = readLog().map((e) => e.seq).filter((x) => x > 2);
+  assert.deepEqual(seqsOf(r), owed.slice(0, seqsOf(r).length), 'the events are the log\'s lines after 2, in order (the hole at 3 and 4 has none)');
+  assert.ok(seqsOf(r).length >= 10, `and there are many (${seqsOf(r).length})`);
   assert.equal(r.json.envelope.history, undefined, 'no F, no history block');
 });
 
@@ -252,7 +268,7 @@ test('#1762 S4 LP1 — F valid: a lane acked at 2 is served exactly the seq-node
   const r = await pull('lp1', 500);
   assert.equal(r.status, 200, `(${r.status}: ${r.text.slice(0, 200)})`);
   const logHalf = seqsOf(r).filter((s) => s <= n);
-  assert.deepEqual(logHalf, range(3, n), `the log half is every N in (2, ${n}], ascending and once each (this lane is owed ${n - 2})`);
+  assert.deepEqual(logHalf, nodeSeqs(n).filter((x) => x > 2), `the log half is every node in (2, ${n}], ascending and once each`);
   assert.equal(laneState('lp1').acked, 2, 'and a pull moved nothing: acked is still 2');
   assert.deepEqual({ ...r.json.envelope.history }, { frontierLogSeq: n, frontierCommitSeq: Number(h.commitSeq), logDrained: false }, 'envelope.history names F and says the log half is not drained');
 });
@@ -285,10 +301,9 @@ test('#1762 S4 LP3 — a legacy CONVERSATION owed to a lane is served by its seq
   assert.ok(redacted.seq <= n, 'PRECONDITION: it is legacy (at or below F.logSeq)');
 });
 
-test('#1762 S4 LP4a — a gap INSIDE the range (no node at 3 or 4) is skipped by existing-node paging: the page is the next `limit` existing nodes, nothing is re-served or lost across the walk, and the token\'s log half is the highest N served', T, async () => {
+test('#1762 S4 LP4a — a genuine hole INSIDE the range (the log has no line at 3 or 4) is skipped by existing-node paging: the page is the next `limit` existing nodes, nothing is re-served or lost across the walk, and the token\'s log half is the highest N served', T, async () => {
   const { n } = await plantAtHead();
-  await W.update(`DELETE WHERE { <${node(3)}> ?p ?o } ; DELETE WHERE { <${node(4)}> ?p ?o }`);          // a gap in N: no node at 3 or 4
-  await seedLane('lp4a', 2);
+  await seedLane('lp4a', 2);                                                                       // the log has a genuine hole at 3 and 4: nothing was deleted
   const first = await pull('lp4a', 2);
   assert.equal(first.status, 200, `(${first.status}: ${first.text.slice(0, 200)})`);
   assert.deepEqual(seqsOf(first), [5, 6], 'the page is the next TWO existing nodes: the gap is skipped (A-LP2)');
@@ -303,10 +318,10 @@ test('#1762 S4 LP4a — a gap INSIDE the range (no node at 3 or 4) is skipped by
     r = await pull('lp4a', 2);
     if (!seqsOf(r).some((s) => s <= n)) break;
   }
-  assert.deepEqual(seen, range(5, n), `every existing node in (2, ${n}] exactly once: none lost across the gap, none served twice`);
+  assert.deepEqual(seen, nodeSeqs(n).filter((x) => x > 2), `every existing node in (2, ${n}] exactly once: none lost across the gap, none served twice`);
 });
 
-test('#1762 S4 LP4b — a COVERED TAIL (no node left in (acked, F.logSeq] while acked < F.logSeq) is an EMPTY page whose ack_token has log = F.logSeq; the lane moves only when it is acked, and then the log half is drained (A2)', T, async () => {
+test('#1762 S4 LP4b — HELD (the empty-tail proof is being ruled: F may carry a node count) — a COVERED TAIL (no node left in (acked, F.logSeq] while acked < F.logSeq) is an EMPTY page whose ack_token has log = F.logSeq; the lane moves only when it is acked, and then the log half is drained (A2)', { ...T, skip: 'HELD: S4 v1.3 (F carries a coverage proof) is awaiting the reviewer\'s ruling; this oracle deletes data, which is absence and not proof' }, async () => {
   const { n } = await plantAtHead();
   await W.update(`DELETE WHERE { <${node(n)}> ?p ?o }`);                                              // the last node is gone: nothing remains above n-1
   await seedLane('lp4b', n - 1);
@@ -380,4 +395,101 @@ test('#1762 S4 LP8 — a conversation node whose post node is ABSENT refuses the
   assert.equal(r.json?.events, undefined, 'nothing is served');
   assert.equal(JSON.stringify(laneState('lp8')), before, 'and the lane is exactly as it was');
   assert.ok(missing.seq <= n, 'PRECONDITION: the node is legacy');
+});
+
+// ══ the graph half: whole-commit pages (the reviewer asked for these before the lane build) ══
+/** a native write of ONE commit with several parts (a card create that names two cards re-writes them too), after F. Returns its opId, part count and commitSeq. */
+async function nativeCommit(title) {
+  const r = await W.send('POST', '/api/cards', { title, description: 'names two cards', createdBy: 'ada', relationships: { relatedTo: [1, 3] } });
+  assert.equal(r.status, 201, `PRECONDITION: the multi-card create applied (${r.status} ${r.text.slice(0, 200)})`);
+  const ops = await W.q(`SELECT ?op WHERE { ?a <${PROV}used> <${ENT}${r.json.id}> ; <${RS}recordedBy> ?op }`);
+  assert.equal(ops.length, 1, 'PRECONDITION: the new card has one recorded op');
+  const opId = ops[0].op.value;
+  const parts = Number((await W.q(`SELECT (COUNT(?b) AS ?n) WHERE { ?b <${RS}recordedBy> <${opId}> }`))[0].n.value);
+  assert.ok(parts >= 2, `PRECONDITION: the write is ONE commit of several parts (got ${parts})`);
+  return { card: r.json, opId, parts, commitSeq: Number((await W.health()).commitSeq) };
+}
+/** a lane whose log half is drained (acked at F.logSeq) and whose graph half is at the head when F is planted: it is owed only the commits written after */
+async function graphLane(name) {
+  const { n } = await plantAtHead();
+  await seedLane(name, n);
+  return n;
+}
+const graphEvents = (r) => r.json.events.filter((e) => e.graph?.opId);
+const byOp = (events) => { const m = {}; for (const e of events) (m[e.graph.opId] ||= []).push(e); return m; };
+/** the same lane read through ANOTHER REST over the same data: a restart as far as the lane's state is concerned */
+async function viaRestart(fn) {
+  const srv = await W.startRest();
+  try {
+    return await fn({
+      pull: (name, limit = 200) => srv.get(`/api/cursors/pull?identity=${encodeURIComponent(`registry:${name}`)}&limit=${limit}`),
+      ack: async (name, token) => {
+        const r = await fetch(`${srv.rest.baseUrl}/api/cursors/ack`, { method: 'POST', headers: { authorization: `Bearer ${W.TOK}`, 'content-type': 'application/json' }, body: JSON.stringify({ identity: `registry:${name}`, token }), signal: AbortSignal.timeout(60000) });
+        const text = await r.text(); let json = null; try { json = JSON.parse(text); } catch { /* not json */ }
+        return { status: r.status, text, json };
+      },
+    });
+  } finally { await srv.stop(); }
+}
+
+test('#1762 S4 LG1 — a multi-part native commit larger than `limit` is served WHOLE in one page: every part of it, nothing of another commit, and the token\'s graph half is that commit\'s commitSeq', T, async () => {
+  await graphLane('lg1');
+  const c = await nativeCommit('whole commit one');
+  const r = await pull('lg1', 1);
+  assert.equal(r.status, 200, `(${r.status}: ${r.text.slice(0, 200)})`);
+  const groups = byOp(graphEvents(r));
+  assert.deepEqual(Object.keys(groups), [c.opId], `the page holds exactly that commit (got ${JSON.stringify(Object.keys(groups))})`);
+  assert.equal(groups[c.opId].length, c.parts, `with ALL ${c.parts} of its parts although limit is 1 (an oversized commit is served whole)`);
+  assert.ok(groups[c.opId].every((e) => e.graph.commitSeq === c.commitSeq), 'all at its commitSeq');
+  assert.equal(tokenOf(r).graph.commitSeq, c.commitSeq, 'and the token\'s graph half is that commit: a page never ends inside one');
+});
+
+test('#1762 S4 LG2 — repeat-before-ACK: the same pull again returns the same parts and the same token, and the lane\'s graph half has not moved', T, async () => {
+  await graphLane('lg2');
+  const c = await nativeCommit('whole commit two');
+  const before = laneState('lg2').graph_acked;
+  const first = await pull('lg2', 1);
+  const again = await pull('lg2', 1);
+  const key = (r) => graphEvents(r).map((e) => `${e.graph.opId}/${e.graph.commitSeq}/${e.entity?.id}`).sort();
+  assert.equal(graphEvents(first).length, c.parts, `PRECONDITION: the first page holds the whole commit (${graphEvents(first).length} of ${c.parts})`);
+  assert.deepEqual(key(again), key(first), 'the same parts again');
+  assert.equal(tokenOf(again).graph.commitSeq, tokenOf(first).graph.commitSeq, 'under the same token');
+  assert.equal(laneState('lg2').graph_acked, before, 'and neither pull moved the lane\'s graph half');
+});
+
+test('#1762 S4 LG3 — ACK and RESTART: a restart before the ack serves the same page; an ack across a restart is accepted and moves the lane to that commit; after another restart none of its parts is served again', T, async () => {
+  await graphLane('lg3');
+  const c = await nativeCommit('whole commit three');
+  const first = await pull('lg3', 1);
+  assert.equal(graphEvents(first).length, c.parts, `PRECONDITION: the page holds the whole commit (${graphEvents(first).length} of ${c.parts})`);
+  const token = first.json.ack_token;
+  const before = laneState('lg3').graph_acked;
+  await viaRestart(async (s) => {
+    const again = await s.pull('lg3', 1);
+    assert.equal(graphEvents(again).length, c.parts, 'a restart before the ack: the same whole commit is served again');
+    assert.equal(laneState('lg3').graph_acked, before, 'and the lane has not moved');
+    const a = await s.ack('lg3', token);
+    assert.equal(a.status, 200, `the ack minted before the restart is accepted across it (${a.status}: ${a.text.slice(0, 200)})`);
+  });
+  assert.equal(laneState('lg3').graph_acked, c.commitSeq, 'the lane moved to that commit, and only now');
+  await viaRestart(async (s) => {
+    const next = await s.pull('lg3', 1);
+    assert.equal(graphEvents(next).filter((e) => e.graph.opId === c.opId).length, 0, 'after another restart none of the acked commit\'s parts is served again');
+  });
+});
+
+test('#1762 S4 LG4 — no sibling part is lost: two multi-part commits walked with limit 1 and an ack per page give each commit\'s every part exactly once, in commit order, and then nothing', T, async () => {
+  await graphLane('lg4');
+  const c1 = await nativeCommit('sibling commit one'), c2 = await nativeCommit('sibling commit two');
+  assert.ok(c2.commitSeq > c1.commitSeq, 'PRECONDITION: two commits, in order');
+  const p1 = await pull('lg4', 1);
+  assert.deepEqual(Object.keys(byOp(graphEvents(p1))), [c1.opId], 'page 1 is the first commit and nothing of the second');
+  assert.equal(graphEvents(p1).length, c1.parts, `with all ${c1.parts} of its parts`);
+  assert.equal((await ack('lg4', p1.json.ack_token)).status, 200);
+  const p2 = await pull('lg4', 1);
+  assert.deepEqual(Object.keys(byOp(graphEvents(p2))), [c2.opId], 'page 2 is the second commit and nothing of the first (no part of an acked commit comes back)');
+  assert.equal(graphEvents(p2).length, c2.parts, `with all ${c2.parts} of its parts: no sibling was lost to the first ack`);
+  assert.equal((await ack('lg4', p2.json.ack_token)).status, 200);
+  assert.equal(laneState('lg4').graph_acked, c2.commitSeq, 'the lane is at the second commit');
+  assert.deepEqual(graphEvents(await pull('lg4', 1)).filter((e) => [c1.opId, c2.opId].includes(e.graph.opId)), [], 'and nothing of either is served again');
 });
