@@ -1,8 +1,8 @@
 // #1762 S2 — the builder's rows for the refusal record (contract on #1762, "S2 CONTRACT v2.2"). Pure: no server, no
 // executor. G1/G5: the code registry and the route-template table are CLOSED and kept equal to the source. G2: a direct
 // compile that skips the builder cannot store an unregistered value. G3: templates and actions. G4: scoped identity.
-// G6: the audit meter and its in-flight bound. requestId, entityId and the adapter label are bounded retained-data
-// exceptions (v2.2), not proof that no client string survives.
+// G6: the audit meter and its in-flight bound. requestId and entityId are the bounded retained-data exceptions (v2.2);
+// an adapter label survives only when registered.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';

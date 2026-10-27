@@ -2,9 +2,9 @@
  * #1762 S2 — a refusal as a graph record with NO composed content (contract on #1762, "S2 CONTRACT v2.2"; ruling on
  * #1217: refused non-post text may become unrecoverable). With native history on, a refusal writes ONE
  * `scrum:RefusalRecord` and nothing to the event log. It holds no error message, body, mention or attachment. It holds
- * outcomes (status, a REGISTERED code or rule), the trusted route TEMPLATE and the action it names, the seat, and three
- * bounded client-chosen identifiers, which are retained-data EXCEPTIONS, stated as such: requestId, entityId (each only in
- * its id shape) and the adapter label (only through a closed list). Anything unregistered is `scrum:unlisted`.
+ * outcomes (status, a REGISTERED code or rule), the trusted route TEMPLATE and the action it names (an adapter label only
+ * when registered), the seat, and two bounded client-chosen identifiers, which are retained-data EXCEPTIONS, stated as
+ * such: requestId and entityId, each only in its id shape. Anything unregistered is `scrum:unlisted`.
  *
  * Pure: raw refusal facts → the `refusal.record` intention. The compiler checks every field against these same registries,
  * so a caller that skips this module cannot store an unregistered value either.
