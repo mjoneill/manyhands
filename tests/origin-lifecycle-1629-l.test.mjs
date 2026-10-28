@@ -1,0 +1,773 @@
+/**
+ * #1629 / sprint #1733 — ROW L: the bounded announcement lifecycle with the board document UNREADABLE. TEST AUTHOR's, written
+ * before the slice-3 build, against the design frozen on #1733 (v3 + discriminator addendum, non-builder freeze v15/v16).
+ *
+ * THE WORLD: the whole-board fixture (tests/helpers/whole-board-1645.mjs) migrated into a real executor; REST started under all six
+ * authoritative units and production's four executor sources. Every REST incarnation runs with #1563's fs recorder
+ * (SCRUM_FS_RECORD_ALL=1, a module hook the server cannot see or skip) and with SCRUM_TEST_BARRIER_DIR set, so a FIFO named for an
+ * existing TEST-ONLY barrier can hold the process at a known point (server.js testBarrier). The publisher is the real
+ * scripts/announce-publisher.mjs --once, run as its own process. Nothing here substitutes a harness for the reservation, the
+ * publisher or the recovery code.
+ *
+ * THE CUT POINTS (all existing barriers, named in source at 4c0a1f1; the builder keeps their names and positions in slice 3, 45004):
+ *   after-document                   last line of writeDocument; runs only after the staged CARDS.commit (origin + entries) answered
+ *                                    APPLIED, and before the claim returns and calls the inline publish. Fires on EVERY writeDocument, so
+ *                                    the FIFO is armed only immediately before the claim, and the discriminator below must pass.
+ *   after-executor-apply             the explicit publish route (the one --once drives): the executor answered, nothing recorded yet
+ *   after-dispatch-before-complete   the inline publish: APPLIED and dispatched, completion not yet recorded
+ *
+ * THE DISCRIMINATOR AT after-document: the claim's HTTP request has NOT returned, AND the executor (queried directly, REST is frozen)
+ * holds a pending announcement whose entry is this claim's (slot `claim`, card #1), with its mutationId, opId, reserved postId and
+ * postSeq. If either fails the row fails with "blocked a different write"; it never retries and is never skipped.
+ *
+ *   L0  CONTROL, mode ON, file present (runnable today): L3's whole sequence. Proves the cut point, the discriminator, the restart
+ *       without inline drain, the real --once, and that the recorder DOES see board-file opens in this mode (so it can see what L1–L5
+ *       assert is absent).
+ *   L1  RESERVATION: mode off, file chmod 000: two new posts take postSeq 3 then 4 (the fixture's graph holds 1 and 2; #1710).
+ *   L2  PUBLICATION: a claim's announcement post appears exactly once, and GET /api/outbox?mutationId= reads it published.
+ *   L3  RESTART RECOVERY: killed at after-document, a fresh REST lists the same entry pending and does NOT publish it (the post is
+ *       absent after a stated wait); one --once publishes the post itself, with the snapshotted postId and postSeq.
+ *   L4a APPLIED, completion unrecorded, explicit route: killed at after-executor-apply during --once, restart, --once again: same
+ *       mutation/slot/postId/postSeq, exactly one post, no extra postSeq consumed.
+ *   L4b the same gap on the inline path (after-dispatch-before-complete; #1574 H5's pattern).
+ *   BRa/BR0/BRb/BRc  a REDACTED announcement settles BLOCKED through the real --once, on each of the publisher's two block calls
+ *       (R1b gate, 45195–45197); see the BR block below for which state reaches which call, measured.
+ *   L5  READ PURITY: three GET /api/outbox reads while an entry is pending change nothing; the next post takes the expected number.
+ *   Every L1–L5 row: zero board-file attempts in EVERY REST incarnation on the recorder (whose log must be non-empty), and the runtime's
+ *   /api/health document counter is 0.
+ *
+ * The mode-off rows were TODO, blocked by the measured boot refusal (row B, #1733 v2), until the slice-3 build; the marker was lifted on
+ * 2026-10-22 (45084) once every row was ok at aab78f5, so each is now a plain test that fails CI. Mutant outcomes are measured, never
+ * inferred from a mutant's name.
+ *
+ * NOT covered, by name: production's data shape and size; a crash between the executor commit and writeDocument (no barrier there
+ * today); the batch-complete route; notification policy beyond "a replay may dispatch twice, never post twice"; REST integration of any
+ * seam below REST (if the build forces one, this design returns for review before freeze).
+ */
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import fsp from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { spawn, spawnSync } from 'node:child_process';
+import http from 'node:http';
+import { fileURLToPath } from 'node:url';
+import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-executor-proc.mjs';
+import { wholeBoardWorld, WB_DATASET } from './helpers/whole-board-1645.mjs';
+import { startRestServer } from './helpers/harness.mjs';
+import { createGraphClient } from '../core/graph-client.mjs';
+import { createCardsUnit } from '../core/cards-unit.mjs';
+import { enumerateOriginRecords, readCommittedOrigin, readPreparedOrigin, readOriginOutcome } from '../core/origin-commit.mjs';
+import { announcePostId, opIdFor, postCreateIntention } from '../core/announce-outbox.mjs';
+import { canonicalize, digestOf } from '../core/graph-compiler.mjs';
+
+const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)';
+const T = { skip: SKIP, timeout: 300000 };
+const TB = T;   // BLOCKED lifted 2026-10-22 (45084): every row was ok at aab78f5; these rows now enforce CI as plain tests
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const RECORDER = path.join(HERE, 'helpers', 'fs-store-recorder.mjs');
+const PUBLISHER = path.join(HERE, '..', 'scripts', 'announce-publisher.mjs');
+const ROSTER = path.join(os.tmpdir(), `l1629-roster-${process.pid}.json`);
+fs.writeFileSync(ROSTER, JSON.stringify({ seats: { ada: { name: 'Ada', glyph: 'a', color: '#7cc4a0' }, board: { name: 'Board', glyph: 'o', color: '#8899aa', kind: 'system' } } }));
+process.once('exit', () => { try { fs.rmSync(ROSTER, { force: true }); } catch { /* best effort */ } });
+
+const UNITS = { SCRUM_GRAPH_UNIT_CARDS: '1', SCRUM_GRAPH_UNIT_COLUMNS: '1', SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_GRAPH_UNIT_LOGBORN: '1', SCRUM_GRAPH_UNIT_SMALLKINDS: '1', SCRUM_GRAPH_UNIT_DELIVERIES: '1' };
+const SOURCES = { SCRUM_GRAPH_QUERY_SOURCE: 'executor', SCRUM_GRAPH_READY_SOURCE: 'executor', SCRUM_GRAPH_CHECKS_SOURCE: 'executor', SCRUM_GRAPH_NEIGHBORS_SOURCE: 'executor' };
+const OPENS = (health) => health?.document?.attemptedOpens;   // #1563's runtime counter (the builder's name)
+const CLAIM_RX = /ada claimed #1\b/;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function until(fn, ms, step = 250) { const t0 = Date.now(); for (;;) { const v = await fn(); if (v) return v; if (Date.now() - t0 > ms) return v; await sleep(step); } }
+const entriesOf = (ob) => (Array.isArray(ob?.entries) ? ob.entries : Object.values(ob?.entries || {}));
+
+/** One fixture world. `rest(n)` starts REST incarnation n with its own recorder file; every incarnation is recorded. */
+async function world(mode, body, { allocator = mode === 'off' } = {}) {
+  const w = await wholeBoardWorld({ env: { ...UNITS, ...SOURCES } });
+  const kept = fs.readFileSync(w.boardFile);
+  await w.rest.stop(); fs.writeFileSync(w.boardFile, kept);   // the harness unlinks the board file on stop
+  // G1(c), 45075: ONE allocator for ordinary posts and announcement slots, seeded EXPLICITLY by the fixture (never created by the
+  // runtime), above every existing postSeq in the store, posts and tombstones alike. Mode off only: mode on keeps today's world.
+  const BKG = 'urn:scrum:bookkeeping:executor';
+  const xq = async (sparql) => { const q = await createGraphClient({ baseUrl: w.exec.baseUrl, expectedDatasetId: WB_DATASET, timeoutMs: 30000, label: 'l1629-alloc' }).query(sparql); assert.ok(q.ok, `PRECONDITION: the executor answered (${q.reason})`); return q.rows; };
+  const xu = async (sparql, label) => { const r = await fetch(`${w.exec.baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/l1629-${label}-${process.pid}-${Date.now()}` }, body: sparql }); assert.equal(r.status, 200, `PRECONDITION: ${label} (${await r.text()})`); };
+  const maxSeq = async () => Math.max(0, ...(await xq(`SELECT ?n WHERE { { ?s ?p ?n } UNION { GRAPH ?g { ?s ?p ?n } } FILTER(STRENDS(STR(?p), "/postSeq") || STRENDS(STR(?p), "#postSeq")) }`)).map((r) => Number(r.n.value)).filter(Number.isSafeInteger));
+  const epoch = (/"postSeqEpoch"\s*:\s*"([^"]+)"/.exec(kept.toString('utf8')) || [])[1] || 'e-l1629';
+  const allocatorTriples = (next) => `<urn:ex:postseq/allocator> a <urn:ex:postseq/Allocator> ; <urn:ex:postseq/postSeqEpoch> ${JSON.stringify(epoch)} ; <urn:ex:postseq/nextPostSeq> "${next}"^^<http://www.w3.org/2001/XMLSchema#integer> ; <urn:ex:postseq/version> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .`;
+  const allocatorNext = async () => (await xq(`SELECT ?n WHERE { GRAPH <${BKG}> { <urn:ex:postseq/allocator> <urn:ex:postseq/nextPostSeq> ?n } }`)).map((r) => Number(r.n.value));
+  /** The stored postSeq of a post, read from the executor (45078: the response alone is what REST said, not what was stored). */
+  const storedPostSeq = async (id) => (await xq(`SELECT ?n WHERE { { <https://scrumboard.local/entity/${id}> ?p ?n } UNION { GRAPH ?g { <https://scrumboard.local/entity/${id}> ?p ?n } } FILTER(STRENDS(STR(?p), "/postSeq") || STRENDS(STR(?p), "#postSeq")) }`)).map((r) => Number(r.n.value));
+  const removeAllocator = () => xu(`DELETE WHERE { GRAPH <${BKG}> { <urn:ex:postseq/allocator> ?p ?o } }`, 'allocator-removed');
+  const seedAllocator = async (next) => { await xu(`INSERT DATA { GRAPH <${BKG}> { ${allocatorTriples(next)} } }`, 'allocator-seeded'); assert.deepEqual(await allocatorNext(), [next], 'PRECONDITION: read-back: exactly one allocator, at the seeded next'); };
+  if (allocator) {
+    assert.deepEqual(await allocatorNext(), [], 'PRECONDITION: the fixture holds no allocator before the test seeds one');
+    await seedAllocator((await maxSeq()) + 1);
+  }
+  // #1744: in executor-owned mode (off) REST refuses to START unless the card reference index is exact under complete true, so
+  // the fixture initializes it EXPLICITLY, once, with the real tool, writers stopped by construction (no REST is running yet).
+  // Mode on keeps today's world: its guard is marker-keyed, and no marker means no index was required. A0 (no allocator) gets
+  // the index too, so the boot refusal it asserts can only be the allocator's.
+  if (mode === 'off') {
+    const tool = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'card-ref-index-1744.mjs');
+    const b = spawnSync(process.execPath, [tool, '--executor', w.exec.baseUrl, '--dataset', WB_DATASET, '--backfill'], { encoding: 'utf8', timeout: 180000 });
+    assert.equal(b.status, 0, `PRECONDITION: the card reference index was backfilled before REST started (exit ${b.status}: ${(b.stdout + b.stderr).slice(-300)})`);
+    assert.match(b.stdout, /^COMPLETE$/m, 'PRECONDITION: the backfill reports COMPLETE');
+  }
+  const barrierDir = fs.mkdtempSync(path.join(os.tmpdir(), 'l1629-barrier-'));
+  // a notify sink: every dispatch REST makes lands here, so a row can count them (the #1574 H5 pattern)
+  const sink = { events: [] };
+  sink.server = http.createServer(async (req, res) => { const chunks = []; for await (const ch of req) chunks.push(ch); try { sink.events.push(JSON.parse(Buffer.concat(chunks).toString('utf8')).conversation); } catch { /* not ours */ } res.statusCode = 200; res.end('{}'); });
+  await new Promise((r) => sink.server.listen(0, '127.0.0.1', r)); sink.url = `http://127.0.0.1:${sink.server.address().port}/internal/notify`;
+  sink.forPost = (id) => sink.events.filter((ev) => ev && ev.id === id);
+  const exec = createCardsUnit({ client: createGraphClient({ baseUrl: w.exec.baseUrl, expectedDatasetId: WB_DATASET, timeoutMs: 30000, label: 'l1629-test' }), mintId: () => 'unused' });
+  const incarnations = [];
+  let current = null;
+  const prepareFile = () => {
+    try { fs.chmodSync(w.boardFile, 0o644); } catch { /* absent */ }
+    if (mode === 'on') { if (!fs.existsSync(w.boardFile)) fs.writeFileSync(w.boardFile, kept); return; }
+    if (!fs.existsSync(w.boardFile)) fs.writeFileSync(w.boardFile, kept);
+    fs.chmodSync(w.boardFile, 0o000);   // off: the document exists and is UNREADABLE for every incarnation
+  };
+  const start = async () => {
+    prepareFile();
+    const priv = fs.mkdtempSync(path.join(os.tmpdir(), 'l1629-r-'));
+    const rec = path.join(priv, 'fs.txt');
+    const savedTmp = process.env.TMPDIR; process.env.TMPDIR = priv;
+    let r;
+    try {
+      r = await startRestServer({ boardFile: w.boardFile, mcpNotifyUrl: sink.url, env: { SCRUM_GRAPH_DATASET_ID: WB_DATASET, SCRUM_GRAPH_EXECUTOR_URL: w.exec.baseUrl, SCRUM_ROSTER_FILE: ROSTER, ...UNITS, ...SOURCES, ...(mode === 'off' ? { SCRUM_BOARD_DOCUMENT: 'off' } : {}), SCRUM_TEST_BARRIER_DIR: barrierDir, SCRUM_FS_RECORD: rec, SCRUM_FS_RECORD_ALL: '1', NODE_OPTIONS: `--import ${RECORDER}` } });
+    } catch (e) { fs.rmSync(priv, { recursive: true, force: true }); throw e; } finally {
+      if (savedTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = savedTmp;
+    }
+    const lines = () => (fs.existsSync(rec) ? fs.readFileSync(rec, 'utf8').split('\n').filter(Boolean) : []);
+    const real = () => { try { return fs.realpathSync.native(path.dirname(w.boardFile)) + '/' + path.basename(w.boardFile); } catch { return w.boardFile; } };
+    const inc = { r, priv, rec, n: incarnations.length + 1, recorded: () => lines().length, boardOpens: () => lines().filter((l) => l === w.boardFile || l === real()).length };
+    incarnations.push(inc); current = inc;
+    return inc;
+  };
+  const call = async (method, route, payload) => {
+    const x = await fetch(`${current.r.baseUrl}${route}`, { method, ...(payload ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) } : {}), signal: AbortSignal.timeout(60000) });
+    const t = await x.text(); let j = null; try { j = JSON.parse(t); } catch { /* not json */ } return { status: x.status, text: t, json: j };
+  };
+  const kill = () => { current.r.kill('SIGKILL'); };
+  const stopCurrent = async () => { try { fs.chmodSync(w.boardFile, 0o644); } catch { /* absent */ } const had = fs.existsSync(w.boardFile) ? fs.readFileSync(w.boardFile) : null; await current.r.stop().catch(() => {}); if (had) fs.writeFileSync(w.boardFile, had); };
+  const restart = async () => { kill(); await sleep(300); return start(); };
+  const publishOnce = () => new Promise((resolve) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'l1629-pub-')); const key = path.join(dir, 'board.key'); fs.writeFileSync(key, 'sk-test-not-a-secret', { mode: 0o600 });
+    const rec = path.join(dir, 'fs.txt');
+    const ch = spawn(process.execPath, [PUBLISHER, '--board', current.r.baseUrl, '--key-file', key, '--status', path.join(dir, 'st.json'), '--once'], { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, SCRUM_FS_RECORD: rec, SCRUM_FS_RECORD_ALL: '1', NODE_OPTIONS: `--import ${RECORDER}` } });
+    let err = ''; ch.stderr.on('data', (d) => { err += d; });
+    ch.on('exit', (code) => { const lines = fs.existsSync(rec) ? fs.readFileSync(rec, 'utf8').split('\n').filter(Boolean) : []; resolve({ code, err, boardOpens: lines.filter((l) => l.endsWith(path.basename(w.boardFile)) && l.includes(path.basename(path.dirname(w.boardFile)))).length, recorded: lines.length }); fs.rmSync(dir, { recursive: true, force: true }); });
+  });
+  /** The claim's posts, read from REST (author `board` or any non-ada system author). */
+  const claimPosts = async () => { const l = await call('GET', '/api/conversations?limit=200'); const xs = Array.isArray(l.json) ? l.json : (l.json?.conversations || []); return xs.filter((c) => CLAIM_RX.test(String(c.body)) && c.author !== 'ada'); };
+  const gclient = createGraphClient({ baseUrl: w.exec.baseUrl, expectedDatasetId: WB_DATASET, timeoutMs: 30000, label: 'l1629-origins' });
+  /** Mode OFF: the claim's durable record is slice 2's Origin + Obligation + reservation, committed in the claim's own card.write
+   *  (r2 §2 step 4); no K4 envelope is written there (45069). Read each committed Origin's join and keep its `claim` obligation. */
+  const originClaimRecords = async () => {
+    const e = await enumerateOriginRecords(gclient);
+    assert.equal(e.ok, true, `the origin records are readable (${JSON.stringify(e).slice(0, 200)})`);
+    const mids = [...new Set(e.records.filter((r) => r.type === 'Origin' && r.mutationId).map((r) => r.mutationId))];
+    const out = [];
+    for (const mid of mids) {
+      const got = await readCommittedOrigin(gclient, mid);
+      if (!got.ok || !got.committed) continue;
+      for (const [i, ob] of got.committed.obligations.entries()) {
+        if (ob.slot !== 'claim') continue;
+        const res = got.committed.reservations[i];
+        out.push({ mutationId: mid, slot: ob.slot, opId: opIdFor(mid, ob.slot), obligationId: ob.obligationId, postId: announcePostId(mid, ob.slot), postSeq: res?.postSeq, status: ob.status, mode: ob.mode, payload: res?.draft, publicationAt: res?.createdAt });
+      }
+    }
+    return out;
+  };
+  /** Directly from the executor (REST may be frozen): this claim's durable records. Mode ON (L0, GD0, the D1 control): K4's
+   *  PendingAnnouncement envelopes, as today's code writes them. Mode OFF: the committed Origin join (45069). */
+  const claimRecords = async () => {
+    if (mode === 'off') return originClaimRecords();
+    const recs = await exec.pendingAnnouncements();
+    const out = [];
+    for (const r of recs) {
+      let rec; try { rec = JSON.parse(r.json); } catch { continue; }
+      for (const e of Object.values(rec.entries || {})) {
+        if (e?.slot !== 'claim') continue;
+        out.push({ mutationId: e.mutationId ?? r.mutationId, slot: e.slot, opId: e.opId ?? null, obligationId: e.obligationId, postId: announcePostId(e.mutationId ?? r.mutationId, e.slot), postSeq: e.postSeq, status: e.status, mode: e.mode, payload: e.payload, publicationAt: e.publicationAt });
+      }
+    }
+    return out;
+  };
+  /** Arm a FIFO barrier, fire `request`, and wait until REST is held at it. Returns { reached, inflight, done, release }. */
+  const holdAt = async (name, request) => {
+    const fifo = path.join(barrierDir, name);
+    assert.equal(spawnSync('mkfifo', [fifo]).status, 0, `PRECONDITION: mkfifo ${name}`);
+    let returned = false;
+    const inflight = request().then((r) => { returned = true; return r; }, (e) => { returned = true; return { reset: String(e?.message || e) }; });
+    let fh = null;
+    const reached = await Promise.race([fsp.open(fifo, 'w').then((h) => { fh = h; return true; }), sleep(20000).then(() => false)]);
+    if (!reached) { try { fs.closeSync(fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK)); } catch { /* none */ } }
+    const release = async () => { try { await fh?.close(); } catch { /* ignore */ } fs.rmSync(fifo, { force: true }); };
+    return { reached, inflight, returned: () => returned, release };
+  };
+  try {
+    await body({ w, start, call, kill, restart, stopCurrent, publishOnce, claimPosts, claimRecords, holdAt, incarnations, barrierDir, sink, allocatorNext, removeAllocator, seedAllocator, maxSeq, gclient, storedPostSeq });
+  } finally {
+    try { fs.chmodSync(w.boardFile, 0o644); } catch { /* absent */ }
+    for (const inc of incarnations) { await inc.r.stop().catch(() => {}); fs.rmSync(inc.priv, { recursive: true, force: true }); }
+    try { fs.writeFileSync(w.boardFile, kept); } catch { /* going anyway */ }
+    fs.rmSync(barrierDir, { recursive: true, force: true });
+    await new Promise((r) => { sink.server.closeAllConnections?.(); sink.server.close(() => r()); });
+    await w.stop();
+  }
+}
+
+/** Every incarnation's recorder is live; and in mode off none of them attempted the board file, nor did the runtime count one. */
+async function documentUntouched(s, mode, label) {
+  for (const inc of s.incarnations) assert.ok(inc.recorded() > 0, `${label}: REST incarnation ${inc.n}'s recorder is live (it recorded ${inc.recorded()} paths)`);
+  if (mode === 'on') {
+    for (const inc of s.incarnations) assert.ok(inc.boardOpens() > 0, `${label} CONTROL: in mode on the recorder SEES incarnation ${inc.n} reach for the board file, so it can see what the off rows assert is absent`);
+    return;
+  }
+  for (const inc of s.incarnations) assert.equal(inc.boardOpens(), 0, `${label}: REST incarnation ${inc.n} attempted the board file ${inc.boardOpens()} time(s)`);
+  const h = (await s.call('GET', '/api/health')).json;
+  assert.equal(typeof OPENS(h), 'number', `${label}: the runtime exposes its attempted-open counter (got ${JSON.stringify(h?.document)})`);
+  assert.equal(OPENS(h), 0, `${label}: the runtime counted no attempted open of the board file`);
+}
+
+/** L3's sequence (and L0's, in mode on): crash after the durable origin, restart, no inline drain, one --once publishes the post. */
+async function crashAfterOriginThenRecover(mode, label) {
+  await world(mode, async (s) => {
+    await s.start();
+    const before = new Set((await s.claimRecords()).map((x) => x.obligationId));
+    const held = await s.holdAt('after-document', () => s.call('POST', '/api/cards/uuid-1/claim', { by: 'ada' }));
+    let snap = null;
+    try {
+      assert.equal(held.reached, true, `${label}: REST reached the after-document barrier during the claim`);
+      // THE DISCRIMINATOR: the claim has not returned, and the executor already holds THIS claim's durable origin
+      assert.equal(held.returned(), false, `${label}: blocked a different write — the claim had already returned when the barrier held`);
+      const fresh = (await s.claimRecords()).filter((x) => !before.has(x.obligationId));
+      assert.equal(fresh.length, 1, `${label}: blocked a different write — the executor holds ${fresh.length} new claim record(s) at the barrier (${JSON.stringify(fresh)})`);
+      snap = fresh[0];
+      assert.equal(typeof snap.mutationId, 'string', `${label}: the durable record carries its mutationId`);
+      assert.ok(Number.isSafeInteger(snap.postSeq), `${label}: the durable record carries a reserved integer postSeq (${JSON.stringify(snap.postSeq)})`);
+    } finally {
+      s.kill();
+      await held.release();
+      await Promise.race([held.inflight, sleep(5000)]);
+    }
+    await sleep(300);
+    await s.start();   // a FRESH REST; the barrier dir is now empty, so nothing is armed for the recovery half
+    const pend = await s.call('GET', `/api/outbox?status=pending`);
+    assert.equal(pend.status, 200, `${label}: GET /api/outbox answers (${pend.text.slice(0, 200)})`);
+    const mine = entriesOf(pend.json).filter((e) => e.slot === 'claim' && (e.mutationId === snap.mutationId || String(e.obligationId || '').startsWith(snap.mutationId)));
+    assert.equal(mine.length, 1, `${label}: the fresh REST lists the same entry pending (${JSON.stringify(entriesOf(pend.json).map((e) => [e.obligationId, e.status]))})`);
+    await sleep(8000);
+    assert.equal((await s.claimPosts()).length, 0, `${label}: 8 s after a fresh boot the post does NOT exist — startup did not publish it inline`);
+    const run = await s.publishOnce();
+    assert.equal(run.code, 0, `${label}: --once completed (${run.code}) ${run.err.slice(0, 200)}`);
+    assert.ok(await until(async () => (await s.claimPosts()).length >= 1, 20000), `${label}: the post is readable after --once`);
+    await sleep(1500);
+    const posts = await s.claimPosts();
+    assert.equal(posts.length, 1, `${label}: exactly one post (${posts.length})`);
+    assert.equal(posts[0].id, snap.postId, `${label}: it is the reserved post (${posts[0].id} vs ${snap.postId})`);
+    assert.equal(posts[0].postSeq, snap.postSeq, `${label}: with the reserved postSeq (${posts[0].postSeq} vs ${snap.postSeq})`);
+    const after = await s.call('GET', `/api/outbox?mutationId=${encodeURIComponent(snap.mutationId)}`);
+    assert.ok(entriesOf(after.json).some((e) => e.slot === 'claim' && e.status === 'published'), `${label}: and the entry reads published (${after.text.slice(0, 300)})`);
+    if (mode === 'off') assert.equal(run.boardOpens, 0, `${label}: the publisher process attempted no board file`);
+    await documentUntouched(s, mode, label);
+  });
+}
+
+test('#1629 L0 CONTROL (mode on, file present): killed at after-document with the claim\'s durable origin in the executor, a fresh REST leaves it pending, one --once publishes the reserved post; the recorder sees board opens', T, async () => {
+  await crashAfterOriginThenRecover('on', 'L0');
+});
+
+test('#1629 L1a ONE ALLOCATOR (mode off, file unreadable): an ordinary post takes the allocator\'s OLD next, and next becomes old next + 1', TB, async () => {
+  // 45075: the old L1 (postSeq 3 then 4) could not tell one counter from two; a mark counter gives 3 and 4 as well. This row reads the
+  // allocator itself before and after.
+  await world('off', async (s) => {
+    await s.start();
+    const [before] = await s.allocatorNext();
+    assert.ok(Number.isSafeInteger(before), `PRECONDITION: exactly one allocator (${before})`);
+    const a = await s.call('POST', '/api/conversations', { body: 'an L1a post', author: 'ada' });
+    assert.equal(a.status, 201, a.text.slice(0, 200));
+    assert.equal(a.json?.postSeq, before, `L1a: the post took the allocator's old next (${a.json?.postSeq} vs ${before})`);
+    assert.deepEqual(await s.storedPostSeq(a.json?.id), [before], `L1a: read-back: the STORED post carries exactly that postSeq (${a.json?.id})`);
+    assert.deepEqual(await s.allocatorNext(), [before + 1], 'L1a: read-back: next is old next + 1');
+    await documentUntouched(s, 'off', 'L1a');
+  });
+});
+
+test('#1629 L1b ONE ALLOCATOR, INTERLEAVED (mode off): a claim, an ordinary post, a claim take distinct, consecutive numbers from the one allocator', TB, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    const [before] = await s.allocatorNext();
+    assert.equal((await s.call('POST', '/api/cards/uuid-1/claim', { by: 'ada' })).status, 200, 'the first claim');
+    const p = await s.call('POST', '/api/conversations', { body: 'an L1b post', author: 'ada' });
+    assert.equal(p.status, 201, p.text.slice(0, 200));
+    assert.equal((await s.call('POST', '/api/cards/uuid-2/claim', { by: 'ada' })).status, 200, 'the second claim');
+    const claims = (await s.claimRecords()).map((x) => x.postSeq);
+    assert.equal(claims.length, 2, `read-back: two claim reservations (${JSON.stringify(claims)})`);
+    const stored = await s.storedPostSeq(p.json?.id);
+    assert.deepEqual(stored, [p.json?.postSeq], `L1b: read-back: the STORED ordinary post carries the postSeq REST answered (${JSON.stringify(stored)})`);
+    const all = [...claims, stored[0]].sort((x, y) => x - y);
+    assert.equal(new Set(all).size, 3, `L1b: three DISTINCT numbers (${JSON.stringify(all)})`);
+    assert.deepEqual(all, [before, before + 1, before + 2], `L1b: consecutive from the allocator's old next ${before} (${JSON.stringify(all)})`);
+    assert.deepEqual(await s.allocatorNext(), [before + 3], 'L1b: read-back: next advanced by exactly three');
+    await documentUntouched(s, 'off', 'L1b');
+  });
+});
+
+test('#1629 A0 BOOT CONTROL (mode off): with NO allocator in the store, REST refuses to start and names the allocator', TB, async () => {
+  await world('off', async (s) => {
+    let started = null, err = null;
+    try { started = await s.start(); } catch (e) { err = e; }
+    assert.equal(started, null, 'REST must not start without an allocator in executor-owned mode');
+    assert.match(String(err?.message), /allocator/i, `and its refusal names the allocator (${String(err?.message).slice(-300)})`);
+  }, { allocator: false });
+});
+
+test('#1629 RS REFUSED THEN FRESH (mode off): a claim refused without the card moving (allocator gone mid-run) leaves a refused origin; once restored, a fresh claim commits under a NEW mutationId; both are discoverable for the card', TB, async () => {
+  // G2 (45075): the nonce is minted per new staged origin, so a definitive refusal does not wedge the card's next attempt; the refused
+  // preparation stays as diagnostic evidence. The outcomes are found by enumerating Prepared records for (route claim, subject card).
+  await world('off', async (s) => {
+    await s.start();
+    const [next] = await s.allocatorNext();
+    await s.removeAllocator();
+    const refused = await s.call('POST', '/api/cards/uuid-1/claim', { by: 'ada' });
+    assert.notEqual(refused.status, 200, `the claim is refused while the allocator is gone (${refused.status} ${refused.text.slice(0, 200)})`);
+    assert.ok(!(await s.call('GET', '/api/cards/uuid-1')).json?.claimedBy, 'read-back: the card was not claimed');
+    await s.seedAllocator(next);
+    const ok = await s.call('POST', '/api/cards/uuid-1/claim', { by: 'ada' });
+    assert.equal(ok.status, 200, `a fresh claim succeeds once the allocator is back (${ok.text.slice(0, 200)})`);
+    assert.equal((await s.call('GET', '/api/cards/uuid-1')).json?.claimedBy, 'ada', 'read-back: the card is claimed');
+    const e = await enumerateOriginRecords(s.gclient);
+    assert.equal(e.ok, true);
+    const mids = [...new Set(e.records.filter((r) => r.type === 'Prepared' && r.mutationId).map((r) => r.mutationId))];
+    const mine = [];
+    for (const mid of mids) {
+      const p = await readPreparedOrigin(s.gclient, mid);
+      const d = p.ok && p.prepared ? JSON.parse(p.prepared.descriptorJson) : null;
+      if (d && d.route === 'claim' && d.subject === 'uuid-1') mine.push({ mid, outcome: (await readOriginOutcome(s.gclient, mid)).outcome });
+    }
+    // the count is BOUNDED, not exact (45080): the write lock retries a refused card write once (server.js lockedWithCards, `attempt === 1`),
+    // and each attempt stages a fresh origin with its own nonce (G2). Two claim requests here → at most 2 × 2 = 4 preparations.
+    const REQUESTS = 2, ATTEMPTS_PER_REQUEST = 2;
+    const outcomes = mine.map((x) => x.outcome);
+    assert.equal(new Set(mine.map((x) => x.mid)).size, mine.length, `RS: every preparation has its OWN mutationId (${JSON.stringify(mine)})`);
+    assert.equal(outcomes.filter((o) => o === 'committed').length, 1, `RS: exactly one committed (${JSON.stringify(outcomes)})`);
+    assert.ok(outcomes.filter((o) => o === 'refused').length >= 1, `RS: at least one refused (${JSON.stringify(outcomes)})`);
+    // every preparation is RESOLVED afterwards; that does NOT show no nonce was minted while an earlier attempt was UNKNOWN (45084):
+    // RS covers the definitive-refusal case only; temporal UNKNOWN reuse stays with implementation review
+    assert.ok(outcomes.every((o) => o === 'committed' || o === 'refused'), `RS: every preparation is resolved afterwards (${JSON.stringify(outcomes)})`);
+    assert.ok(mine.length <= REQUESTS * ATTEMPTS_PER_REQUEST, `RS: no more preparations than requests × attempts (${mine.length} > ${REQUESTS * ATTEMPTS_PER_REQUEST})`);
+    await documentUntouched(s, 'off', 'RS');
+  });
+});
+
+test('#1629 L2 PUBLICATION (mode off, file unreadable): a claim\'s announcement post appears exactly once and GET /api/outbox?mutationId= reads it published', TB, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    const c = await s.call('POST', '/api/cards/uuid-1/claim', { by: 'ada' });
+    assert.equal(c.status, 200, c.text.slice(0, 200));
+    assert.ok(await until(async () => (await s.claimPosts()).length >= 1, 20000), 'the announcement post is readable');
+    await sleep(1500);
+    const posts = await s.claimPosts();
+    assert.equal(posts.length, 1, `exactly one post (${posts.length})`);
+    const all = await s.call('GET', '/api/outbox');
+    const e = entriesOf(all.json).find((x) => x.slot === 'claim');
+    assert.ok(e?.mutationId || e?.obligationId, `the outbox lists the claim's entry (${all.text.slice(0, 300)})`);
+    const mid = e.mutationId ?? String(e.obligationId).split(':')[0];
+    const one = await s.call('GET', `/api/outbox?mutationId=${encodeURIComponent(mid)}`);
+    assert.ok(entriesOf(one.json).some((x) => x.slot === 'claim' && x.status === 'published'), `GET /api/outbox?mutationId= reads it published (${one.text.slice(0, 300)})`);
+    await documentUntouched(s, 'off', 'L2');
+  });
+});
+
+test('#1629 L3 RESTART RECOVERY (mode off, file unreadable): killed at after-document, a fresh REST does not drain it inline, one --once publishes the reserved post', TB, async () => {
+  await crashAfterOriginThenRecover('off', 'L3');
+});
+
+test('#1629 L4a APPLIED, COMPLETION UNRECORDED, explicit route (mode off): killed at after-executor-apply during --once, a replay gives the same post, postSeq and exactly one post', TB, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    // make the claim's entry pending with the executor reachable: kill at after-document, as L3 does
+    const before = new Set((await s.claimRecords()).map((x) => x.obligationId));
+    const held = await s.holdAt('after-document', () => s.call('POST', '/api/cards/uuid-1/claim', { by: 'ada' }));
+    let snap;
+    try {
+      assert.equal(held.reached, true, 'PRECONDITION: the claim reached after-document');
+      assert.equal(held.returned(), false, 'blocked a different write: the claim had returned');
+      const fresh = (await s.claimRecords()).filter((x) => !before.has(x.obligationId));
+      assert.equal(fresh.length, 1, `blocked a different write: ${fresh.length} new claim record(s)`);
+      snap = fresh[0];
+    } finally { s.kill(); await held.release(); await Promise.race([held.inflight, sleep(5000)]); }
+    await sleep(300);
+    await s.start();
+    const seqBefore = (await s.call('POST', '/api/conversations', { body: 'L4a sequence probe before', author: 'ada' })).json?.postSeq;
+    // now hold --once's publish at after-executor-apply: APPLIED in the executor, nothing recorded
+    const fifo = path.join(s.barrierDir, 'after-executor-apply');
+    assert.equal(spawnSync('mkfifo', [fifo]).status, 0);
+    const runP = s.publishOnce();
+    let fh = null;
+    const reached = await Promise.race([fsp.open(fifo, 'w').then((h) => { fh = h; return true; }), sleep(20000).then(() => false)]);
+    s.kill();
+    try { await fh?.close(); } catch { /* ignore */ }
+    if (!reached) { try { fs.closeSync(fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK)); } catch { /* none */ } }
+    fs.rmSync(fifo, { force: true });
+    await runP;
+    assert.equal(reached, true, 'REST reached after-executor-apply during --once (APPLIED, completion unrecorded)');
+    await sleep(300);
+    await s.start();
+    const run = await s.publishOnce();
+    assert.equal(run.code, 0, `the replaying --once completed (${run.code}) ${run.err.slice(0, 200)}`);
+    assert.ok(await until(async () => (await s.claimPosts()).length >= 1, 20000), 'the post is readable');
+    await sleep(1500);
+    const posts = await s.claimPosts();
+    assert.equal(posts.length, 1, `exactly one post after the crash and the replay (${posts.length})`);
+    assert.equal(posts[0].id, snap.postId, 'the same reserved post id');
+    assert.equal(posts[0].postSeq, snap.postSeq, 'the same reserved postSeq');
+    const seqAfter = (await s.call('POST', '/api/conversations', { body: 'L4a sequence probe after', author: 'ada' })).json?.postSeq;
+    assert.equal(seqAfter, seqBefore + 1, `no postSeq was consumed by the crash or the replay (${seqBefore} then ${seqAfter})`);
+    await documentUntouched(s, 'off', 'L4a');
+  });
+});
+
+test('#1629 L4b APPLIED, COMPLETION UNRECORDED, inline path (mode off): killed at after-dispatch-before-complete, --once gives one post with the same id and postSeq, and the entry reads published', TB, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    const held = await s.holdAt('after-dispatch-before-complete', () => s.call('POST', '/api/cards/uuid-1/claim', { by: 'ada' }));
+    try { assert.equal(held.reached, true, 'REST reached after-dispatch-before-complete (inline publish APPLIED, completion unrecorded)'); }
+    finally { s.kill(); await held.release(); await Promise.race([held.inflight, sleep(5000)]); }
+    await sleep(300);
+    await s.start();
+    const pend = entriesOf((await s.call('GET', '/api/outbox')).json).filter((e) => e.slot === 'claim');
+    assert.equal(pend.length, 1, `one claim entry after the restart (${pend.length})`);
+    const run = await s.publishOnce();
+    assert.equal(run.code, 0, `--once completed (${run.code}) ${run.err.slice(0, 200)}`);
+    assert.ok(await until(async () => entriesOf((await s.call('GET', '/api/outbox')).json).some((e) => e.slot === 'claim' && e.status === 'published'), 20000), 'the entry reads published');
+    await sleep(1500);
+    const posts = await s.claimPosts();
+    assert.equal(posts.length, 1, `exactly one post (${posts.length}): a repeated dispatch is not a second post`);
+    assert.equal(posts[0].postSeq, pend[0].postSeq, 'with the reserved postSeq');
+    await documentUntouched(s, 'off', 'L4b');
+  });
+});
+
+test('#1629 L5 READ PURITY (mode off): three GET /api/outbox reads while an entry is pending change nothing, and the next post takes the expected number', TB, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    const before = new Set((await s.claimRecords()).map((x) => x.obligationId));
+    const held = await s.holdAt('after-document', () => s.call('POST', '/api/cards/uuid-1/claim', { by: 'ada' }));
+    try {
+      assert.equal(held.reached, true, 'PRECONDITION: the claim reached after-document');
+      assert.equal((await s.claimRecords()).filter((x) => !before.has(x.obligationId)).length, 1, 'blocked a different write');
+    } finally { s.kill(); await held.release(); await Promise.race([held.inflight, sleep(5000)]); }
+    await sleep(300);
+    await s.start();
+    const snapshot = async () => JSON.stringify(entriesOf((await s.call('GET', '/api/outbox?status=pending')).json).map((e) => [e.obligationId, e.status, e.postSeq]).sort());
+    const p0 = await snapshot(); const posts0 = (await s.claimPosts()).length;
+    for (let i = 0; i < 3; i++) assert.equal((await s.call('GET', '/api/outbox')).status, 200);
+    assert.equal(await snapshot(), p0, 'the pending set is unchanged by three reads');
+    assert.equal((await s.claimPosts()).length, posts0, 'no post appeared');
+    const reserved = entriesOf((await s.call('GET', '/api/outbox?status=pending')).json).find((e) => e.slot === 'claim')?.postSeq;
+    const next = await s.call('POST', '/api/conversations', { body: 'an L5 post', author: 'ada' });
+    assert.equal(next.json?.postSeq, reserved + 1, `the next post takes the number after the reserved one (${next.json?.postSeq} vs reserved ${reserved})`);
+    await documentUntouched(s, 'off', 'L5');
+  });
+});
+
+// ── D1 (#1629 r4/r5, accepted as scope in 45032): slice 3 REFUSED two shapes in executor-owned mode until slice 4; slice 4
+// (#1744) built them, so only the mode-on control remains here (the retired rows' note follows it).
+const cardsNow = async (s) => { const r = await s.call('GET', '/api/cards'); const xs = Array.isArray(r.json) ? r.json : (r.json?.cards || []); return xs; };
+const cardNow = async (s, id) => (await s.call('GET', `/api/cards/${id}`)).json;
+
+test('#1629 D1 CONTROL (mode on, today): a page create answers 2xx and the page exists; a done-move with makeRoom shifts the sibling', T, async () => {
+  await world('on', async (s) => {
+    await s.start();
+    const p = await s.call('POST', '/api/nodes', { title: 'a D1 control page', createdBy: 'ada' });
+    assert.ok(p.status === 200 || p.status === 201, `the page create is accepted (${p.status} ${p.text.slice(0, 200)})`);
+    assert.ok((await cardsNow(s)).some((c) => c.title === 'a D1 control page'), 'read-back: the page exists');
+    const c1 = await cardNow(s, 'uuid-1'), c3 = await cardNow(s, 'uuid-3');
+    assert.equal(c3.column, 'done', 'PRECONDITION: card 3 is in done');
+    const m = await s.call('PATCH', '/api/cards/uuid-1', { column: 'done', order: c3.order, makeRoom: true, ifVersion: c1.version, by: 'ada' });
+    assert.equal(m.status, 200, `the done-move is applied (${m.status} ${m.text.slice(0, 200)})`);
+    assert.equal((await cardNow(s, 'uuid-1')).column, 'done', 'read-back: card 1 is in done');
+    assert.notEqual((await cardNow(s, 'uuid-3')).order, c3.order, 'read-back: the sibling was shifted');
+  });
+});
+
+// D1a and D1b RETIRED (#1744 slice 4, PR #116): the two shapes slice 3 refused now WORK in executor-owned mode. Their
+// replacements are #1744's rows: a page create is tests/origin-slice4-1744.test.mjs W1 (and W2–W8), a sibling-shifting
+// done-move is E1 (and E2–E7). The mode-on CONTROL above stays: it is today's behaviour, unchanged.
+
+// ── G-D: dispatch only after the proof checks out against the executor (r5; 45046) ──
+// The INJECTED condition is deliberate store corruption: after the origin commit, raw triples put a post with OTHER content at the
+// reserved post IRI and an APPLIED receipt with a foreign digest at the deterministic post op, beneath the compiler. The row demonstrates
+// what the publisher does when it meets that state; it does not claim corruption is the only way such a state could arise.
+const INTEGRITY_RX = /integrity/i;   // the builder's name: how --once reports an integrity fault (stderr), one place
+async function pendingAfterOriginCrash(s, label) {
+  const before = new Set((await s.claimRecords()).map((x) => x.obligationId));
+  const held = await s.holdAt('after-document', () => s.call('POST', '/api/cards/uuid-1/claim', { by: 'ada' }));
+  let snap;
+  try {
+    assert.equal(held.reached, true, `${label}: PRECONDITION: the claim reached after-document`);
+    assert.equal(held.returned(), false, `${label}: blocked a different write: the claim had returned`);
+    const fresh = (await s.claimRecords()).filter((x) => !before.has(x.obligationId));
+    assert.equal(fresh.length, 1, `${label}: blocked a different write: ${fresh.length} new claim record(s)`);
+    snap = fresh[0];
+  } finally { s.kill(); await held.release(); await Promise.race([held.inflight, sleep(5000)]); }
+  await sleep(300);
+  return snap;
+}
+
+test('#1629 GD0 CONTROL (mode on, today): the uncorrupted recovery dispatches the reserved post to the notify sink, so the sink can see what GD asserts is absent', T, async () => {
+  await world('on', async (s) => {
+    await s.start();
+    const snap = await pendingAfterOriginCrash(s, 'GD0');
+    await s.start();
+    const run = await s.publishOnce();
+    assert.equal(run.code, 0, `--once completed (${run.code}) ${run.err.slice(0, 200)}`);
+    assert.ok(await until(async () => s.sink.forPost(snap.postId).length >= 1, 20000), `GD0: the sink received a dispatch for the reserved post ${snap.postId} (events: ${s.sink.events.length})`);
+    assert.equal((await s.claimPosts()).length, 1, 'GD0: read-back: exactly one post');
+  });
+});
+
+/**
+ * A WELL-FORMED forged post and receipt, made by the REAL compiler and executor rather than hand-written triples (45050): the foreign
+ * post.create (the reserved identity, op and postSeq, a foreign body) is applied on a THROWAWAY executor that holds no reservation, so
+ * every guard there is vacuous; every triple at its post IRI and op IRI, in every graph, is then copied term for term into the world's
+ * executor beneath the compiler. What lands is exactly what a compiler-written publication of that content looks like.
+ */
+async function forgeWellFormed(targetExecUrl, foreign) {
+  const store = tmpStore('l1629-forge-'); fs.rmSync(store, { recursive: true });
+  const ex = await startExecutor({ store, datasetId: 'l1629-forge', create: true });
+  try {
+    const c = createGraphClient({ baseUrl: ex.baseUrl, expectedDatasetId: 'l1629-forge', timeoutMs: 30000, label: 'l1629-forge' });
+    const w = await c.update(foreign);
+    assert.equal(w.outcome, 'APPLIED', `PRECONDITION: the foreign publication applies where no reservation exists (${JSON.stringify(w).slice(0, 200)})`);
+    const subjects = [`https://scrumboard.local/entity/${foreign.post.id}`, foreign.opId];
+    const term = (t) => {
+      if (t.type === 'uri') return `<${t.value}>`;
+      assert.equal(t.type, 'literal', `PRECONDITION: the forged triples hold no blank node (${JSON.stringify(t)})`);
+      const lex = JSON.stringify(t.value);
+      if (t['xml:lang']) return `${lex}@${t['xml:lang']}`;
+      return t.datatype && t.datatype !== 'http://www.w3.org/2001/XMLSchema#string' ? `${lex}^^<${t.datatype}>` : lex;
+    };
+    const lines = { default: [], graphs: {} };
+    for (const iri of subjects) {
+      const dq = await c.query(`SELECT ?p ?o WHERE { <${iri}> ?p ?o }`);
+      const gq = await c.query(`SELECT ?g ?p ?o WHERE { GRAPH ?g { <${iri}> ?p ?o } }`);
+      assert.ok(dq.ok && gq.ok, 'PRECONDITION: the throwaway executor answered');
+      const inNamed = new Set(gq.rows.map((r) => `${r.p.value} ${JSON.stringify(r.o)}`));
+      for (const r of dq.rows) if (!inNamed.has(`${r.p.value} ${JSON.stringify(r.o)}`)) lines.default.push(`<${iri}> <${r.p.value}> ${term(r.o)} .`);
+      for (const r of gq.rows) (lines.graphs[r.g.value] ??= []).push(`<${iri}> <${r.p.value}> ${term(r.o)} .`);
+    }
+    const body = `INSERT DATA { ${lines.default.join(' ')} ${Object.entries(lines.graphs).map(([g, ts]) => `GRAPH <${g}> { ${ts.join(' ')} }`).join(' ')} }`;
+    const r = await fetch(`${targetExecUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/l1629-forge-${process.pid}` }, body });
+    assert.equal(r.status, 200, `PRECONDITION: the forged triples were copied in (${await r.text()})`);
+    return { copied: lines.default.length + Object.values(lines.graphs).reduce((n, ts) => n + ts.length, 0) };
+  } finally { await killExecutor(ex); fs.rmSync(store, { recursive: true, force: true }); }
+}
+
+test('#1629 GD (mode off, INJECTED STORE CORRUPTION): a well-formed APPLIED publication of OTHER content never dispatches, never settles, leaves the entry pending, and is reported as an integrity fault', TB, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    const snap = await pendingAfterOriginCrash(s, 'GD');
+    const entry = { mutationId: snap.mutationId, slot: 'claim', postSeq: snap.postSeq, publicationAt: snap.publicationAt, payload: snap.payload };
+    const frozen = postCreateIntention(entry);
+    const foreign = postCreateIntention({ ...entry, payload: { ...entry.payload, body: 'corrupted content, not the frozen draft' } });
+    assert.equal(foreign.opId, frozen.opId, 'PRECONDITION: the foreign publication uses the deterministic op');
+    assert.equal(foreign.post.id, snap.postId, 'PRECONDITION: at the reserved postId');
+    const forged = await forgeWellFormed(s.w.exec.baseUrl, foreign);
+    assert.ok(forged.copied > 0, 'PRECONDITION: triples were forged');
+    // READ THE INJECTED STATE BACK, in the row, before recovery (45050)
+    const ex = createGraphClient({ baseUrl: s.w.exec.baseUrl, expectedDatasetId: WB_DATASET, timeoutMs: 30000, label: 'l1629-gd-read' });
+    const post = Object.fromEntries((await ex.query(`SELECT ?p ?o WHERE { <https://scrumboard.local/entity/${snap.postId}> ?p ?o }`)).rows.map((r) => [r.p.value.split(/[#/]/).pop(), r.o.value]));
+    assert.equal(post.text, foreign.post.body, `injected read-back: the foreign body (${JSON.stringify(post)})`);
+    assert.equal(post.postSeq, String(snap.postSeq), 'injected read-back: at the reserved postSeq');
+    assert.equal(post.originMutation, snap.mutationId, 'injected read-back: claiming the reserved identity');
+    const rc = Object.fromEntries((await ex.query(`SELECT ?p ?o WHERE { GRAPH <urn:scrum:bookkeeping:executor> { <${frozen.opId}> ?p ?o } }`)).rows.map((r) => [r.p.value, r.o.value]));
+    assert.equal(rc['urn:ex:outcome'], 'urn:ex:APPLIED', `injected read-back: the receipt at the deterministic op says APPLIED (${JSON.stringify(rc)})`);
+    assert.equal(rc['urn:ex:digest'], digestOf(canonicalize(foreign)), 'injected read-back: its digest is the FOREIGN publication\'s');
+    assert.notEqual(rc['urn:ex:digest'], digestOf(canonicalize(frozen)), 'injected read-back: and not the frozen draft\'s');
+    // recovery
+    await s.start();
+    const run = await s.publishOnce();
+    await sleep(3000);
+    assert.equal(s.sink.forPost(snap.postId).length, 0, `GD: ZERO dispatches for the reserved post (got ${s.sink.forPost(snap.postId).length})`);
+    const ob = await s.call('GET', `/api/outbox?mutationId=${encodeURIComponent(snap.mutationId)}`);
+    assert.ok(entriesOf(ob.json).some((e) => e.slot === 'claim' && e.status === 'pending'), `GD: read-back: the entry is still pending, not settled (${ob.text.slice(0, 300)})`);
+    assert.match(run.err, INTEGRITY_RX, `GD: --once reports an integrity fault (exit ${run.code}; stderr ${run.err.slice(0, 300)})`);
+    await documentUntouched(s, 'off', 'GD');
+  });
+});
+
+// ── G-D, the receipt's TERMS before dispatch (review R2, 45094): the publisher validates outcome, digest and actor as exact terms ──
+// The TRUE post is created through the compiler (it matches the reservation, so G-R admits it); then ONE term of its receipt is
+// tampered beneath the compiler and read back. A fresh REST's --once must not dispatch, must not settle, and must report an integrity
+// fault. The control: the same pre-created true post, untampered, is dispatched and settled.
+async function preparedTruePost(s, label) {
+  const snap = await pendingAfterOriginCrash(s, label);
+  const entry = { mutationId: snap.mutationId, slot: 'claim', postSeq: snap.postSeq, publicationAt: snap.publicationAt, payload: snap.payload };
+  const truePost = postCreateIntention(entry);
+  const ex = createGraphClient({ baseUrl: s.w.exec.baseUrl, expectedDatasetId: WB_DATASET, timeoutMs: 30000, label: 'l1629-gdr' });
+  const w = await ex.update(truePost);
+  assert.equal(w.outcome, 'APPLIED', `PRECONDITION (${label}): the true post is created through the compiler (${JSON.stringify(w).slice(0, 200)})`);
+  return { snap, truePost, ex };
+}
+const receiptTerms = async (ex, op, p) => (await ex.query(`SELECT ?x WHERE { GRAPH <urn:scrum:bookkeeping:executor> { <${op}> <${p}> ?x } }`)).rows.map((r) => r.x);
+async function swapReceiptTerm(s, op, p, bind, label) {
+  const r = await fetch(`${s.w.exec.baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/l1629-gdr-${process.pid}-${Date.now()}` },
+    body: `DELETE { GRAPH <urn:scrum:bookkeeping:executor> { <${op}> <${p}> ?x } } INSERT { GRAPH <urn:scrum:bookkeeping:executor> { <${op}> <${p}> ?n } } WHERE { GRAPH <urn:scrum:bookkeeping:executor> { <${op}> <${p}> ?x } BIND(${bind} AS ?n) }` });
+  assert.equal(r.status, 200, `PRECONDITION (${label}): the receipt tamper was written (${await r.text()})`);
+}
+async function noDispatchNoSettle(s, snap, label) {
+  await s.start();
+  const run = await s.publishOnce();
+  await sleep(3000);
+  assert.equal(s.sink.forPost(snap.postId).length, 0, `${label}: ZERO dispatches for the reserved post (got ${s.sink.forPost(snap.postId).length})`);
+  const ob = await s.call('GET', `/api/outbox?mutationId=${encodeURIComponent(snap.mutationId)}`);
+  assert.ok(entriesOf(ob.json).some((e) => e.slot === 'claim' && e.status === 'pending'), `${label}: read-back: the entry is still pending, not settled (${ob.text.slice(0, 300)})`);
+  assert.match(run.err, INTEGRITY_RX, `${label}: --once reports an integrity fault (exit ${run.code}; stderr ${run.err.slice(0, 300)})`);
+  await documentUntouched(s, 'off', label);
+}
+
+test('#1629 GDR0 CONTROL (mode off): the TRUE post already created, its receipt untouched: --once dispatches it and the entry reads published', TB, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    const { snap } = await preparedTruePost(s, 'GDR0');
+    await s.start();
+    const run = await s.publishOnce();
+    assert.equal(run.code, 0, `--once completed (${run.code}) ${run.err.slice(0, 200)}`);
+    assert.ok(await until(async () => s.sink.forPost(snap.postId).length >= 1, 20000), `GDR0: the sink received a dispatch for ${snap.postId}`);
+    const ob = await s.call('GET', `/api/outbox?mutationId=${encodeURIComponent(snap.mutationId)}`);
+    assert.ok(await until(async () => entriesOf((await s.call('GET', `/api/outbox?mutationId=${encodeURIComponent(snap.mutationId)}`)).json).some((e) => e.slot === 'claim' && e.status === 'published'), 20000), `GDR0: read-back: published (${ob.text.slice(0, 200)})`);
+    await documentUntouched(s, 'off', 'GDR0');
+  });
+});
+
+test('#1629 GDR1 (mode off): the true post\'s receipt DIGEST language-tagged @en (same lexical hash): no dispatch, no settle, integrity fault', TB, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    const { snap, truePost, ex } = await preparedTruePost(s, 'GDR1');
+    await swapReceiptTerm(s, truePost.opId, 'urn:ex:digest', 'STRLANG(STR(?x), "en")', 'GDR1');
+    const t = await receiptTerms(ex, truePost.opId, 'urn:ex:digest');
+    assert.deepEqual(t.map((x) => [x.value, x['xml:lang'] ?? null]), [[digestOf(canonicalize(truePost)), 'en']], `PRECONDITION (GDR1): read-back: one digest, the TRUE hash, tagged @en (${JSON.stringify(t)})`);
+    await noDispatchNoSettle(s, snap, 'GDR1');
+  });
+});
+
+test('#1629 GDR2 (mode off): the true post\'s receipt ACTOR not the author\'s person: no dispatch, no settle, integrity fault', TB, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    const { snap, truePost, ex } = await preparedTruePost(s, 'GDR2');
+    assert.notEqual(truePost.actor, 'https://scrumboard.local/person/ada', 'PRECONDITION (GDR2): the author is not ada');
+    await swapReceiptTerm(s, truePost.opId, 'urn:ex:actor', '<https://scrumboard.local/person/ada>', 'GDR2');
+    const t = await receiptTerms(ex, truePost.opId, 'urn:ex:actor');
+    assert.deepEqual(t.map((x) => x.value), ['https://scrumboard.local/person/ada'], `PRECONDITION (GDR2): read-back: the actor is ada's person (${JSON.stringify(t)})`);
+    await noDispatchNoSettle(s, snap, 'GDR2');
+  });
+});
+
+// ── BR: a REDACTED announcement is settled BLOCKED by the real publisher (review R1b gate, 45195–45197) ──
+// xoPublish has two block calls, and since R1b each must carry the origin candidate or the settle is refused at canonicalization and
+// the entry stays pending for ever. 45195 measured that no REST row reached either (both server mutants survived). Each row below
+// drives ONE of them through the real --once, against a fresh REST, and reads the outcome back three ways: the outbox entry, the
+// Obligation's own status in the executor, and zero dispatches to the notify sink.
+// Which call a state reaches was MEASURED on a bare executor at c2fd7d3 (20:28Z): a redacted post whose op keeps its receipt replays
+// post.create as APPLIED (→ the second call); with the op's receipt gone, post.create at the tombstone is PRECONDITION_FAILED (→ the
+// first call). A reserved post that was never written cannot be redacted (PRECONDITION_FAILED). So the first call is reached only
+// through a LOST post receipt, which BRa injects beneath the compiler and reads back, as GD injects its state.
+//   BRa  INJECTED: the true post created and redacted, then its op's receipt deleted → post.create refused at a tombstone (FIRST call)
+//   BR0  CONTROL for BRb: --once held at after-executor-apply (post.create APPLIED), released untouched → dispatched, published
+//   BRb  the same hold, and the post redacted in the executor WHILE REST is held → a tombstone after the APPLIED post.create (SECOND)
+//   BRc  the true post created and redacted before --once, its receipt kept → post.create replays APPLIED, then the tombstone (SECOND)
+// GDR0 is the control for BRa and BRc: the identical pre-created true post, NOT redacted, is dispatched and reads published.
+const PERSON_ADA = 'https://scrumboard.local/person/ada';
+async function redactInExecutor(ex, postId, label) {
+  const r = await ex.update({ kind: 'post.redact', opId: `urn:ex:op/redact/${postId}`, actor: PERSON_ADA, post: { id: postId }, authorityRef: 'test-authority-ref', occurredAt: '2026-10-22T12:00:00.000Z' });
+  assert.equal(r.outcome, 'APPLIED', `PRECONDITION (${label}): the post was redacted through the compiler (${JSON.stringify(r).slice(0, 200)})`);
+  const t = (await ex.query(`SELECT ?t WHERE { <https://scrumboard.local/entity/${postId}> a ?t }`)).rows.map((x) => x.t.value);
+  assert.ok(t.includes('https://scrumboard.local/ns#RedactedPost'), `PRECONDITION (${label}): read-back: the reserved post is a RedactedPost (${JSON.stringify(t)})`);
+}
+/** The obligation's own status triple in the executor, independent of REST. */
+async function obligationStatusIn(ex, snap) {
+  return (await ex.query(`SELECT ?st WHERE { GRAPH <urn:scrum:bookkeeping:executor> { ?ob a <urn:ex:origin/Obligation> ; <urn:ex:origin/obligationId> ${JSON.stringify(snap.obligationId)} ; <urn:ex:origin/status> ?st } }`)).rows.map((x) => x.st.value);
+}
+async function blockedOnRedaction(s, ex, snap, run, label) {
+  assert.equal(run.code, 0, `${label}: --once completed (${run.code}) ${run.err.slice(0, 300)}`);
+  assert.ok(await until(async () => entriesOf((await s.call('GET', `/api/outbox?mutationId=${encodeURIComponent(snap.mutationId)}`)).json).some((e) => e.slot === 'claim' && e.status === 'blocked'), 20000),
+    `${label}: read-back: the outbox entry reads blocked (${(await s.call('GET', `/api/outbox?mutationId=${encodeURIComponent(snap.mutationId)}`)).text.slice(0, 300)})`);
+  assert.deepEqual(await obligationStatusIn(ex, snap), ['blocked'], `${label}: read-back: the Obligation's own status in the executor is exactly 'blocked'`);
+  await sleep(1500);
+  assert.equal(s.sink.forPost(snap.postId).length, 0, `${label}: ZERO dispatches for the redacted post (got ${s.sink.forPost(snap.postId).length})`);
+  await documentUntouched(s, 'off', label);
+}
+/** Hold --once's publish at after-executor-apply, run `during` while REST is held, then RELEASE (REST is not killed). */
+async function publishHeldAtApply(s, during) {
+  const fifo = path.join(s.barrierDir, 'after-executor-apply');
+  assert.equal(spawnSync('mkfifo', [fifo]).status, 0, 'PRECONDITION: mkfifo after-executor-apply');
+  const runP = s.publishOnce();
+  let fh = null;
+  const reached = await Promise.race([fsp.open(fifo, 'w').then((h) => { fh = h; return true; }), sleep(20000).then(() => false)]);
+  try {
+    assert.equal(reached, true, 'PRECONDITION: REST reached after-executor-apply during --once (post.create APPLIED, nothing settled)');
+    await during();
+  } finally {
+    try { await fh?.close(); } catch { /* ignore */ }
+    if (!reached) { try { fs.closeSync(fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK)); } catch { /* none */ } }
+    fs.rmSync(fifo, { force: true });
+  }
+  return runP;
+}
+
+test('#1629 BRa (mode off, INJECTED: a lost post receipt): the reserved post is a tombstone and its op holds no receipt, so the publisher\'s post.create is refused at the tombstone: it settles the entry BLOCKED, never dispatches', TB, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    const { snap, truePost, ex } = await preparedTruePost(s, 'BRa');
+    await redactInExecutor(ex, snap.postId, 'BRa');
+    const r = await fetch(`${s.w.exec.baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/l1629-bra-${process.pid}-${Date.now()}` }, body: `DELETE WHERE { GRAPH <urn:scrum:bookkeeping:executor> { <${truePost.opId}> ?p ?o } }` });
+    assert.equal(r.status, 200, `PRECONDITION (BRa): the post op's receipt was deleted (${await r.text()})`);
+    assert.equal((await ex.query(`SELECT ?p WHERE { GRAPH <urn:scrum:bookkeeping:executor> { <${truePost.opId}> ?p ?o } }`)).rows.length, 0, 'PRECONDITION (BRa): read-back: no receipt triple remains at the deterministic op');
+    assert.deepEqual(await obligationStatusIn(ex, snap), ['pending'], 'PRECONDITION (BRa): read-back: still pending before --once');
+    await s.start();
+    await blockedOnRedaction(s, ex, snap, await s.publishOnce(), 'BRa');
+  });
+});
+
+test('#1629 BR0 CONTROL (mode off): --once held after its APPLIED post.create and released untouched: dispatched, and the entry reads published', TB, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    const snap = await pendingAfterOriginCrash(s, 'BR0');
+    await s.start();
+    const run = await publishHeldAtApply(s, async () => {});
+    assert.equal(run.code, 0, `BR0: --once completed (${run.code}) ${run.err.slice(0, 300)}`);
+    assert.ok(await until(async () => s.sink.forPost(snap.postId).length >= 1, 20000), `BR0: the sink received a dispatch for ${snap.postId}`);
+    assert.ok(await until(async () => entriesOf((await s.call('GET', `/api/outbox?mutationId=${encodeURIComponent(snap.mutationId)}`)).json).some((e) => e.slot === 'claim' && e.status === 'published'), 20000), 'BR0: read-back: published');
+    await documentUntouched(s, 'off', 'BR0');
+  });
+});
+
+test('#1629 BRb (mode off): the reserved post REDACTED while --once is held after its APPLIED post.create: released, the publisher settles BLOCKED, never dispatches', TB, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    const snap = await pendingAfterOriginCrash(s, 'BRb');
+    await s.start();
+    const ex = createGraphClient({ baseUrl: s.w.exec.baseUrl, expectedDatasetId: WB_DATASET, timeoutMs: 30000, label: 'l1629-brb' });
+    const run = await publishHeldAtApply(s, async () => {
+      const live = (await ex.query(`SELECT ?t WHERE { <https://scrumboard.local/entity/${snap.postId}> a ?t }`)).rows.map((x) => x.t.value);
+      assert.ok(live.includes('https://schema.org/Comment'), `PRECONDITION (BRb): read-back at the hold: the publisher's post exists and is live (${JSON.stringify(live)})`);
+      await redactInExecutor(ex, snap.postId, 'BRb');
+    });
+    await blockedOnRedaction(s, ex, snap, run, 'BRb');
+  });
+});
+
+test('#1629 BRc (mode off): the reserved post created and REDACTED before --once, its receipt kept: post.create replays APPLIED, and the publisher settles BLOCKED, never dispatches', TB, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    const { snap, ex } = await preparedTruePost(s, 'BRc');
+    await redactInExecutor(ex, snap.postId, 'BRc');
+    assert.deepEqual(await obligationStatusIn(ex, snap), ['pending'], 'PRECONDITION (BRc): read-back: still pending before --once');
+    await s.start();
+    await blockedOnRedaction(s, ex, snap, await s.publishOnce(), 'BRc');
+  });
+});

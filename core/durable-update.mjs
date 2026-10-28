@@ -5,7 +5,22 @@
  * THIS request commit?"; the receipt does. Returns the client's outcome object: APPLIED, PRECONDITION_FAILED, REJECTED,
  * UNAVAILABLE (nothing was sent), RECONCILE_REQUIRED, or UNKNOWN (still undetermined after reconciling).
  */
+// #1762 S1 (review) — with native history ON, a card or collection write that carries NO history is refused before it is
+// sent: a path that forgot to compute it would otherwise commit changes no history records. Named migrations are exempt
+// (an import or backfill is history being brought in, not a change being made).
+// #1762 S1b — any op with an `/import` segment (collection, card, model-call and delivery imports) is a migration too.
+const HISTORY_EXEMPT_OPS = [/^urn:ex:op\/[^/]+\/import(\/|$)/, /^urn:ex:op\/delivery\/[^/]+\/import$/, /^urn:ex:op\/cutover\//, /^urn:ex:op\/backfill\//, /^urn:ex:op\/migrate-/];
+export const isHistoryExemptOp = (opId) => typeof opId === 'string' && HISTORY_EXEMPT_OPS.some((re) => re.test(opId));
+export const historyNativeOn = () => process.env.SCRUM_HISTORY_NATIVE === '1';
+export function lacksRequiredHistory(i, on = historyNativeOn()) {
+  if (!on || !i || typeof i.opId !== 'string' || isHistoryExemptOp(i.opId)) return false;
+  const parts = i.kind === 'card.write' ? [...(i.parts || []), ...(i.collections || [])]
+    : i.kind === 'entity.put' && i.entity?.kind === 'collection' ? (i.entity.parts || []) : [];
+  return parts.some((p) => !p || !p.history);
+}
+
 export async function durableUpdate(client, intention) {
+  if (lacksRequiredHistory(intention)) return { outcome: 'REJECTED', reason: `HISTORY_REQUIRED: native history is on (SCRUM_HISTORY_NATIVE=1) and this ${intention.kind} (${intention.opId}) carries none; nothing was sent` };
   let r = await client.update(intention);
   if (r.outcome !== 'UNKNOWN') return r;
   const rc = await client.reconcile(intention);

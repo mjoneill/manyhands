@@ -82,7 +82,7 @@ test('#755 the detector actually SEES the modules it is meant to police', () => 
   // Names the current members so a future reader can tell whether the set is
   // plausible, rather than trusting a count. A count is a pointer.
   const capable = refusalCapableModules();
-  assert.ok(capable.includes('work-gate.mjs'), `work-gate.mjs not detected as refusal-capable; found: ${capable.join(', ')}`);
+  // #1763 — the work gate is retired, so the throttle is the refusal-capable rail this detector must see.
   assert.ok(capable.includes('claim-throttle.mjs'), `claim-throttle.mjs not detected as refusal-capable; found: ${capable.join(', ')}`);
 });
 
@@ -100,5 +100,6 @@ test('#755 ⚠️ and the MCP server is where refusals ARE allowed to live', () 
   // carrying the gate, the rail would be gone and every assertion above would
   // still pass — so the positive half is asserted too.
   const mcpSrc = read('../mcp-server.mjs');
-  assert.match(mcpSrc, /core\/work-gate\.mjs/, 'the gate is no longer wired into mcp-server — the rail is gone, not merely relocated');
+  // #1763 — the work gate is retired; the claim throttle is the rail that remains, and it must still live HERE.
+  assert.match(mcpSrc, /core\/claim-throttle\.mjs/, 'the claim throttle is no longer wired into mcp-server — the rail is gone, not merely relocated');
 });

@@ -15,7 +15,21 @@
  * (reconcile by opId, then replay the same intention); UNAVAILABLE only when the
  * request provably never left (connection refused before send).
  */
-import { compile, canonicalize, digestOf, ValidationError } from './graph-compiler.mjs';
+import { compile, canonicalize, digestOf, ValidationError, RECORD_HISTORY_KINDS } from './graph-compiler.mjs';
+import { historyNativeOn, isHistoryExemptOp } from './durable-update.mjs';
+
+/**
+ * #1762 S1b — with native history ON, a RECORD write (memory, decision, seat, post, delivery, model call, wake) records its
+ * activity whichever path sent it: every fact is derived by the compiler from the record, so the one client every writer
+ * uses attaches `history: true` here rather than at each call site, where a forgotten site would silently record nothing.
+ * A caller that knows a REST version the record does not carry sends `history: { versionAfter }` itself. Migrations are
+ * exempt. Applied identically in update() and reconcile(), so a replay's digest is the original's.
+ */
+export function withNativeHistory(i, on = historyNativeOn()) {
+  if (!on || !i || typeof i !== 'object' || i.history !== undefined || !RECORD_HISTORY_KINDS.includes(i.kind) || isHistoryExemptOp(i.opId)) return i;
+  if (i.kind === 'entity.put' && i.entity?.kind !== 'wake') return i;   // a collection write carries history per part (S1)
+  return { ...i, history: true };
+}
 import { NS } from './graph-vocab.mjs';
 
 const TERM_TYPES = new Set(['uri', 'literal', 'bnode']);
@@ -43,6 +57,11 @@ const refused = (e) => {
 // in tests and scripts, so nothing changes there. It sees label, kind, outcome, elapsed ms and the body (to hash).
 let meter = null;
 export function setExecutorMeter(m) { meter = m || null; }
+
+/** #1748 — the WRITE PROTOCOL this client speaks, declared on every /update. A store with a write floor admits only the matching
+ *  declaration (anything else is 428 WRITE_PROTOCOL_REQUIRED, applied:false). Bump it only together with the floor. */
+export const WRITE_PROTOCOL = 'postseq-v1';
+export const WRITE_PROTOCOL_HEADER = 'x-manyhands-write-protocol';
 
 export function createGraphClient({ baseUrl, expectedDatasetId = null, timeoutMs = 5000, fetchImpl = fetch, label = 'unlabelled' } = {}) {
   if (!baseUrl) throw new Error('graph client: baseUrl required');
@@ -112,7 +131,11 @@ export function createGraphClient({ baseUrl, expectedDatasetId = null, timeoutMs
     if (stored !== digest) return { outcome: 'REJECTED', reason: 'intent-collision', receipt };
     const o = receipt.outcome?.[0]?.value;
     if (o === `${NS}APPLIED`) return { outcome: 'APPLIED', receipt };
-    if (o === `${NS}PRECONDITION_FAILED`) return { outcome: 'PRECONDITION_FAILED', receipt };
+    if (o === `${NS}PRECONDITION_FAILED`) {
+      // #1749 a refusal the update named by code (RECOVERY_HOLD) carries it, so a caller never guesses why from "not APPLIED"
+      const code = receipt.reason?.length === 1 && receipt.reason[0].type === 'literal' ? receipt.reason[0].value : null;
+      return code ? { outcome: 'PRECONDITION_FAILED', code, receipt } : { outcome: 'PRECONDITION_FAILED', receipt };
+    }
     return { outcome: 'UNKNOWN', reason: `receipt has unrecognised outcome ${o}`, receipt };
   }
 
@@ -144,6 +167,7 @@ export function createGraphClient({ baseUrl, expectedDatasetId = null, timeoutMs
   }
 
   async function update(intention, { epoch } = {}) {
+    intention = withNativeHistory(intention);   // #1762 S1b
     let compiled;
     try {
       compiled = compile(intention);
@@ -158,13 +182,21 @@ export function createGraphClient({ baseUrl, expectedDatasetId = null, timeoutMs
     let res;
     try {
       const ep = epoch != null ? String(epoch) : await currentEpoch();
-      res = await send('/update', sparql, { 'x-op-id': canonical.opId, 'content-type': 'application/sparql-update', ...(ep != null ? { 'x-epoch': ep } : {}) });
+      res = await send('/update', sparql, { 'x-op-id': canonical.opId, 'content-type': 'application/sparql-update', [WRITE_PROTOCOL_HEADER]: WRITE_PROTOCOL, ...(ep != null ? { 'x-epoch': ep } : {}) });
     } catch (e) {
       if (refused(e)) return { outcome: 'UNAVAILABLE', reason: 'connection refused before send', digest };
       return { outcome: 'UNKNOWN', reason: `transport after dispatch: ${e?.cause?.code || e?.name || e}`, digest };
     }
+    // #1748: the write floor refuses BEFORE applying anything (applied:false), so these are definitive refusals, never UNKNOWN:
+    // replaying the same intention cannot help, and nothing was written that a receipt could reconcile
+    if (res.status === 428) {
+      let j = null; try { j = JSON.parse(res.text); } catch { /* not the floor */ }
+      if (j?.error === 'WRITE_PROTOCOL_REQUIRED' && j.applied === false) return { outcome: 'REJECTED', reason: `WRITE_PROTOCOL_REQUIRED: this store needs ${j.requiredProtocol}, this client declares ${WRITE_PROTOCOL}; nothing was applied`, writeProtocolRequired: j.requiredProtocol, digest };
+    }
     if (res.status === 409) {
       let j = null; try { j = JSON.parse(res.text); } catch { /* not the fence */ }
+      if (j?.error === 'WRITE_FLOOR_PROTECTED' && j.applied === false) return { outcome: 'REJECTED', reason: 'WRITE_FLOOR_PROTECTED: an update may not change the write floor; nothing was applied', digest };
+      if (j?.error === 'HOLD_PROTECTED' && j.applied === false) return { outcome: 'REJECTED', reason: 'HOLD_PROTECTED: an update may not change the recovery hold or a reconciliation record; nothing was applied', digest };
       if (j?.reconcileRequired) return { outcome: 'RECONCILE_REQUIRED', reason: `epoch changed (store ${j.reconcileRequired.storeEpoch}, this write ${j.reconcileRequired.callerEpoch}) and this opId has no receipt here: reconcile downstream, then refresh the epoch and use a fresh opId`, reconcileRequired: j.reconcileRequired, digest };
     }
     // #1559: a latched executor refuses BEFORE applying anything, so this is provably not applied
@@ -185,6 +217,7 @@ export function createGraphClient({ baseUrl, expectedDatasetId = null, timeoutMs
   }
 
   async function reconcile(intention) {
+    intention = withNativeHistory(intention);   // #1762 S1b — the same intention update() sent
     let c;
     try { c = canonicalize(intention); } catch (e) {
       if (e instanceof ValidationError) return { outcome: 'REJECTED', reason: `validation: ${e.reason}` };

@@ -22,6 +22,7 @@
  * refuses to write if the arithmetic does not add up.
  */
 import fs from 'node:fs';
+import { assertDocumentNotRetired } from '../core/document-retired.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { appendEvent } from '../core/event-log.mjs';
 import { jsonLdToDomain } from '../core/jsonld.mjs';
@@ -38,6 +39,7 @@ if (!file || !executor || !dataset) {
   console.error('usage: node scripts/retire-collections-1624.mjs --board-data <path> --executor <url> --dataset <id> [--apply]');
   process.exit(2);
 }
+assertDocumentNotRetired(file);   // #1743 — at ENTRY, before any read of the graph or any write to history or the document (review 129-8036650)
 const eventsDir = process.env.SCRUM_EVENT_LOG_DIR || `${file.replace(/\.json$/, '')}-events`;
 const RS = 'https://scrumboard.local/ns#';
 const T = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';

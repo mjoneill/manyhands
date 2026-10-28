@@ -14,6 +14,7 @@
  * it is the row-level record of what was removed.
  */
 import fs from 'node:fs';
+import { assertDocumentNotRetired } from '../core/document-retired.mjs';
 import { createHash } from 'node:crypto';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { appendEvent } from '../core/event-log.mjs';
@@ -31,6 +32,7 @@ if (!file || !executor || !dataset) {
   console.error('usage: node scripts/retire-unit3-collections-1582.mjs --board-data <path> --executor <url> --dataset <id> [--apply]');
   process.exit(2);
 }
+assertDocumentNotRetired(file);   // #1743 — at ENTRY, before any read of the graph or any write to history or the document (review 129-8036650)
 const eventsDir = process.env.SCRUM_EVENT_LOG_DIR || `${file.replace(/\.json$/, '')}-events`;
 const RS = 'https://scrumboard.local/ns#';
 const T = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';

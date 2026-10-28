@@ -37,23 +37,64 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { loadRoster } from './core/roster-config.mjs';
 import { configureIdentities } from './core/identity.mjs';
 import { DEFAULT_HEARTBEAT_S } from './core/seat-binding.mjs';
 import { loadCredentials, resolveBearer, authDecision, readAuthMode } from './core/credentials.mjs';   // #1343 — succeeds #703's loader: hashes at rest, scope, expiry, mode
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { statSync as fsStatSync, readFileSync as fsReadFileSync } from 'node:fs';
 
-// The same roster the board serves — read once at boot from the optional,
-// gitignored roster.json. Falls back to the shipped example when absent.
-const ROSTER_SEATS = configureIdentities(loadRoster());
+// The same roster the board serves. #1764 — read from REST's GET /api/roster (the graph's configured seats, or the board's
+// roster.json where the collections unit is off), never from a file this process opens; the agents' invited seats are left
+// out, so this is still the CONFIGURED roster. Before the first good read it is the shipped example (what a missing file
+// gave); a failed read keeps the last good roster. Refreshed on a timer and once before listen() (below).
+let ROSTER_SEATS = configureIdentities(null);
+let _rosterRefresh = null;
+let _rosterFailing = null;
+const ROSTER_TIMEOUT_MS = Number(process.env.MCP_ROSTER_TIMEOUT_MS) || 5_000;
+const ROSTER_REFRESH_MS = Number(process.env.MCP_ROSTER_REFRESH_MS) || 5_000;
+function refreshRoster() {
+  _rosterRefresh ??= (async () => {
+    try {
+      const r = await apiCall('GET', '/api/roster', undefined, { signal: AbortSignal.timeout(ROSTER_TIMEOUT_MS) });
+      const seats = Object.fromEntries(Object.entries(r?.seats ?? {}).filter(([, v]) => v && v.agent !== true));
+      if (!Object.keys(seats).length) throw new Error('GET /api/roster answered no configured seats');
+      ROSTER_SEATS = configureIdentities(seats);
+      if (_rosterFailing) { _rosterFailing = null; console.error('#1764 roster: REST answers again'); }
+    } catch (e) {
+      if (!_rosterFailing) { _rosterFailing = e.message; console.error(`#1764 roster: GET /api/roster failed, keeping the last roster: ${e.message}`); }
+    } finally { _rosterRefresh = null; }
+    return ROSTER_SEATS;
+  })();
+  return _rosterRefresh;
+}
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createChannelScheduler } from './core/channel-scheduler.mjs';
 import { deliveryStaleMs, classifyDeliveries, boundedResidentReader } from './core/delivery.mjs';   // #1346
-import { mintOnce, claimWindow, readPool, writePool, recentWhispers } from './whisper-store.mjs';
+// #1786 — the whisper guards are GRAPH state (REST: /api/tending/windows, /api/tending/claims); this process keeps no
+// whisper-state.json and reads no whisper-pool.json. Only the pure prompt pick is local.
+import { mintFromPool } from './whisper-store.mjs';
 import { tendingTick, lastQualifyingActivity } from './core/tending-tick.mjs';
-import { tendingEnabled, quietAfterMinutes } from './tending-config.mjs';
+import { validateTendingConfig, DEFAULT_TENDING_CONFIG } from './tending-config.mjs';
+// #1785 — the tending switch and quiet threshold are GRAPH state (TendingState), read through REST, never from a file. A cached
+// copy answers the synchronous callers (the per-session tool surface, the ticks); it is refreshed from REST on a short timer
+// and fails CLOSED (tending OFF) when REST cannot answer or answers something malformed.
+// SINGLE-FLIGHT with a deadline: against a REST that hangs, a refresh per tick would otherwise stack one open request per tick
+// (#1388's leak shape). A read that times out keeps the switch CLOSED.
+let _tendingConfig = { ...DEFAULT_TENDING_CONFIG };
+let _tendingRefresh = null;
+const TENDING_CONFIG_TIMEOUT_MS = Number(process.env.MCP_TENDING_CONFIG_TIMEOUT_MS) || 5_000;
+function refreshTendingConfig() {
+  _tendingRefresh ??= (async () => {
+    try { _tendingConfig = validateTendingConfig(await apiCall('GET', '/api/tending-config', undefined, { signal: AbortSignal.timeout(TENDING_CONFIG_TIMEOUT_MS) })); }
+    catch { _tendingConfig = { ...DEFAULT_TENDING_CONFIG }; }
+    finally { _tendingRefresh = null; }
+    return _tendingConfig;
+  })();
+  return _tendingRefresh;
+}
+const tendingEnabled = () => _tendingConfig.enabled === true;
+const quietAfterMinutes = () => _tendingConfig.quietAfterMinutes;
 // #1216 — the daily digest: a whisper whose body is rendered from /api/checks
 // standing[] at fire time. Same quiet rule, same window discipline, same mint.
 import { digestTick } from './core/digest.mjs';
@@ -63,16 +104,11 @@ import { createDirectSegment } from './core/token-ring-direct.mjs';   // #1362
 // #1215 — the unregistered-thing emitter: the board announces a newly-seen
 // undeclared kind once, as itself. Reads the same standing[] the digest reads.
 import { emitterTick } from './core/unregistered-emitter.mjs';
-import { isGateArmed, decideCoveredAction } from './core/work-gate.mjs';
-import { openWorkObjectsAt } from './core/work-store.mjs';
-// #755 slice 2e — the INPUT PATH. Until this import existed, `core/work-tools.mjs`
-// had a green suite and zero callers, so no seat could create a work object and
-// signal 1 was unmeasurable BY CONSTRUCTION rather than merely unmeasured.
-import { workDeclare, workBid, workNobid, workContest, workGrant, workWithdraw, workList } from './core/work-tools.mjs';
-import { workLedgerSummary } from './core/in-flight.mjs';
+// #1763 — the retired work ledger's board_status summary: counts from the graph, never the file.
+import { retiredWorkLedger, WORK_LEDGER_COUNT_QUERY } from './core/in-flight.mjs';   // #1763
 // #755 BRANCH E — the claim throttle. Its own flag; see core/claim-throttle.mjs.
 import { decideThrottle, isThrottleArmed, COOLDOWN_MS } from './core/claim-throttle.mjs';
-import { readConfig } from './channel-config.mjs';
+import { validateConfig, DEFAULT_CONFIG } from './channel-config.mjs';
 import { createSeatRegistry } from './core/seat-registry.mjs';
 // #683 — only the KEY-BUILDING half is imported here. The cursor state lives
 // beside the event log, which REST owns; mcp-server owns identity and asks over
@@ -91,10 +127,34 @@ for (const level of ['log', 'error', 'warn']) {
   console[level] = (...args) => orig(new Date().toISOString(), ...args);
 }
 
-// #256–#266 — channel delivery is config-driven (settings page, #263). Mode +
-// timings come from channel-config.json, read LIVE per dispatch so a settings
-// change applies with NO restart. SCRUM_CHANNEL_STAGGER=off (harness) → immediate.
+// #256–#266 — channel delivery is config-driven (settings page, #263). SCRUM_CHANNEL_STAGGER=off (harness) → immediate.
+// #1784 — the mode and timings come from REST's GET /api/config (the graph's `channelConfig` node; channel-config.json only
+// where REST still holds the file), never from a file this process opens. A cache answers the scheduler's synchronous reads;
+// it is refreshed on a short timer (a saved change applies with no restart, within one refresh), single-flight with a
+// deadline (a hung REST must not stack one request per tick, #1388's shape). A failed or malformed read KEEPS THE LAST GOOD
+// config, so delivery never changes mode because REST blinked; before the first good read it is the default (soft), which is
+// what a missing file meant before.
 const CHANNEL_STAGGER_OFF = process.env.SCRUM_CHANNEL_STAGGER === 'off';
+let _channelConfig = validateConfig(DEFAULT_CONFIG);
+let _channelConfigRefresh = null;
+let _channelConfigFailing = null;
+const CHANNEL_CONFIG_TIMEOUT_MS = Number(process.env.MCP_CHANNEL_CONFIG_TIMEOUT_MS) || 5_000;
+const CHANNEL_CONFIG_REFRESH_MS = Number(process.env.MCP_CHANNEL_CONFIG_REFRESH_MS) || 5_000;
+function refreshChannelConfig() {
+  _channelConfigRefresh ??= (async () => {
+    try {
+      _channelConfig = validateConfig(await apiCall('GET', '/api/config', undefined, { signal: AbortSignal.timeout(CHANNEL_CONFIG_TIMEOUT_MS) }));
+      if (_channelConfigFailing) { _channelConfigFailing = null; console.error(`#1784 channel config: REST answers again (mode ${_channelConfig.mode})`); }
+    } catch (e) {
+      // keep the last good config; say so once when the reads start failing, not on every tick
+      if (!_channelConfigFailing) { _channelConfigFailing = e.message; console.error(`#1784 channel config: GET /api/config failed, keeping mode ${_channelConfig.mode}: ${e.message}`); }
+    }
+    finally { _channelConfigRefresh = null; }
+    return _channelConfig;
+  })();
+  return _channelConfigRefresh;
+}
+const readConfig = () => _channelConfig;   // #1784 — the six scheduler reads below, unchanged in shape
 
 // ── #495 — which board this adapter is FOR ───────────────────────────────
 //
@@ -187,13 +247,14 @@ function exampleAssignees() {
 // the ONLY reason enabling required a restart — a restart that on 2026-08-14
 // cut every seat's session and left the steward unreachable for ~35 minutes.
 //
-// `tendingEnabled()` re-reads its file on every call:
+// #1785 — `tendingEnabled()` answers from a cache of REST's /api/tending-config (graph state on TendingState; the file is
+// retired), refreshed before every whisper tick:
 //   TOOL SURFACE — buildMcpServer() runs per session, so a reconnect picks up
 //                  a change with no restart.
 //   THE TIMER    — armed ALWAYS; the tick asks per firing and no-ops when off.
 //                  (Same shape as channel-scheduler's getConfig() getter.)
 //
-// Fail-closed: a missing or malformed config file leaves tending OFF.
+// Fail-closed: REST unreachable, slow past its deadline, or answering something malformed leaves tending OFF.
 const WHISPER_TICK_MS = Number(process.env.MCP_WHISPER_TICK_MS ?? 60000);
 
 // #301 — bound request bodies (mirrors the REST server's #250 caps). :3001 is
@@ -258,7 +319,8 @@ function capConversations(list, limit) {
 // #119 — autonomous room. Sent as the MCP server's `instructions` so a
 // `claude --channels server:manyhands` session knows what a <channel>
 // block from this server means and how to respond to it.
-const CHANNEL_INSTRUCTIONS = `The manyhands commons is a shared, multi-agent channel (${Object.keys(ROSTER_SEATS).filter((k) => k !== 'wiki').join(', ')}).
+// #1764 — a function, so each new session names the roster as it is NOW (it refreshes from REST)
+const channelInstructions = () => `The manyhands commons is a shared, multi-agent channel (${Object.keys(ROSTER_SEATS).filter((k) => k !== 'wiki').join(', ')}).
 
 New commons posts arrive as <channel source="manyhands" chat_id="commons" message_id="..."> blocks — each is one message, formatted "author: body".
 
@@ -390,7 +452,7 @@ function buildMcpServer() {
     version: '0.1.0',
   }, {
     capabilities: { tools: {}, resources: {}, experimental: { 'claude/channel': {}, 'scrum/session': {} } },
-    instructions: CHANNEL_INSTRUCTIONS,
+    instructions: channelInstructions(),
   });
 
   // #823 — an unknown field must be REPORTED, never silently discarded.
@@ -511,115 +573,9 @@ function buildMcpServer() {
     return { ok: true, seatId: result.seatId, epoch: result.epoch, supersededSession: result.supersededSession, cursor };
   });
 
-  // ── #755 slice 2b — the enforced adapter, chosen ONCE at registration ──
-  //
-  // FLAG-OFF MEANS NOT INSTALLED. isGateArmed() is read HERE, outside every
-  // request, to decide WHICH FUNCTION IS REGISTERED. The alternative — a
-  // flag check inside the handler that returns early — would put the gate
-  // permanently in card_create's path and make one inverted boolean the
-  // entire safety story, while the suite stayed green because tests run with
-  // the flag ON.
-  //
-  // It matters more than it looks: neither prod service has restarted since
-  // Aug 7/8, so an UNRELATED restart is when this code first loads in
-  // production. With absence, that restart is a non-event. With a branch, it
-  // is a live arming nobody scheduled and nobody witnessed.
-  //
-  // #755 slice 2d — the store is LIVE. This is the line that turned the
-  // adapter from tested-and-inert into live-when-armed.
-  //
-  // ⚠️ It is still gated by the flag: with the flag off, gatedCardCreate is
-  // never registered, so none of this is in the request path at all.
-  //
-  // ⚠️ A missing store directory reads as ZERO open work objects rather than
-  // throwing. A rail whose failure mode is "card_create stops working" is
-  // worse than the problem it solves.
-  // ⛔ NO DEFAULT. isGateArmed() refuses to arm without SCRUM_WORK_STORE and
-  // refuses a path inside the repo, so if we are here the value exists and is
-  // outside the tree we publish. The first version defaulted to
-  // <repo>/work-objects — a new data stream in the public clone, inert only
-  // because the gate had never been armed. Arming would have created it.
-  const WORK_STORE_DIR = process.env.SCRUM_WORK_STORE;
-  const openWorkObjects = () => openWorkObjectsAt(WORK_STORE_DIR, new Date().toISOString());
-
+  // #1763 — the #755 work gate and its ledger are RETIRED (owner, 2026-10-27: "let it go"). No work gate is installed
+  // in any request path, whatever SCRUM_WORK_GATE / SCRUM_WORK_STORE say: the new code is inert against the old plist.
   const plainCardCreate = async (args) => jsonResult(await apiCall('POST', '/api/cards', args));
-
-  const gatedCardCreate = async (args) => {
-    const decision = decideCoveredAction({
-      actor: args.createdBy,
-      workObjects: openWorkObjects(),
-      now: new Date().toISOString(),
-    });
-    if (!decision.allow) {
-      reportRefusal({ actor: args.createdBy, rule: '#755 work gate', reason: decision.reason,
-        entity: { kind: 'card', id: decision.workObjectId || 'create' }, request: args, route: 'mcp card_create' });
-      return jsonResult({
-        refused: true,
-        rule: '#755 work gate',
-        reason: decision.reason,
-        workObjectId: decision.workObjectId,
-      });
-    }
-    return plainCardCreate(args);
-  };
-
-  // ── #889 — THE CARD-TARGETING GATE, which is the one that can actually refuse
-  //
-  // ⛔ card_create was the wrong tool to wrap. A create BRINGS a card into
-  // existence and so names none at decision time, which meant a card-scoped
-  // gate could never match it: production read `0 / 39 · does not fire` for a
-  // population that could not contain a violation. The declared work happens on
-  // a card that ALREADY EXISTS, so update and move are the acts a window is a
-  // mutex over.
-  //
-  // ⚠️ TWO PROPERTIES THIS SHAPE BUYS, both deliberate:
-  //
-  // 1. THE HOT PATH PAYS NOTHING. card_update is the board's most common write.
-  //    `openWorkObjects()` is a local file read and it short-circuits: with no
-  //    open windows — the normal state — nothing else happens, and in particular
-  //    no shortId resolution round-trip. A rail whose steady-state cost sits in
-  //    front of every edit is how a safety mechanism becomes the outage.
-  //
-  // 2. A UUID IS RESOLVED, NOT WAVED THROUGH. `id` is documented as "Card UUID
-  //    or shortId" and work objects store a shortId, so comparing the raw
-  //    argument would fail open on every UUID — a bypass one card_get wide,
-  //    while the rail went on reporting itself armed. We resolve, and only when
-  //    a refusal is actually possible.
-  const resolveShortId = async (id) => {
-    if (/^\d+$/.test(String(id))) return Number(id);
-    try {
-      const card = await apiCall('GET', `/api/cards/${encodeURIComponent(id)}`);
-      return typeof card?.shortId === 'number' ? card.shortId : null;
-    } catch {
-      // ⚠️ FAIL OPEN, and say why: a gate that refuses because a lookup failed
-      // turns every REST hiccup into "the board stops accepting edits". The
-      // window still binds the seat's OTHER ops; this one call goes through.
-      return null;
-    }
-  };
-
-  const gateCardTargeting = (plain) => async (args) => {
-    const objects = openWorkObjects();
-    if (objects.length === 0) return plain(args);
-
-    const decision = decideCoveredAction({
-      actor: args.by,
-      workObjects: objects,
-      now: new Date().toISOString(),
-      card: await resolveShortId(args.id),
-    });
-    if (!decision.allow) {
-      reportRefusal({ actor: args.by, rule: '#755 work gate', reason: decision.reason,
-        entity: { kind: 'card', id: args.id }, request: args, route: 'mcp card-targeting gate' });
-      return jsonResult({
-        refused: true,
-        rule: '#755 work gate',
-        reason: decision.reason,
-        workObjectId: decision.workObjectId,
-      });
-    }
-    return plain(args);
-  };
 
   // ── #755 BRANCH E — the claim throttle ───────────────────────────────────
   //
@@ -698,140 +654,22 @@ function buildMcpServer() {
     }
     : (inner) => inner;
 
-  // #790 — read the flag ONCE and keep the ANSWER, not the artefact built from
-  // it. The old form asked `cardCreateHandler === gatedCardCreate` below to
-  // decide whether to register the work tools; `withThrottle` returns a WRAPPER
-  // when the throttle is armed, so that identity went false by construction and
-  // all six work tools silently vanished from a server whose every flag read
-  // `on`. Arming one flag deleted a different flag's entire tool surface.
-  const gateArmed = isGateArmed();
-  const cardCreateHandler = gateArmed ? withThrottle(gatedCardCreate) : withThrottle(plainCardCreate);
+  const cardCreateHandler = withThrottle(plainCardCreate);   // #1763 — the claim throttle stays; the work gate is retired
 
-  // #889 — same FLAG-OFF-MEANS-NOT-INSTALLED shape as card_create: `gateArmed`
-  // is the one answer isGateArmed() produced, never a second read, and with the
-  // gate off the plain handler is what gets registered — the gate is not in the
-  // request path at all rather than being a branch inside it.
   const plainCardUpdate = async ({ id, ...patch }) =>
     jsonResult(await apiCall('PATCH', `/api/cards/${encodeURIComponent(id)}`, patch));
-  // ⚠️ `by` is FORWARDED, not just accepted. #889 added the field so the gate
-  // could see the actor; dropping it here would have made card_move the one
+  // ⚠️ `by` is FORWARDED, not just accepted. #889 added the field (for the since-retired work gate) so the actor is known;
+  // dropping it here would have made card_move the one
   // write whose author the event log never learns — a field validated and then
   // discarded, which is the defect this room keeps finding in other people's
   // code. card_update has always passed it through.
   const plainCardMove = async ({ id, column, by }) =>
     jsonResult(await apiCall('PATCH', `/api/cards/${encodeURIComponent(id)}`, { column, ...(by ? { by } : {}) }));
 
-  const cardUpdateHandler = gateArmed ? gateCardTargeting(plainCardUpdate) : plainCardUpdate;
-  const cardMoveHandler = gateArmed ? gateCardTargeting(plainCardMove) : plainCardMove;
+  const cardUpdateHandler = plainCardUpdate;
+  const cardMoveHandler = plainCardMove;
 
-  // ── #755 slice 2e — Work tools: the INPUT PATH ───────────────────
-  //
-  // ⚠️ Registered ONLY when the gate is armed, and the condition is not a
-  // second read of the flag — it is the SAME answer card_create's selection
-  // used. `isGateArmed()` is called exactly once in this file (a test asserts
-  // the count), so the tools' presence and the gate's arming cannot drift
-  // apart the way ENFORCED_OPS and the wrapped tool did.
-  //
-  // ⛔ #790 — this used to compare `cardCreateHandler === gatedCardCreate`,
-  // which is the same intent expressed over the wrong object: the HANDLER is
-  // built from the flag AND the throttle, so it stopped naming the flag the
-  // moment a second wrapper existed. Share the ANSWER, never an artefact
-  // downstream of it — an artefact acquires new dependencies and says nothing
-  // when it does.
-  //
-  // ⇒ FLAG-OFF MEANS NOT INSTALLED here too: with the gate off there is no
-  //   SCRUM_WORK_STORE, so a declaration would have nowhere to go. A tool that
-  //   accepts a bid it cannot persist is worse than no tool.
-  //
-  // ⚠️ `now` is read HERE and nowhere below. work-auction, work-store and
-  // work-tools all refuse a missing clock on purpose — this adapter is the one
-  // boundary where the wall clock legitimately enters, which is what keeps
-  // DESIGN B (state derived at read time) from decaying back into DESIGN A (a
-  // live timer that a restart silently drops).
-  if (gateArmed) {
-    const withCtx = (fn) => async (args) => jsonResult(fn({ ...args, dir: WORK_STORE_DIR, now: new Date().toISOString() }));
-
-    // The seat key, declared not authenticated — same contract as createdBy.
-    const by = z.string().min(1).describe('REQUIRED — your seat key. Who is answering. Declared, not authenticated.');
-    const id = z.string().min(1).describe('Work object id — short, opaque, and yours to choose (e.g. "w-755-wiring")');
-
-    // ⛔ There is no title, description, or note field on this surface, in any
-    // tool, deliberately. The prose lives on the CARD, which is an
-    // already-guarded surface; a work object is a POINTER. That is what makes
-    // "no PII can reach the work-object log" a structural property rather than
-    // a habit — there is no field for it to arrive in. A test asserts it.
-    mcp.registerTool('work_declare', {
-      description: 'Declare that you intend to do a piece of work, and open a reply window on it. '
-        + 'The other required seats bid, nobid, or contest; silence at replyBy grants it to you. '
-        + 'While your window is open you may not take a covered action (see #755). '
-        + '⭐ #1284 — anchor it with `card` OR `sourceMessageId`. Most asks arrive as a message '
-        + 'with no card, and that is the case every recorded collision started from.',
-      inputSchema: {
-        id,
-        by,
-        // ⛔ #1284 — OPTIONAL, and it was the schema that made it mandatory.
-        // `declare()` has defaulted card to null since #755 slice 2e and says
-        // so in its own comment; this allowlist is what the seats can reach,
-        // and zod strips what it omits, so a field absent HERE does not exist
-        // for any caller no matter what the core accepts (#534's defect).
-        card: z.number().int().optional().describe('The card shortId this work is about — a pointer, not a description. Optional: give this OR sourceMessageId.'),
-        // ⛔⛔ SHAPE-CONSTRAINED ON PURPOSE, and the constraint is the PII guard.
-        // This surface has NO free-text field by design — that is what makes
-        // "no PII can reach the work-object log" structural rather than a
-        // habit, and a test walks every work_* property to enforce it. A bare
-        // z.string() here would have been a "just a short note" field with a
-        // respectable name: it went red on the first full run, correctly.
-        //
-        // ⇒ A commons message id is a UUID (verified across the live feed), so
-        //   pinning the pattern keeps the anchor reachable AND keeps prose
-        //   structurally unable to arrive in it. An opaque key, same class as
-        //   `id` and `by` — not an exemption from the rule.
-        sourceMessageId: z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
-          .optional()
-          .describe('The commons message id (UUID) this work answers — the anchor for an ASK, which is what most requests are when they arrive. A room-wide ask has no card yet, and by the time two seats would reach for card_claim each has already decided to act. Give this OR card.'),
-        required: z.array(z.string()).min(1).describe('Seat keys who should answer. Their silence at replyBy is what grants.'),
-        replyByMinutes: z.number().positive().describe('REQUIRED, no default — how long the window stays open. '
-          + 'A bid without a deadline is not a window, it is an intention that resolves when the bidder decides it has.'),
-      },
-    }, withCtx(workDeclare));
-
-    mcp.registerTool('work_bid', {
-      description: 'Contest by also bidding: you want this work too. Sends the window to arbitration at close.',
-      inputSchema: { id, by },
-    }, withCtx(workBid));
-
-    mcp.registerTool('work_nobid', {
-      description: 'Decline this work. Once every required seat has answered, the window closes early rather than waiting out the clock.',
-      inputSchema: { id, by },
-    }, withCtx(workNobid));
-
-    mcp.registerTool('work_contest', {
-      description: 'Object to the declaration — the work is wrong, already done, or not yours to take. Suspends the grant pending arbitration.',
-      inputSchema: { id, by },
-    }, withCtx(workContest));
-
-    mcp.registerTool('work_grant', {
-      description: 'Record an explicit grant, resolving a contested window.',
-      inputSchema: { id, by, to: z.string().min(1).describe('Seat key the work is granted to') },
-    }, withCtx(workGrant));
-
-    // #886 — the remedy the gate's refusal already named. Until this line the
-    // message said "withdraw the bid" and no such tool existed, so a blocked
-    // seat's only reachable options were waiting out the clock or routing
-    // around the rail. One real seat chose to grant the work to herself, which
-    // recorded a settlement that never happened.
-    mcp.registerTool('work_withdraw', {
-      description: 'Close your OWN open window without taking the work. Only the seat that declared it may '
-        + 'withdraw it, and the record is kept — the window leaves `open`, it is not erased.',
-      inputSchema: { id, by },
-    }, withCtx(workWithdraw));
-
-    mcp.registerTool('work_list', {
-      description: 'What is in play and what has settled. Both DERIVED at read time from the transition log — '
-        + 'nothing is stored, so a restart changes nothing.',
-      inputSchema: {},
-    }, withCtx(workList));
-  }
+  // #1763 — the work tools (work_declare/bid/nobid/contest/grant/withdraw/list) are RETIRED: never registered.
 
   // ── Card tools ───────────────────────────────────────────────────
   mcp.registerTool('card_create', {
@@ -1262,25 +1100,22 @@ function buildMcpServer() {
     // that ARRIVED on time but settled slowly read as late.
     const receivedAt = new Date().toISOString();
     try {
-      return jsonResult(claimWindow({
-        seat,
-        prompt: { window },
-        now: receivedAt,
-        receivedAt,
-        reached: liveSeats(),
-        // #804 — one structured line per attempt, refusals included, stamped by
-        // the SERVER's clock. This is the only clock in the room no seat can be
-        // wrong about, and the ≤10s contention criterion is computed from these
-        // and nothing else. Deliberately carries no prompt content and no
-        // session id.
-        onAttempt: (a) => console.log(
-          `[#804] event=tending.claim_attempt receivedAt=${a.receivedAt}`
-          + ` completedAt=${a.completedAt}`
-          + ` demoAttemptId=${process.env.MCP_DEMO_ATTEMPT_ID ?? 'none'}`
-          + ` seat=${a.seat} key=${a.key} outcome=${a.outcome}`
-          + ` reason=${a.reason} heldBy=${a.heldBy ?? 'null'}`,
-        ),
-      }));
+      // #1786 — settled by REST under its write lock (one grant per window across every process), not in this process
+      const r = await claimApiCall('POST', '/api/tending/claims', { seat, window, receivedAt, reached: liveSeats() });
+      // #804 — one structured line per attempt, refusals included, stamped by
+      // the SERVER's clock. This is the only clock in the room no seat can be
+      // wrong about, and the ≤10s contention criterion is computed from these
+      // and nothing else. Deliberately carries no prompt content and no
+      // session id.
+      console.log(
+        `[#804] event=tending.claim_attempt receivedAt=${receivedAt}`
+        + ` completedAt=${new Date().toISOString()}`
+        + ` demoAttemptId=${process.env.MCP_DEMO_ATTEMPT_ID ?? 'none'}`
+        + ` seat=${seat} key=${window} outcome=${r.granted ? 'granted' : 'refused'}`
+        + ` reason=${r.reason} heldBy=${r.granted ? 'null' : (r.heldBy ?? 'null')}`,
+      );
+      if (r.status === 400) return jsonResult({ granted: false, reason: 'invalid', error: r.error });
+      return jsonResult(r);
     } catch (e) {
       return jsonResult({ granted: false, reason: 'invalid', error: String(e?.message ?? e) });
     }
@@ -1296,8 +1131,13 @@ function buildMcpServer() {
     },
   }, async ({ prompts } = {}) => {
     try {
-      const pool = prompts ? writePool(prompts) : readPool();
-      return jsonResult({ pool, history: recentWhispers().slice(-24) });
+      // #1786 — the pool is the graph's tending prompts and the history is the graph's grants, both read through REST.
+      // A rewrite here used to write whisper-pool.json, which nothing has read since the pool moved to the graph (#1189):
+      // a seat's edit would have silently changed nothing. So it refuses and names the route that does edit the pool.
+      if (prompts) return jsonResult({ error: 'whisper_pool no longer rewrites the pool: edit the prompts in Settings, or through POST /api/tending/whispers (create), PATCH /api/tending/whispers/<slug> (edit) and POST /api/tending/order (order)' });
+      const graph = await apiCall('GET', '/api/tending/whispers');
+      const { history } = await apiCall('GET', '/api/tending/claims?limit=24');
+      return jsonResult({ pool: (graph?.whispers ?? []).filter((w) => w.enabled !== false).map((w) => w.body), history });
     } catch (e) {
       return jsonResult({ error: String(e?.message ?? e) });
     }
@@ -2045,16 +1885,21 @@ function buildMcpServer() {
       + 'of work via an `apex:<label>` label, with their containment counts — "what lives here", no '
       + 'seat and no SPARQL needed). Bounded — safe as a first call. For full data use card_list / '
       + 'conversation_list, or the board-state resource. #1078: `inFlight` is THE answer to "what '
-      + 'is the room working on" — the claim is authoritative; the in-progress column and the '
-      + 'work-bid ledger are derived, and `inFlight.disagreements` names every card on which they '
-      + 'differ (stale leases, claimed-and-parked, in-progress-but-unclaimed). `workLedger` '
-      + 'summarises the bid/grant store work_list reads, with `dormant` computed rather than inferred.',
+      + 'is the room working on" — the claim is authoritative; the in-progress column is derived, and '
+      + '`inFlight.disagreements` names every card on which they differ (stale leases, claimed-and-parked, '
+      + 'in-progress-but-unclaimed). `workLedger` is `{retired: true, since, actions, workObjects}`: the #755 '
+      + 'work-bid ledger is RETIRED (#1763) and its tools no longer exist; the counts are its history in the '
+      + 'graph, or null with `unavailable` when the graph cannot be read.',
     inputSchema: {},
   }, async () => {
     const status = await apiCall('GET', '/api/board/status');
     // #1078 — the ledger lives on this process (SCRUM_WORK_STORE), not the REST
     // server, so the third surface is joined here. Absent store ⇒ says so.
-    const workLedger = workLedgerSummary(process.env.SCRUM_WORK_STORE, new Date().toISOString());
+    // #1763 — the ledger is retired: its counts come from the graph, and a graph that cannot answer leaves board_status whole
+    let workLedger;
+    // source: 'executor' — the graph that HOLDS the ledger. Never the in-process replica, whose empty answer would be a fabricated 0.
+    try { workLedger = retiredWorkLedger(await apiCall('POST', '/api/graph', { query: WORK_LEDGER_COUNT_QUERY, source: 'executor' })); }
+    catch (e) { workLedger = retiredWorkLedger({ error: e?.message || 'the graph query failed' }); }
     return jsonResult({ ...status, workLedger });
   });
 
@@ -2690,14 +2535,23 @@ const whisperTick = async () => {
     },
     // The pool and the shuffle flag both come from the graph, per firing, so a
     // change made in Settings applies to the very next tick.
-    mint: ({ now: n }) => mintOnce({
-      now: n, pool: poolEntries, shuffle: graphPool?.shuffle === true,
-      // The running position, derived from the last mint — so "in the order
-      // below" resumes after the whisper that actually went out last.
-      lastVersionId: graphPool?.lastVersionId ?? null,
-      // #1384 — where the shuffle-bag stands, so shuffle deals instead of draws.
-      bag: graphPool?.bag ?? null,
-    }),
+    // #1786 — PICK (pure), then RESERVE the window in the graph: REST answers 201 to the first reservation of a window
+    // and 409 to every later one, from any process, so a window is sent at most once. Not the mint: the TendingMint is
+    // recorded after delivery (onMinted), so a reservation whose post fails burns the window without claiming a firing.
+    mint: async ({ now: n }) => {
+      const prompt = mintFromPool({
+        now: n, pool: poolEntries, shuffle: graphPool?.shuffle === true,
+        // The running position, derived from the last mint — so "in the order
+        // below" resumes after the whisper that actually went out last.
+        lastVersionId: graphPool?.lastVersionId ?? null,
+        // #1384 — where the shuffle-bag stands, so shuffle deals instead of draws.
+        bag: graphPool?.bag ?? null,
+      });
+      if (!prompt) return null;
+      try { await apiCall('POST', '/api/tending/windows', { window: prompt.window, by: 'board' }); }
+      catch (e) { if (/HTTP 409\b/.test(String(e?.message))) return null; throw e; }   // 409: already sent this window
+      return prompt;
+    },
     post: (body) => apiCall('POST', '/api/conversations', body),
     // #1189 — every firing becomes a graph fact. Best-effort and AFTER the
     // post: the whisper reaching the room is the deliverable, and a mint that
@@ -2720,8 +2574,9 @@ const whisperTick = async () => {
     onError: (line) => console.error(line),
   });
 };
-// Armed unconditionally; the switch is asked per firing, not per process.
-setInterval(() => { if (tendingEnabled()) whisperTick(); }, WHISPER_TICK_MS).unref();
+// Armed unconditionally; the switch is asked per firing, not per process. #1785 — the cached switch is refreshed first.
+setInterval(() => { refreshTendingConfig().then(() => { if (tendingEnabled()) whisperTick(); }); }, WHISPER_TICK_MS).unref();
+const firstTendingRead = refreshTendingConfig();   // #1785 — awaited before listen(), so the first session sees the real switch
 
 // ── #1216 — THE DAILY DIGEST TICK ─────────────────────────────────────────
 //
@@ -4249,12 +4104,20 @@ process.on('unhandledRejection', (reason) => {
   console.error(`unhandledRejection — staying alive: ${reason}`);
 });
 
-httpServer.listen(MCP_PORT, '127.0.0.1', () => {
+// #1764 / #1784 — the roster's and the channel config's first answers (or their deadlines) before any session opens, then
+// each refreshes on its own timer. Read IN PARALLEL: boot waits for the slowest (each bounded by its own 5 s deadline),
+// never their sum. In sequence, a slow REST made boot ~10 s and outlasted the test harness's 8 s readiness wait (#787).
+setInterval(() => { refreshRoster(); }, ROSTER_REFRESH_MS).unref();
+setInterval(() => { refreshChannelConfig(); }, CHANNEL_CONFIG_REFRESH_MS).unref();
+await Promise.all([refreshRoster(), refreshChannelConfig()]);   // each catches its own failure and keeps its last value
+// #1785 — no session opens before the first tending read has answered (or timed out, closed): a session's tool surface is
+// fixed when it opens, so one opened earlier would keep the default (whisper tools absent) even with tending on.
+firstTendingRead.then(() => httpServer.listen(MCP_PORT, '127.0.0.1', () => {
   BOUND_PORT = httpServer.address().port;   // #1338
   console.log(`🤖 MCP server running at http://127.0.0.1:${MCP_PORT}/mcp`);
   console.log(`   REST API target: ${REST_API_BASE}`);
   console.log('   Wire into an MCP client: point it at the URL above over HTTP.');
-});
+}));
 
 httpServer.on('error', (e) => {
   if (e.code === 'EADDRINUSE') {

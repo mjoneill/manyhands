@@ -16,6 +16,8 @@ import { durableUpdate } from './durable-update.mjs';
 import { BK } from './graph-vocab.mjs';
 import { cardQuads, priorQuads, cardIriOf, SHORTID_COUNTER_IRI, shortIdMap } from './cards-graph.mjs';
 import { parseCardRefs } from './references.mjs';
+import { readPreparedOrigin } from './origin-commit.mjs';
+import { originPrepareOp, originCommitOp } from './graph-compiler.mjs';
 
 /** Does `card` name any of `shortIds` (a #N in its title or body, or a shortId in a relationship or a condition's blockers)? */
 function namesAny(card, shortIds) {
@@ -37,7 +39,25 @@ export class CardWriteConflict extends Error {
   constructor(reason) { super(`card write refused: ${reason}`); this.code = 'CARD_WRITE_CONFLICT'; }
 }
 
-export function createCardsUnit({ client, actorIri = (who) => `https://scrumboard.local/person/${encodeURIComponent(who || 'board')}`, mintId }) {
+// #1762 S1 — the EVENT-TIME facts of one card part, as the activity record carries them (contract on #1762, "S1 CONTRACT"):
+// what kind of change, the claim holder as it stood BEFORE the write, the columns, and the REST-visible version after it
+// (a delete: the last one). A fact that applies but is unknowable is UNKNOWN, never omitted.
+export const HISTORY_UNKNOWN = 'unknown';
+export function cardHistoryFacts(was, card) {
+  const vis = (c) => (c && Number.isSafeInteger(c.version) && c.version >= 0 ? String(c.version) : HISTORY_UNKNOWN);
+  const holder = was ? (typeof was.claimedBy === 'string' && was.claimedBy ? was.claimedBy : null) : null;
+  if (!card) return { op: 'delete', shortId: was?.shortId ?? null, holder, columnAfter: was?.column ?? HISTORY_UNKNOWN, versionAfter: vis(was) };
+  if (!was) return { op: 'create', shortId: card.shortId ?? null, holder: null, columnBefore: null, columnAfter: card.column ?? HISTORY_UNKNOWN, versionAfter: vis(card) };
+  // a part whose stored JSON is unchanged rides the write only because a #N it names appeared or disappeared: the board
+  // re-derived its references, nobody edited it (review on #1762 S1: an `update` here would read as a non-holder mutation)
+  if (JSON.stringify(was) === JSON.stringify(card)) return { op: 'reproject', shortId: card.shortId ?? null, holder, columnAfter: card.column ?? HISTORY_UNKNOWN, versionAfter: vis(card) };
+  const had = typeof was.claimedBy === 'string' && was.claimedBy, has = typeof card.claimedBy === 'string' && card.claimedBy;
+  const moved = (was.column ?? null) !== (card.column ?? null);
+  const op = !had && has ? 'claim' : had && !has ? 'release' : moved ? 'move' : 'update';
+  return { op, shortId: card.shortId ?? null, holder, ...(moved ? { columnBefore: was.column ?? HISTORY_UNKNOWN } : {}), columnAfter: card.column ?? HISTORY_UNKNOWN, versionAfter: vis(card) };
+}
+
+export function createCardsUnit({ client, actorIri = (who) => `https://scrumboard.local/person/${encodeURIComponent(who || 'board')}`, mintId, historyNative = false }) {
   /** id → { card (as stored), json (its JSON text), ver } in insertion order; null until loaded. */
   let byId = null;
   let counter = null;        // the graph's nextShortId (null: no counter node yet)
@@ -62,6 +82,12 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
     try { await load(); } catch (e) { uncertain = true; throw e instanceof CardsUnavailable ? e : new CardsUnavailable(e.message); }
   }
 
+  /** #1744 — a cached card's GRAPH version (urn:ex:ver), which a plan's reads pin; null when the card is not cached. */
+  function versionOf(id) {
+    if (!byId || uncertain) throw new CardsUnavailable('the card cache is not current');
+    return byId.get(id)?.ver ?? null;
+  }
+
   /** The cards as a fresh mutable array (a handler may edit it), and the next shortId the board should allocate. */
   function snapshot(fileNextShortId) {
     if (!byId || uncertain) throw new CardsUnavailable('the card cache is not current');
@@ -69,7 +95,7 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
   }
 
   /** The parts of ONE card.write that turn the cached cards into `cards` (null when nothing changed). */
-  function plan(cards, nextShortId) {
+  function plan(cards, nextShortId, { allNamers = false } = {}) {
     const before = shortIdMap([...byId.values()].map((r) => r.card));
     const after = shortIdMap(cards);
     const parts = [];
@@ -81,11 +107,11 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
       const was = byId.get(card.id);
       if (was && was.json === json) continue;
       parts.push(was
-        ? { iri: cardIriOf(card.id), expectedVersion: String(was.ver), version: String(was.ver + 1), quads: cardQuads(card, after), prior: priorQuads(was.card, before), json }
-        : { iri: cardIriOf(card.id), expectedVersion: null, version: '1', quads: cardQuads(card, after), json });
+        ? { iri: cardIriOf(card.id), expectedVersion: String(was.ver), version: String(was.ver + 1), quads: cardQuads(card, after), prior: priorQuads(was.card, before), json, ...(historyNative ? { history: cardHistoryFacts(was.card, card) } : {}) }
+        : { iri: cardIriOf(card.id), expectedVersion: null, version: '1', quads: cardQuads(card, after), json, ...(historyNative ? { history: cardHistoryFacts(null, card) } : {}) });
     }
     for (const [id, was] of byId) {
-      if (!seen.has(id)) parts.push({ iri: cardIriOf(id), remove: true, expectedVersion: String(was.ver), prior: priorQuads(was.card, before) });
+      if (!seen.has(id)) parts.push({ iri: cardIriOf(id), remove: true, expectedVersion: String(was.ver), prior: priorQuads(was.card, before), ...(historyNative ? { history: cardHistoryFacts(was.card, null) } : {}) });
     }
     // #1598 C12 — a create or a remove changes which #N resolve. Every UNCHANGED card that names a shortId that appeared or
     // disappeared is re-projected in the SAME write when its projection differs (the document model got this for free:
@@ -97,8 +123,10 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
         const was = card && byId.get(card.id);
         if (!was || inParts.has(cardIriOf(card.id)) || !namesAny(was.card, changed)) continue;
         const q0 = cardQuads(was.card, before), q1 = cardQuads(was.card, after);
-        if (JSON.stringify(q0) === JSON.stringify(q1)) continue;
-        parts.push({ iri: cardIriOf(card.id), expectedVersion: String(was.ver), version: String(was.ver + 1), quads: q1, prior: priorQuads(was.card, before), json: was.json });
+        // #1744 — under the index guard EVERY card naming the shortId rides the write (the guard requires exactly that set);
+        // its JSON is unchanged and only its graph version moves. Without the guard: today's projection-diff rule.
+        if (!allNamers && JSON.stringify(q0) === JSON.stringify(q1)) continue;
+        parts.push({ iri: cardIriOf(card.id), expectedVersion: String(was.ver), version: String(was.ver + 1), quads: q1, prior: priorQuads(was.card, before), json: was.json, ...(historyNative ? { history: cardHistoryFacts(was.card, was.card) } : {}) });
       }
     }
     const counterPart = nextShortId != null && Number(nextShortId) !== (counter ?? null) && (parts.length || counter == null)
@@ -111,15 +139,16 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
    * Write the difference between the cache and `cards` as ONE guarded update. APPLIED → the cache becomes `cards`.
    * Anything else → the cache is marked uncertain (reloaded before the next read) and the write is refused.
    */
-  async function commit(cards, nextShortId, { actor, opId, pending = [], collections = [] } = {}) {
+  async function commit(cards, nextShortId, { actor, opId, pending = [], collections = [], indexGuard = false } = {}) {
+    if (indexGuard !== false && indexGuard !== true && indexGuard !== 'marker') throw new TypeError('indexGuard must be true, "marker" or false');
     if (!byId || uncertain) throw new CardsUnavailable('the card cache is not current');
     // #1624 — collection parts (a K13 family's entities) ride the SAME update when this write also changed them.
-    const p = plan(cards, nextShortId) ?? (collections.length ? { parts: [], counter: null } : null);
+    const p = plan(cards, nextShortId, { allNamers: !!indexGuard }) ?? (collections.length ? { parts: [], counter: null } : null);
     if (!p) return { outcome: 'NOOP' };
     // K4 — only announcements whose card is a part of THIS write ride it (the others have no window to close).
     const inWrite = new Set(p.parts.filter((x) => !x.remove).map((x) => x.iri));
     const ride = pending.filter((a) => inWrite.has(cardIriOf(a.cardId))).map((a) => ({ card: cardIriOf(a.cardId), mutationId: a.mutationId, json: a.json }));
-    const intent = { kind: 'card.write', opId: opId || `urn:ex:op/card/${mintId()}`, actor: actorIri(actor), parts: p.parts, ...(p.counter ? { counter: p.counter } : {}), ...(ride.length ? { pending: ride } : {}), ...(collections.length ? { collections } : {}) };
+    const intent = { kind: 'card.write', opId: opId || `urn:ex:op/card/${mintId()}`, actor: actorIri(actor), parts: p.parts, ...(p.counter ? { counter: p.counter } : {}), ...(ride.length ? { pending: ride } : {}), ...(collections.length ? { collections } : {}), ...(indexGuard ? { indexGuard } : {}) };
     let r;
     try { r = await durableUpdate(client, intent); } catch (e) { uncertain = true; throw new CardsUnavailable(e.message); }
     if (r.outcome !== 'APPLIED') {
@@ -128,6 +157,12 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
       if (r.outcome === 'PRECONDITION_FAILED' || r.outcome === 'REJECTED') throw new CardWriteConflict(`${r.outcome}${r.reason ? `: ${r.reason}` : ''}`);
       throw new CardsUnavailable(`the write's outcome is ${r.outcome}${r.reason ? `: ${r.reason}` : ''}`);
     }
+    applied(cards, p);
+    return { outcome: 'APPLIED', parts: p.parts.length };
+  }
+
+  /** The cache becomes `cards` after an APPLIED write of plan `p`. */
+  function applied(cards, p) {
     const written = new Map(p.parts.filter((x) => !x.remove).map((x) => [x.iri, Number(x.version)]));
     const next = new Map();
     for (const card of cards) {
@@ -140,7 +175,49 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
     byId = next;
     if (p.counter) counter = Number(p.counter.next);
     gen++;
-    return { outcome: 'APPLIED', parts: p.parts.length };
+  }
+
+  /**
+   * #1629 s3 — the write of an ORIGIN-bearing route (claim, release, done-nudge, wiki-update, agent-rest/retire) in
+   * executor-owned mode: `origin.prepare` (its own guarded update: the descriptor and the frozen plan), then ONE
+   * card.write carrying the origin — the business change, the Origin, its Obligations, the reservations and the
+   * allocator advance under one guard (slice 2). The plan is this cache's own (`plan`), so the card parts are exactly
+   * what an ordinary write would send; card parts go in IRI order, as the origin plan requires. `describe(parts)` builds
+   * the descriptor from the ordered parts (an agent route's releasedCards follow them). A replayed prepare (the same
+   * mutationId) returns its original receipt, and the commit then uses the STORED occurredAt. UNKNOWN on either update is
+   * reconciled by durableUpdate under the same opId, never re-prepared under a new key (r2 R-A2). Returns
+   * {outcome:'APPLIED', mutationId}; PRECONDITION_FAILED/REJECTED throw CardWriteConflict; anything else CardsUnavailable.
+   */
+  async function commitOrigin(cards, nextShortId, { describe, collections = [], create = false, decorate = (parts) => parts, reads = [], walk = null, afterPrepare = null } = {}) {
+    if (!byId || uncertain) throw new CardsUnavailable('the card cache is not current');
+    // #1744 — a `create` origin (wiki-create) carries its counter advance and EVERY card naming the new shortId (the
+    // compiler's index guard requires exactly that set); any other origin still advances no counter
+    const p0 = plan(cards, nextShortId, { allNamers: create }) ?? (collections.length ? { parts: [], counter: null } : null);
+    if (!p0) return { outcome: 'NOOP' };
+    if (p0.counter && !create) throw new CardWriteConflict('REJECTED: an origin write advances no shortId counter (#1629 s3)');
+    const parts = decorate([...p0.parts].sort((a, b) => (a.iri < b.iri ? -1 : a.iri > b.iri ? 1 : 0)));
+    const descriptor = describe(parts);
+    const originPlan = { parts, ...(p0.counter ? { counter: p0.counter } : {}), ...(collections.length ? { collections } : {}), ...(reads.length ? { reads } : {}), ...(walk && parts.some((x) => x.reason === 'sibling-order') ? { walk } : {}) };
+    const actor = actorIri(descriptor.originActor);
+    const send = async (intent) => {
+      let r;
+      try { r = await durableUpdate(client, intent); } catch (e) { uncertain = true; throw new CardsUnavailable(e.message); }
+      return r;
+    };
+    const fail = (r) => {
+      if (r.outcome !== 'UNAVAILABLE') uncertain = true;
+      if (r.outcome === 'PRECONDITION_FAILED' || r.outcome === 'REJECTED') throw new CardWriteConflict(`${r.outcome}${r.reason ? `: ${r.reason}` : ''}`);
+      throw new CardsUnavailable(`the write's outcome is ${r.outcome}${r.reason ? `: ${r.reason}` : ''}`);
+    };
+    const prep = await send({ kind: 'origin.prepare', opId: originPrepareOp(descriptor.mutationId), actor, origin: descriptor, plan: originPlan });
+    if (prep.outcome !== 'APPLIED') fail(prep);
+    const P = await readPreparedOrigin(client, descriptor.mutationId);
+    if (!P.ok || !P.prepared) { uncertain = true; throw new CardsUnavailable(`the prepared origin could not be read back (${P.reason ?? 'absent'})`); }
+    if (afterPrepare) await afterPrepare(P.prepared);   // #1744 — a test-only barrier between the durable prepare and the commit
+    const r = await send({ kind: 'card.write', opId: originCommitOp(descriptor.mutationId), actor, ...originPlan, origin: { ...descriptor, occurredAt: P.prepared.occurredAt } });
+    if (r.outcome !== 'APPLIED') fail(r);
+    applied(cards, { parts, counter: p0.counter ?? null });
+    return { outcome: 'APPLIED', mutationId: descriptor.mutationId, occurredAt: P.prepared.occurredAt };
   }
 
   /** K5 — the outcome recorded for `opId` ('APPLIED', 'PRECONDITION_FAILED', …), or null when there is no receipt. Throws CardsUnavailable. */
@@ -185,7 +262,7 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
   }
 
   return {
-    load, ensureFresh, snapshot, plan, commit, reachable, receipt, pendingAnnouncements, postExists,
+    load, ensureFresh, snapshot, versionOf, plan, commit, commitOrigin, reachable, receipt, pendingAnnouncements, postExists,
     get generation() { return gen; }, get uncertain() { return uncertain; }, get loaded() { return byId != null; },
     markUncertain() { uncertain = true; },
   };

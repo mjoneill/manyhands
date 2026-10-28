@@ -68,7 +68,7 @@ jobs:
     name: server suite
     runs-on: ubuntu-latest
     # #1690 — the executor-backed tests now run here instead of skipping; the trial took 17 min against 20.
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       # #1690 — test the PR HEAD, not GitHub's merge ref, so the receipt's sha can be verified against the tree that
       # was tested. That is the tree that lands ONLY if the head is rebased onto current main and main fast-forwards
@@ -77,6 +77,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          # #1749 P4 — the cost rows run the BASE executor from history (`git show <base>:graph-executor/executor.py`);
+          # a shallow checkout has no base commit, and every P4 row then fails its precondition
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: '22'

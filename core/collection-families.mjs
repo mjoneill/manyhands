@@ -54,5 +54,12 @@ export function collectionFamilies({ cardsUnit = false } = {}) {
     // #1640 — the label aliases (core/label-aliases.mjs): one entity per alias spelling, its IRI derived from the alias. The alias
     // routes are collection-dependent: with the collections unreadable they answer 503, never an empty map read as "none".
     { key: 'labelAliases', routes: ['/api/labels/aliases'] },
+    // #1764 — the roster's configured seats (core/roster-graph.mjs): one entity per seat at /seat/<key> plus one roles node.
+    // Collection-dependent: with the collections unreadable GET /api/roster answers 503, never the shipped example as "yours".
+    { key: 'rosterSeats', routes: ['/api/roster'] },
+    // #1784 — the channel delivery config (core/channel-config-graph.mjs): ONE entity at a fixed IRI. Its route is
+    // collection-dependent: with the collections unreadable GET /api/config answers 503, never the default read as "saved".
+    // (The prefix also covers GET /api/config/limits, which then answers 503 too: harmless, since nothing can be saved then.)
+    { key: 'channelConfig', routes: ['/api/config'] },
   ];
 }

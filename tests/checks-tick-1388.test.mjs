@@ -21,9 +21,6 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import http from 'node:http';
 import { makeChecksTick } from '../core/checks-tick.mjs';
 import { startMcpServer } from './helpers/harness.mjs';
@@ -120,16 +117,15 @@ test('#1388 SEAM — against a REST that hangs, the running adapter opens ONE /a
   const rest = http.createServer((req, res) => {
     if (req.url.startsWith('/api/checks')) { checksHits += 1; return; }   // hang: never answer
     res.writeHead(200, { 'Content-Type': 'application/json' });
+    // #1785 — the tending switch is graph state served by REST, no longer a file the adapter reads
+    if (req.url.startsWith('/api/tending-config')) return res.end(JSON.stringify({ enabled: true, quietAfterMinutes: 69 }));
     res.end(req.url.startsWith('/api/conversations') ? '[]' : '{}');
   });
   await new Promise((r) => rest.listen(0, '127.0.0.1', r));
   const restApiBase = `http://127.0.0.1:${rest.address().port}`;
-  const tendingFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'tick-1388-')), 'tending.json');
-  fs.writeFileSync(tendingFile, JSON.stringify({ enabled: true, quietAfterMinutes: 69 }));
   const mcp = await startMcpServer({
     restApiBase,
     env: {
-      SCRUM_TENDING_CONFIG_FILE: tendingFile,
       MCP_WHISPER_TICK_MS: '150',          // six ticks per second of test
       MCP_CHECKS_TIMEOUT_MS: '30000',      // longer than the test: the hang must be guarded, not timed out
     },

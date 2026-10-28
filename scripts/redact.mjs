@@ -47,6 +47,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { loadDomain, saveDomain } from '../core/store.mjs';
+import { assertDocumentNotRetired } from '../core/document-retired.mjs';
 import { boardToDomain, domainToBoard } from '../core/mapping.mjs';
 import { readEvents, redactEntityEvents, findCarriers, REDACTION_MARKER } from '../core/event-log.mjs';
 
@@ -58,6 +59,7 @@ import { readEvents, redactEntityEvents, findCarriers, REDACTION_MARKER } from '
 const BOARD = process.env.SCRUM_BOARD_FILE
   || join(dirname(new URL(import.meta.url).pathname), '..', 'board-data.json');
 const EVENT_DIR = process.env.SCRUM_EVENT_LOG_DIR || `${BOARD.replace(/\.json$/, '')}-events`;
+assertDocumentNotRetired(BOARD);   // #1743 — at ENTRY, before any read of the graph or any write to history or the document (review 129-8036650)
 
 const argv = process.argv.slice(2);
 const flag = (name) => {

@@ -192,7 +192,7 @@ function ownBoardDirAtExit(dir) {
   boardDirsToRemove.add(dir);
 }
 
-export async function startRestServer({ board, boardFile: sharedBoardFile, staticDir, port, mcpNotifyUrl = '', env: extraEnv, allocatePort } = {}) {
+export async function startRestServer({ board, boardFile: sharedBoardFile, staticDir, port, mcpNotifyUrl = '', env: extraEnv, allocatePort, channelConfigFile } = {}) {
   const explicitPort = port;
   // #988 — the board file gets its OWN directory, not a bare file in the shared
   // tmpdir. server.js derives sibling paths from `dirname(SCRUM_BOARD_FILE)`
@@ -219,7 +219,10 @@ export async function startRestServer({ board, boardFile: sharedBoardFile, stati
   const attachmentsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'scrum-test-attach-'));
 
   // Isolated channel-config file (#263) so config-API tests never touch the real one.
-  const configFile = path.join(
+  // #1784 — a caller may name the file, to keep ONE channel-config file across restarts (the import-once rows); the caller
+  // then owns it, so stop() and a refused start leave it alone. Default unchanged: a fresh throwaway path per server.
+  const ownConfigFile = !channelConfigFile;
+  const configFile = channelConfigFile || path.join(
     os.tmpdir(),
     `scrum-test-chan-cfg-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
   );
@@ -243,6 +246,12 @@ export async function startRestServer({ board, boardFile: sharedBoardFile, stati
   // #1140 — SCRUM_PORT is set per ATTEMPT, after the isolation vars, so a retry
   // moves the port and nothing else. The isolation guarantee above is unchanged:
   // a caller's extraEnv still cannot reach the board file or the attachments dir.
+  // #1672's leak ratchet: a REFUSED start (a boot gate, a hold, a missing allocator) throws before any stop() exists, so
+  // the attachments dir and channel config made above are removed here, or every refused start leaks them
+  const cleanupOnRefusal = () => {
+    try { fs.rmSync(attachmentsDir, { recursive: true, force: true }); } catch { /* already gone */ }
+    if (ownConfigFile) { try { fs.unlinkSync(configFile); } catch { /* never written */ } }
+  };
   const { proc, stderr, baseUrl } = await startOnPort({
     port: explicitPort,
     allocatePort,
@@ -258,7 +267,7 @@ export async function startRestServer({ board, boardFile: sharedBoardFile, stati
       child.stderr.on('data', (d) => err.push(d.toString()));
       return { proc: child, stderr: err };
     },
-  });
+  }).catch((e) => { cleanupOnRefusal(); throw e; });
   void port;
 
   return {
@@ -303,10 +312,12 @@ export async function startRestServer({ board, boardFile: sharedBoardFile, stati
       } catch {
         /* already gone */
       }
-      try {
-        fs.unlinkSync(configFile);
-      } catch {
-        /* already gone */
+      if (ownConfigFile) {
+        try {
+          fs.unlinkSync(configFile);
+        } catch {
+          /* already gone */
+        }
       }
     },
   };

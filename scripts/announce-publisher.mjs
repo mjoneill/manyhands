@@ -201,8 +201,14 @@ export async function scan(call, batch, state, nowMs) {
     if (r.status === 404) { settle(id); continue; }   // gone since the read: nothing to do
     if (r.status >= 500) { fail(id, `HTTP ${r.status}`, true); continue; }
     const outcome = r.body && typeof r.body.status === 'string' ? r.body.status : null;
-    if (outcome === 'published' || outcome === 'blocked') { settle(id); continue; }
-    if (outcome === 'pending') { fail(id, `pending${r.body.reason ? `: ${r.body.reason}` : ''}`, false); continue; }
+    if (outcome === 'published' || outcome === 'blocked' || outcome === 'retired') { settle(id); continue; }
+    // #1749 A8 — a HELD obligation is never dispatched: logged by name, backed off like a pending, and not an error
+    if (outcome === 'pending' && r.body.code === 'DISPATCH_HELD') {
+      console.error(`announce-publisher: ${id} DISPATCH_HELD: held after a restore; not dispatched (only an executor --dispose-obligation settles it)`);
+      fail(id, 'DISPATCH_HELD', false); continue;
+    }
+    // #1629 s3 — an integrity fault is an ERROR, so it is reported (stderr, lastError); a plain pending is just a retry
+    if (outcome === 'pending') { fail(id, `pending${r.body.reason ? `: ${r.body.reason}` : ''}`, r.body.integrity === true); continue; }
     fail(id, `HTTP ${r.status}: unparseable answer`, true);
   }
   return counts;

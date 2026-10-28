@@ -28,6 +28,7 @@
  * Take a backup first: cp board-data.json backups/board-data-backup-$(date +%Y%m%d-%H%M%S).json
  */
 import fs from 'node:fs';
+import { assertDocumentNotRetired } from '../core/document-retired.mjs';
 import crypto from 'node:crypto';
 import { postSeqState } from '../core/post-seq.mjs';
 
@@ -37,6 +38,7 @@ const FILE = opt('--board-file');
 const DRY = args.includes('--dry-run');
 const ROLLBACK = args.includes('--rollback');
 if (!FILE) { console.error('usage: node scripts/migrate-post-seq-1592.mjs --board-file <path> [--dry-run] [--rollback]'); process.exit(2); }
+assertDocumentNotRetired(FILE);   // #1743 — at ENTRY, before any read of the graph or any write to history or the document (review 129-8036650)
 if (!fs.existsSync(FILE)) { console.error(`no such file: ${FILE}`); process.exit(2); }
 
 const raw = fs.readFileSync(FILE, 'utf8');

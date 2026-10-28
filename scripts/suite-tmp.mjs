@@ -107,14 +107,17 @@ function bytesUnder(p) {
   return n;
 }
 
-/** What a folder holds at its top level: { entries, bytes }. */
+/** What a folder holds at its top level: { entries, bytes, names }. */
 export function measure(dir) {
   let names = [];
-  try { names = fs.readdirSync(dir); } catch { return { entries: 0, bytes: 0 }; }
+  try { names = fs.readdirSync(dir); } catch { return { entries: 0, bytes: 0, names: [] }; }
   let bytes = 0;
   for (const name of names) bytes += bytesUnder(path.join(dir, name));
-  return { entries: names.length, bytes };
+  return { entries: names.length, bytes, names: names.sort() };
 }
+// #1760 — a leak line NAMES what leaked (top-level entry names only: temp prefixes plus random suffixes, never contents),
+// so a CI-only leak can be traced from the run that saw it. Bounded so one runaway file cannot flood the report.
+const nameList = (names) => (names.length ? `: ${names.slice(0, 12).join(', ')}${names.length > 12 ? `, … (+${names.length - 12} more)` : ''}` : '');
 
 /** The set of test files a run tolerates leaking: the JSON array at TMP_LEAK_BASELINE, else the checked-in one. */
 export function loadBaseline(root) {
@@ -281,8 +284,10 @@ export function teardown(suite, { root }) {
     if (m.entries > 0 && !listed) {
       failed = true;
       lines.push(`# tmp: ⛔ ${file} left ${m.entries} entries, ${m.bytes} bytes: a NEW leak (not on the baseline) — fails the run`);
+      lines.push(`# tmp:    leaked${nameList(m.names)}`);
     } else if (m.entries > 0) {
       lines.push(`# tmp: ${file} left ${m.entries} entries, ${m.bytes} bytes (on the baseline: a known leak)`);
+      lines.push(`# tmp:    leaked${nameList(m.names)}`);
     } else if (listed) {
       lines.push(`# tmp: ${file} left 0 entries: a candidate for removal from the baseline`);
     }
