@@ -7,8 +7,9 @@
  *
  * THE OBSERVABLE CONTRACT THESE ROWS PIN (proposed by the author of the rows from the #1799 done-when and the owner's proposed design; the reviewer may revise any line, as with #1637):
  *   A1  exit 75 AND a guard line at the START of a TAP line (`# self-aborted:` mid-run, or `# host guard: REFUSED` at launch) is a GUARD ABORT. It posts ONCE, as INCOMPLETE, and the post says the host was
- *       unfit and that there is no verdict. It never says RED, never says "unparsed", and never prints the all-clear.
- *   A2  its state member is `inc:host-guard`; it creates no `red:` member. The kept artifact's meta.json carries `aborted: true` (and `incomplete: true`); full.tap is kept.
+ *       unfit and that there is no verdict, and CARRIES THE NUMBERS the card asks for (load, ceiling, rows run). It never says RED, never says "unparsed", and never prints the all-clear.
+ *   A2  its state member is `inc:host-guard`; it creates no `red:` member. The kept artifact's meta.json carries `aborted: {load, ceiling, rowsRun}` (numbers parsed from the guard's line; the card's done-when item 1) and `incomplete: true`; full.tap is kept.
+ *       A launch refusal (`# host guard: REFUSED`) says `Nothing was run`, so its object is {load, ceiling, rowsRun: 0} (the author's reading; the reviewer may revise).
  *   A3  a REAL leaf failure in the partial TAP is still RED, naming its file, next to the INCOMPLETE guard post (states are independent, #1637 V3). A guard abort must never swallow a failure.
  *   A4  the fix keys on the guard's line AND exit 75: exit 75 with no guard line stays RED (an unknown non-zero is not waived); a guard-looking phrase in a TEST TITLE (not at a line start) with exit 1 stays RED.
  *   A5  the per-state mute holds: a repeat guard abort is muted; a genuine failure afterwards still fires; a clean run afterwards clears `inc:host-guard` and is silent-green.
@@ -90,7 +91,8 @@ const cut = (...parts) => `TAP version 13\n${BANNER}${parts.join('')}${ABORT()}`
 const members = (u) => { try { return Object.keys(JSON.parse(fs.readFileSync(u.state, 'utf8')).sigTimes ?? {}).sort(); } catch { return null; } };
 const artifactsOf = (u) => { const d = path.join(u.dir, 'artifacts'); return fs.existsSync(d) ? fs.readdirSync(d).map((x) => path.join(d, x)).filter((x) => fs.existsSync(path.join(x, 'meta.json'))).map((x) => ({ d: x, meta: JSON.parse(fs.readFileSync(path.join(x, 'meta.json'), 'utf8')) })) : []; };
 const isHostUnfit = (post) => /INCOMPLETE/.test(post) && /host unfit/i.test(post) && /no verdict/i.test(post);
-const guardAbortAsserts = (t, u, what) => {
+const hasNum = (post, n) => post.includes(String(n)) || post.includes(Number(n).toFixed(2));
+const guardAbortAsserts = (t, u, what, nums) => {
   assert.equal(t.posts.length, 1, `${what}: a guard abort posts exactly ONCE (the 09:47Z night posted two): ${JSON.stringify(t.posts.map((p) => p.slice(0, 120)))}`);
   assert.ok(isHostUnfit(t.posts[0]), `${what}: the post says INCOMPLETE, host unfit, no verdict: "${t.posts[0]?.slice(0, 300)}"`);
   assert.ok(!/\bRED\b/.test(t.posts[0]) && !/unparsed/i.test(t.posts[0]), `${what}: and never RED / "unparsed": "${t.posts[0]?.slice(0, 300)}"`);
@@ -100,8 +102,11 @@ const guardAbortAsserts = (t, u, what) => {
   assert.ok(m, `${what}: CONTROL: the state file was written and read`);
   assert.ok(m.includes('inc:host-guard'), `${what}: the state member is inc:host-guard; got ${JSON.stringify(m)}`);
   assert.ok(!m.some((k) => k.startsWith('red:')), `${what}: and there is no red: member; got ${JSON.stringify(m)}`);
-  const mine = artifactsOf(u).filter((a) => a.meta.aborted === true && a.meta.incomplete === true);
-  assert.equal(mine.length, 1, `${what}: the kept artifact's meta.json says {aborted:true, incomplete:true}; artifacts: ${JSON.stringify(artifactsOf(u).map((a) => a.meta))}`);
+  const mine = artifactsOf(u).filter((a) => a.meta.aborted && typeof a.meta.aborted === 'object' && a.meta.incomplete === true);
+  assert.equal(mine.length, 1, `${what}: the kept artifact's meta.json says {aborted:{...}, incomplete:true}; artifacts: ${JSON.stringify(artifactsOf(u).map((a) => a.meta))}`);
+  assert.deepStrictEqual(mine[0].meta.aborted, nums, `${what}: aborted is exactly {load, ceiling, rowsRun} as NUMBERS parsed from the guard's line (a bare true carries none of them); got ${JSON.stringify(mine[0].meta.aborted)}`);
+  assert.ok(hasNum(t.posts[0], nums.load) && hasNum(t.posts[0], nums.ceiling), `${what}: the post states the load ${nums.load} and the ceiling ${nums.ceiling}: "${t.posts[0]?.slice(0, 400)}"`);
+  if (nums.rowsRun > 0) assert.ok(hasNum(t.posts[0], nums.rowsRun), `${what}: and the rows run ${nums.rowsRun}: "${t.posts[0]?.slice(0, 400)}"`);
   assert.ok(fs.existsSync(path.join(mine[0].d, 'full.tap')), `${what}: full.tap kept`);
 };
 
@@ -114,10 +119,10 @@ test('G0 CONTROL: a genuine failing leaf with exit 1 is RED, names its file, and
   assert.ok(members(u)?.some((k) => k.startsWith('red:')), `and its member is red:...; got ${JSON.stringify(members(u))}`);
 });
 
-test('G1 MID-RUN ABORT (synthetic): exit 75 + the `# self-aborted:` line, zero failing rows, no summary -> ONE INCOMPLETE "host unfit, no verdict" post, member inc:host-guard, meta aborted:true', { timeout: 120000 }, async () => {
+test('G1 MID-RUN ABORT (synthetic): exit 75 + the `# self-aborted:` line, zero failing rows, no summary -> ONE INCOMPLETE "host unfit, no verdict" post, member inc:host-guard, meta aborted:{load,ceiling,rowsRun}', { timeout: 120000 }, async () => {
   N = 0; const u = universe();
   const t = await tick(u, cut(file('tests/a.test.mjs'), tOk('a'), tOk('b')), 75);
-  guardAbortAsserts(t, u, 'G1');
+  guardAbortAsserts(t, u, 'G1', { load: 13.52, ceiling: 10, rowsRun: 12 });
 });
 
 test('G2 REAL ARTIFACT: the reduced full.tap of the 09:47Z abort, exit 75 -> the same single INCOMPLETE host-unfit post (the incident, replayed)', { timeout: 120000 }, async () => {
@@ -125,13 +130,13 @@ test('G2 REAL ARTIFACT: the reduced full.tap of the 09:47Z abort, exit 75 -> the
   assert.match(real, /^# self-aborted: load crossed 13\.52 at 2026-10-28T09:47:12\.758Z/m, 'CONTROL: the fixture is the real abort tail, not a lookalike');
   assert.ok(!/^# tests \d+/m.test(real), 'CONTROL: and it has no summary line (the shape that read as "summary unparsed")');
   const t = await tick(u, real, 75);
-  guardAbortAsserts(t, u, 'G2');
+  guardAbortAsserts(t, u, 'G2', { load: 13.52, ceiling: 10, rowsRun: 1454 });
 });
 
 test('G3 LAUNCH REFUSAL: exit 75 + `# host guard: REFUSED to start` (nothing ran, no rows) -> the same INCOMPLETE host-unfit post, never RED', { timeout: 120000 }, async () => {
   N = 0; const u = universe();
   const t = await tick(u, `TAP version 13\n${REFUSED}`, 75);
-  guardAbortAsserts(t, u, 'G3');
+  guardAbortAsserts(t, u, 'G3', { load: 9.5, ceiling: 10, rowsRun: 0 });
 });
 
 test('G4 ABORT + A REAL FAILURE in the rows already run: RED still fires, naming the failing file (not "unparsed"), beside the INCOMPLETE host-unfit post', { timeout: 120000 }, async () => {
