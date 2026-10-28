@@ -11957,7 +11957,7 @@ function extractMentions(text) {
 // ⚠️ Derived from what the CONSTRUCTOR reads, not from the stored object's keys:
 // `id`, `mentions` and `createdAt` appear on the result but are computed here,
 // so a client that sends them is sending something the server will discard.
-const CONVERSATION_CONSUMED_FIELDS = new Set(['body', 'author', 'attachedTo', 'attachments', 'conversation']);   // #1401 — `conversation`: the talk tag
+const CONVERSATION_CONSUMED_FIELDS = new Set(['body', 'author', 'attachedTo', 'attachments', 'conversation', 'onBehalfOf']);   // #1401 — `conversation`: the talk tag · #1717 — `onBehalfOf`: the constructor stores it
 
 /**
  * Keys the caller sent that this route will silently drop. Empty when clean.
