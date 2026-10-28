@@ -205,7 +205,13 @@ test('A5 (review of 439adb3) a MALFORMED pending entry, one with no string oblig
   await withBoard(board, (s) => withProxy(s.baseUrl, async (proxy) => {
     const listed = (await api(s.baseUrl, 'GET', '/api/outbox?status=pending')).body?.entries ?? [];
     assert.ok(listed.some((e) => e && typeof e.obligationId !== 'string'), `PRECONDITION: the board lists the malformed entry as pending (${JSON.stringify(listed).slice(0, 300)})`);
-    const r = await runPublisher(proxy.base, tmp(), ['--audit-every-ms', HOUR_MS]);
+    // the FIRST run audits (no prior audit), and the survey's own count would mask the scan's; the SECOND run's audit is not
+    // due (--audit-every-ms 1 h), so its pendingCount is the scan's alone (the 439adb3 review: A5 passed on that script otherwise)
+    const dir = tmp();
+    await runPublisher(proxy.base, dir, ['--audit-every-ms', HOUR_MS]);
+    const before = proxy.unfiltered;
+    const r = await runPublisher(proxy.base, dir, ['--audit-every-ms', HOUR_MS]);
+    assert.equal(proxy.unfiltered, before, 'PRECONDITION: the asserted run did not audit, so the count is the scan\'s');
     assert.ok(!proxy.publishes.includes('m-bad:claim'), 'the malformed entry is never attempted');
     assert.equal(r.status.pendingCount, listed.length, `pendingCount counts every listed pending entry, the malformed one included (${r.status.pendingCount} of ${listed.length})`);
   }));
