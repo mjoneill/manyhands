@@ -22,14 +22,19 @@
  *   - --now replaces the wall clock for backoff decisions (requires --once). It must be a full, calendar-valid
  *     ISO-8601 timestamp with a zone, or the arguments are rejected.
  *
- * --once   one scan then one audit; exit 0 when both completed. A per-entry failure (a BLOCKED entry, a 5xx on one
+ * --once   one scan, then one audit. With --audit-every-ms given (#1775), the audit runs only when that long has passed
+ *          since the last audit attempt, read back from the status file. Exit 0 when everything attempted completed. A per-entry failure (a BLOCKED entry, a 5xx on one
  *          /publish, an unreachable or unparseable answer) is data, not an exit status. Exit 1 only when the
  *          outbox listing could not be obtained; exit 2 when the arguments are rejected.
  * default  loop forever on the nextActions() schedule (scan every 5 s, audit every 60 s).
  *
  * The status file is rewritten on every run/tick:
  *   {checkedAt, lastScanCompletedAt, pendingCount, oldestPendingAt, blockedCount, lastError, auditIntegrityFailures,
- *    attempted, deferred, publishErrors, backoff, firstSeenScan, scanCount}
+ *    lastAuditAt, lastAuditAttemptAt, attempted, deferred, publishErrors, backoff, firstSeenScan, scanCount}
+ * pendingCount and oldestPendingAt come from every scan; blockedCount and auditIntegrityFailures from the last
+ * SUCCESSFUL audit (lastAuditAt), carried between runs. ⚠️ null means UNKNOWN, never zero: measured 2026-10-27, the
+ * unfiltered survey (and even ?status=blocked, 36 s) outlasts the client's 15 s timeout on the live board until #1751
+ * makes origin reads cheap, so those two stay null and lastError names the audit.
  * attempted/deferred/publishErrors describe the last scan (null when its listing failed). backoff, firstSeenScan
  * and scanCount are the publisher's only state: they are read back from this same file at start, so they persist
  * between --once runs. It ENABLES detection of a dead publisher (a stale checkedAt); nothing consumes it yet.
@@ -104,6 +109,18 @@ export function stateFromStatus(prev) {
   return state;
 }
 
+/** #1775 — the audit's schedule and last results, read back from the status file so --once runs keep them. */
+export function auditFromStatus(prev) {
+  const ms = (v) => { const t = Date.parse(v); return typeof v === 'string' && Number.isFinite(t) ? t : null; };
+  const num = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : null);
+  const p = isPlainObject(prev) ? prev : {};
+  return {
+    lastAuditAt: ms(p.lastAuditAt), lastAuditAttemptAt: ms(p.lastAuditAttemptAt),
+    counts: { pendingCount: num(p.pendingCount), oldestPendingAt: typeof p.oldestPendingAt === 'string' ? p.oldestPendingAt : null,
+      blockedCount: num(p.blockedCount), auditIntegrityFailures: num(p.auditIntegrityFailures) },
+  };
+}
+
 function readPrevStatus(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
 }
@@ -119,7 +136,7 @@ function parseArgs(argv) {
     else if (a === '--once') out.once = true;
     else if (a === '--batch') out.batch = Number(val());
     else if (a === '--scan-every-ms') out.scanEveryMs = Number(val());
-    else if (a === '--audit-every-ms') out.auditEveryMs = Number(val());
+    else if (a === '--audit-every-ms') { out.auditEveryMs = Number(val()); out.auditEverySet = true; }
     else if (a === '--now') {
       const v = val();
       out.nowMs = parseIsoStrict(v);
@@ -130,6 +147,7 @@ function parseArgs(argv) {
   if (out.nowMs !== null && !out.once) throw new Error('--now requires --once (a fixed instant would freeze every backoff in the loop)');
   if (!out.board || !out.keyFile || !out.status) throw new Error('--board, --key-file and --status are required');
   if (!Number.isInteger(out.batch) || out.batch < 1) throw new Error('--batch must be a positive integer');
+  if (!Number.isSafeInteger(out.auditEveryMs) || out.auditEveryMs < 0) throw new Error('--audit-every-ms must be a non-negative integer');
   return out;
 }
 
@@ -164,6 +182,7 @@ async function readOutbox(call, query = '') {
  */
 export async function scan(call, batch, state, nowMs) {
   const { entries } = await readOutbox(call, '?status=pending');
+  const listedPending = entries.filter((e) => e && e.status === 'pending');
   const pending = entries.filter((e) => e && typeof e.obligationId === 'string');
   const pendingIds = new Set(pending.map((e) => e.obligationId));
   // An entry that is no longer pending (published, blocked, gone) leaves the state.
@@ -177,7 +196,11 @@ export async function scan(call, batch, state, nowMs) {
   const ordered = byAge.sort((a, b) => (state.firstSeenScan[a.obligationId] - state.firstSeenScan[b.obligationId])
     || (rank.get(a.obligationId) - rank.get(b.obligationId)));
 
-  const counts = { attempted: 0, deferred: 0, publishErrors: 0, lastError: null };
+  // #1775 — the pending counts come from THIS filtered read; the unfiltered survey is the audit's alone
+  const counts = { attempted: 0, deferred: 0, publishErrors: 0, lastError: null,
+    // counted over EVERY pending entry the listing returned, as the survey counted them: a malformed entry (no string
+    // obligationId) is never published, but it must stay visible in the count. `byAge` is re-sorted in place above.
+    pendingCount: listedPending.length, oldestPendingAt: listedPending.length ? (oldestFirst(listedPending)[0].payload?.occurredAt ?? null) : null };
   const settle = (id) => { delete state.backoff[id]; delete state.firstSeenScan[id]; };
   const fail = (id, reason, isError) => {
     const failures = (state.backoff[id]?.failures ?? 0) + 1;
@@ -238,25 +261,37 @@ function writeStatus(file, status) {
 }
 
 async function tick(opts, call, mem, { doScan, doAudit }) {
-  let fatal = null;
+  // #1775 — the scan and the audit fail SEPARATELY. A failed audit (the unfiltered survey reads every imported origin,
+  // one executor read each) never undoes or delays a scan, and the survey runs only when the audit is DUE, never as a
+  // side effect of every scan: before this, each --once run did the whole survey (about 10k executor calls a burst).
+  let scanFatal = null, auditFatal = null;
   let scanCounts = mem.scanCounts;
-  try {
-    if (doScan) {
+  if (doScan) {
+    try {
       scanCounts = null;
       const nowMs = opts.nowMs ?? Date.now();
       scanCounts = await scan(call, opts.batch, mem.state, nowMs);
       mem.lastScanCompletedAt = new Date().toISOString(); mem.lastScanAt = Date.now();
+      mem.counts.pendingCount = scanCounts.pendingCount;
+      mem.counts.oldestPendingAt = scanCounts.oldestPendingAt;
+    } catch (e) {
+      scanFatal = String(e?.message || e);
     }
-    if (doAudit || doScan) {
+  }
+  if (doAudit) {
+    mem.lastAuditAttemptAt = Date.now();   // an audit that fails is not retried on every loop tick
+    try {
       const s = await survey(call);
       Object.assign(mem.counts, s);
-      if (doAudit) mem.lastAuditAt = Date.now();
+      mem.lastAuditAt = mem.lastAuditAttemptAt;
+    } catch (e) {
+      auditFatal = `audit: ${String(e?.message || e)}`;
     }
-  } catch (e) {
-    fatal = String(e?.message || e);
   }
+  const fatal = scanFatal ?? auditFatal;
   mem.scanCounts = scanCounts;
   const lastError = fatal ?? scanCounts?.lastError ?? null;
+  const iso = (ms) => (ms == null ? null : new Date(ms).toISOString());
   writeStatus(opts.status, {
     checkedAt: new Date().toISOString(),
     lastScanCompletedAt: mem.lastScanCompletedAt,
@@ -265,6 +300,8 @@ async function tick(opts, call, mem, { doScan, doAudit }) {
     blockedCount: mem.counts.blockedCount,
     lastError,
     auditIntegrityFailures: mem.counts.auditIntegrityFailures,
+    lastAuditAt: iso(mem.lastAuditAt),
+    lastAuditAttemptAt: iso(mem.lastAuditAttemptAt),
     attempted: scanCounts?.attempted ?? null,
     deferred: scanCounts?.deferred ?? null,
     publishErrors: scanCounts?.publishErrors ?? null,
@@ -272,15 +309,14 @@ async function tick(opts, call, mem, { doScan, doAudit }) {
     firstSeenScan: mem.state.firstSeenScan,
     scanCount: mem.state.scanCount,
   });
-  return { fatal, lastError };
+  return { fatal, lastError, scanFatal };
 }
 
 async function main(argv) {
   let opts;
   try { opts = parseArgs(argv); } catch (e) { console.error(`announce-publisher: ${e.message}`); return 2; }
-  const mem = { lastScanAt: null, lastAuditAt: null, lastScanCompletedAt: null,
-    counts: { pendingCount: null, oldestPendingAt: null, blockedCount: null, auditIntegrityFailures: null },
-    scanCounts: null, state: stateFromStatus(readPrevStatus(opts.status)) };
+  const prev = readPrevStatus(opts.status);
+  const mem = { lastScanAt: null, lastScanCompletedAt: null, scanCounts: null, state: stateFromStatus(prev), ...auditFromStatus(prev) };
   let key;
   try { key = fs.readFileSync(opts.keyFile, 'utf8').trim(); } catch (e) {
     const msg = `key file unreadable: ${e.code || e.message}`;
@@ -291,16 +327,19 @@ async function main(argv) {
   }
   const call = makeClient(opts.board, key);
   if (opts.once) {
-    const { fatal, lastError } = await tick(opts, call, mem, { doScan: true, doAudit: true });
+    // #1775 — one scan always; the audit only when --audit-every-ms has passed since the last attempt (from the status file)
+    // without the flag, --once audits on every run, as it always has: the schedule is an explicit opt-in
+    const audit = !opts.auditEverySet || nextActions({ nowMs: Date.now(), lastScanAt: null, lastAuditAt: mem.lastAuditAttemptAt, scanEveryMs: opts.scanEveryMs, auditEveryMs: opts.auditEveryMs }).audit;
+    const { fatal, lastError } = await tick(opts, call, mem, { doScan: true, doAudit: audit });
     if (lastError) console.error(`announce-publisher: ${lastError}`);
     return fatal ? 1 : 0;
   }
   for (;;) {
-    const due = nextActions({ nowMs: Date.now(), lastScanAt: mem.lastScanAt, lastAuditAt: mem.lastAuditAt, scanEveryMs: opts.scanEveryMs, auditEveryMs: opts.auditEveryMs });
+    const due = nextActions({ nowMs: Date.now(), lastScanAt: mem.lastScanAt, lastAuditAt: mem.lastAuditAttemptAt, scanEveryMs: opts.scanEveryMs, auditEveryMs: opts.auditEveryMs });
     if (due.scan || due.audit) {
-      const { fatal, lastError } = await tick(opts, call, mem, { doScan: due.scan, doAudit: due.audit });
+      const { lastError, scanFatal } = await tick(opts, call, mem, { doScan: due.scan, doAudit: due.audit });
       if (lastError) console.error(`${new Date().toISOString()} announce-publisher: ${lastError}`);
-      if (fatal) mem.lastScanAt = Date.now();
+      if (scanFatal) mem.lastScanAt = Date.now();   // #1775 — only a failed SCAN waits a scan interval; a failed audit never moves it
     }
     await new Promise((r) => setTimeout(r, 250));
   }
