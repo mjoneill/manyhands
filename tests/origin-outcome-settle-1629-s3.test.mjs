@@ -1,0 +1,874 @@
+/**
+ * #1629 slice 3 — OUTCOME (R-A1) and SETTLEMENT (obligation.settle) rows, written before the build against draft r3 (#1629 v152:
+ * C1, C2, C3, §4), whose settlement sequence and outcome states were accepted for row authoring (non-builder review 45026). TEST
+ * AUTHOR's. Executor-level: a real executor, the slice-2 primitive as landed for prepare/commit, and the build's NEW read and record kind.
+ *
+ * NAMES THE BUILDER MAY CHANGE, IN ONE PLACE EACH (below, "the builder's names"): the outcome read's export and its state strings;
+ * the settle record kind, its transition field and its opId shape; the block reason set. Rows assert BEHAVIOUR through those names.
+ *
+ * OUTCOME, a pure read keyed by mutationId (r2 R-A1 as corrected by r3 C1):
+ *   O1  committed: prepare + commit APPLIED → `committed`
+ *   O2  UNKNOWN THAT COMMITTED: the commit is APPLIED in the executor but the caller's response is LOST (a proxy that forwards the
+ *       update and destroys the socket before answering); the caller saw no outcome; the read says `committed`
+ *   O3  refused: the card moved, the commit came back PRECONDITION_FAILED → `refused`
+ *   O4  UNRESOLVED (C1): Prepared, no link, no receipt → `unresolved`, and never a word meaning "never applied"
+ *   O5  unavailable: the executor is down → the read says unavailable/unknown, never a guessed state
+ *   O6  PURE: reading every outcome above changes neither the bookkeeping graph nor commitSeq
+ * SETTLEMENT, one guarded update keyed by obligationId whose proof the executor reads itself (r2 §4 with r3 C2: publish only after
+ * dispatch, one transition):
+ *   S0  CONTROL (runs on today's code): a committed origin's reserved post can be created with post.create from the reservation
+ *       (APPLIED, at the derived postId and reserved postSeq), so S1's proof exists to be read
+ *   S1  publish: with the post.create receipt APPLIED for the deterministic op, settle publish → APPLIED, the obligation reads published
+ *   S2  publish with NO post receipt → PRECONDITION_FAILED, the obligation stays pending, nothing changed
+ *   S3  publish when a WELL-FORMED publication of a DIFFERENT body sits at the deterministic op (receipt APPLIED, foreign digest),
+ *       forged beneath the compiler on a throwaway executor (G-R refuses it at the compiler) and read back before settle →
+ *       PRECONDITION_FAILED: post existence and an APPLIED receipt alone never satisfy the proof
+ *   S4  replay: the same settle publish again → APPLIED, nothing changes, commitSeq unchanged
+ *   S5  terminal: after published, settle block → PRECONDITION_FAILED, status stays published (never overwritten)
+ *   S6  block(tombstoned): the deterministic post exists and is redacted → APPLIED, the obligation reads blocked
+ *   S7  block(tombstoned) with no tombstone → PRECONDITION_FAILED; block with a reason outside the closed set, or without its origin
+ *       candidate, is refused before sending
+ *   S8  publish where the caller LIES about one candidate value at a time (body, author, postSeq, publicationAt) → each refused, still
+ *       pending; then the true values settle (CONTROL in the same world). Settle publish carries CANDIDATE publication values the executor
+ *       verifies against the bound obligation and reservation (amendment 45062/45064); S3 tries both candidates (true and foreign).
+ *   S9  a malformed stored proof (the reservation's draft removed) never settles, even with the true values
+ *   S11 a well-formed forged publication whose postSeq or publicationAt differs from the reservation, sent by a caller whose values match
+ *       its receipt digest, is refused by the reservation alone
+ *   S12 settle is bound to the COMMITTED ORIGIN (review R1, 45097): nine stored-proof tampers (the Origin gone; commitOp, committedBy or
+ *       reserveOpId foreign; the commit receipt not APPLIED, or APPLIED with a foreign digest; Origin/Prepared digests disagreeing), each
+ *       on its own origin with its real post, settled with the TRUE values: refused, still pending; an untouched origin settles
+ *   S15 block(tombstoned) is bound to the committed origin too (review R1b, 45182): every S12 tamper, each on its own origin whose real
+ *       post is REDACTED, then block(tombstoned) with the TRUE origin candidate → refused, still pending; an untouched redacted origin blocks
+ *   S13 the publication receipt's TERMS are strict (review R2): digest @en, digest typed, two digests, actor not the author's person
+ *   S10 the proof is the one BOUND to the origin: A's obligation re-linked to B's reservation (B's post real, receipt APPLIED) is refused with B's values
+ *       and with A's (45066: no caller identity field exists to lie about, so the binding is tested by a stored-binding tamper)
+ *
+ * THE RESERVATION BINDS THE POST (r5 G-R; scoped to a postId that names a slice-1 reservation):
+ *   GR1 POSITIVE (today and after): the reservation's own draft at its own postSeq is APPLIED and READS BACK with the frozen body
+ *   GR2 a different body → PRECONDITION_FAILED, NO post at the postId (read back), nothing new at the postSeq, allocator unchanged, pending
+ *   GR3 a different author, or different mentions → refused the same way
+ *   GR4 the frozen draft at a different postSeq → refused the same way
+ *   GR5 CONTROL (today and after): an UNRESERVED post.create applies and reads back as sent, with intention and receipt digests equal to
+ *       3e98961's (r6 §2: its compiled SPARQL is EXPECTED to change, so SPARQL bytes are not the instrument)
+ *   GR6 FAIL CLOSED (r6 §1): with the reservation's draft missing, its postSeq missing, two drafts, two postSeq values, the draft
+ *       language-tagged or typed (a non-xsd:string datatype), postSeq a string literal, two reservation subjects for the postId, or the
+ *       canonical reservation IRI's own postId field missing or wrong (45037), even the CORRECT post is refused and none is written.
+ *       Duplicate-field cases use DISTINCT values, since identical RDF triples collapse.
+ *
+ * NOTHING ALREADY AT THE SLOT'S POST (G-P, narrow amendment 45046): GP0 CONTROL an unobstructed commit (today and after); GP1 a triple at
+ *   the derived post IRI in the domain graph, GP1b the same in the bookkeeping graph only, GP2 any triple at the deterministic post op:
+ *   each refuses the origin commit with business state, allocator, reservations and obligations unchanged and Prepared still readable.
+ *
+ * Every row except S0, GR1, GR5 and GP0 was TODO until the slice-3 build landed the outcome read, the settle kind and the guards; the marker
+ * was lifted on 2026-10-22 (45084) once every row was ok at aab78f5, so each is now a plain test that fails CI.
+ *
+ * NOT covered, by name: the REST diagnostic route and /api/outbox's exclusion of Prepared records (C3; REST-level, owed with the
+ * wiring); RECONCILE_REQUIRED after a restore (B1, out of scope); the publisher's dispatch ordering (row L4a/L4b at REST); the
+ * complete endpoint refusing a caller-supplied APPLIED; legacy-proof-missing (M1, out of scope).
+ */
+import { test, after } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import http from 'node:http';
+import crypto from 'node:crypto';
+import { pathToFileURL, fileURLToPath } from 'node:url';
+import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-executor-proc.mjs';
+import { createGraphClient } from '../core/graph-client.mjs';
+import { canonicalize, digestOf } from '../core/graph-compiler.mjs';
+import { cardQuads, priorQuads, cardIriOf } from '../core/cards-graph.mjs';
+import { postCreateIntention, announcePostId, opIdFor } from '../core/announce-outbox.mjs';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+let M = null, modErr = null;
+try { M = await import(pathToFileURL(path.join(HERE, '..', 'core', 'origin-commit.mjs')).href); } catch (e) { modErr = e; }
+const need = () => assert.ok(M, `core/origin-commit.mjs does not exist (${modErr?.message?.slice(0, 120)})`);
+
+// ── the builder's names ──
+const OUTCOME_READ = () => M?.readOriginOutcome;   // (client, mutationId) → { ok, outcome } | { ok: false, reason }
+const OUTCOME = { committed: 'committed', refused: 'refused', unresolved: 'unresolved' };
+const NEVER_APPLIED_WORDS = /never.?applied|abandon/i;   // C1: an unresolved origin is never reported in these words
+const SETTLE_KIND = 'obligation.settle';
+// publish carries `publication: {payload, postSeq, publicationAt}`: CANDIDATE values the executor verifies against the bound obligation
+// and reservation before accepting the rebuilt receipt digest (amendment 45062/45064); block carries no publication
+// publish AND block carry `origin: {descriptor, plan, occurredAt}` (R1 interface 45098; block since R1b, 45185): the frozen preparation of the obligation's own
+// origin, as CANDIDATES the update verifies against the stored Prepared/Origin/commit receipt. It is attached here from the registry the
+// fixture fills when it prepares an origin, keyed by the obligation's mutationId, so a row cannot accidentally send another origin's.
+const ORIGIN_CANDIDATES = new Map();   // mutationId → { descriptor, plan, occurredAt }
+const settleIntention = (obligationId, transition, extra = {}) => {
+  const mid = String(obligationId).split(':')[0];
+  const origin = ORIGIN_CANDIDATES.has(mid) ? { origin: ORIGIN_CANDIDATES.get(mid) } : {};
+  return { kind: SETTLE_KIND, opId: `urn:ex:op/obligation/settle/${obligationId}/${transition}`, actor: PERSON('board'), obligationId, transition, ...origin, ...extra };
+};
+const BLOCK_REASONS = ['tombstoned'];
+
+const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)';
+const T = { skip: SKIP, timeout: 300000 };
+const TP = T;   // PENDING_BUILD lifted 2026-10-22 (45084): every row was ok at aab78f5; these rows now enforce CI as plain tests
+const DSID = 'og1629o';
+const BK = 'urn:scrum:bookkeeping:executor';
+const XSD = 'http://www.w3.org/2001/XMLSchema#';
+const NAMESPACE = 'cd807138-eefc-40d2-9a80-525e666e6269';
+const PS = (name) => `urn:ex:postseq/${name}`;
+const PERSON = (seat) => `https://scrumboard.local/person/${seat}`;
+const EPOCH = 'e-1629-s3o';
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function uuidv5(name, ns) {
+  const h = crypto.createHash('sha1').update(Buffer.concat([Buffer.from(ns.replace(/-/g, ''), 'hex'), Buffer.from(name, 'utf8')])).digest();
+  h[6] = (h[6] & 0x0f) | 0x50; h[8] = (h[8] & 0x3f) | 0x80;
+  const x = h.subarray(0, 16).toString('hex');
+  return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20, 32)}`;
+}
+const midOf = (route, subject, requestKey, originActor) => uuidv5(JSON.stringify(['origin-v1', route, subject, requestKey, originActor]), NAMESPACE);
+const card = (id, shortId, extra = {}) => ({ id, shortId, title: `card ${shortId}`, description: 'body', column: 'backlog', createdAt: '2026-10-22T06:00:00.000Z', createdBy: 'ada', version: 1, ...extra });
+const cpart = (c, expectedVersion, prior = null) => ({ iri: cardIriOf(c.id), expectedVersion, version: c.version, quads: cardQuads(c, new Map()), ...(prior ? { prior: priorQuads(prior, new Map()) } : {}), json: JSON.stringify(c) });
+function claimOrigin(c, requestKey, seat = 'ada') {
+  const mid = midOf('claim', c.id, requestKey, seat);
+  const descriptor = { route: 'claim', subject: c.id, requestKey, originActor: seat, mutationId: mid, provenance: { cardId: c.id, version: 2 }, slots: [{ slot: 'claim', author: 'board', body: `${seat} claimed #${c.shortId}`, mentions: [], notify: true }] };
+  return { mid, descriptor, plan: { parts: [cpart({ ...c, version: 2, claimedBy: seat }, '1', c)] } };
+}
+const prepareIntention = (o) => ({ kind: 'origin.prepare', opId: `urn:ex:op/origin/prepare/${o.mid}`, actor: PERSON(o.descriptor.originActor), origin: o.descriptor, plan: o.plan });
+const commitIntention = (o, occurredAt) => ({ kind: 'card.write', opId: `urn:ex:op/origin/commit/${o.mid}`, actor: PERSON(o.descriptor.originActor), ...o.plan, origin: { ...o.descriptor, occurredAt } });
+const lit = (v) => (typeof v === 'number' ? `"${v}"^^<${XSD}integer>` : JSON.stringify(String(v)));
+
+let seedN = 0;
+const STORES = [];
+after(() => { for (const d of STORES) fs.rmSync(d, { recursive: true, force: true }); });
+/** A proxy in front of the executor; `dropNextUpdate()` forwards the next /update and destroys the caller's socket before answering. */
+async function startProxy(execUrl) {
+  const p = { drop: false };
+  p.server = http.createServer(async (req, res) => {
+    const chunks = []; for await (const c of req) chunks.push(c);
+    const fwd = { ...req.headers }; delete fwd.host; delete fwd['content-length']; delete fwd.connection;
+    const dropThis = p.drop && req.url.startsWith('/update'); if (dropThis) p.drop = false;
+    try {
+      const f = await fetch(`${execUrl}${req.url}`, { method: req.method, headers: fwd, ...(req.method === 'POST' ? { body: Buffer.concat(chunks) } : {}) });
+      const t = await f.text();
+      if (dropThis) { p.dropped = { status: f.status, text: t }; req.socket.destroy(); return; }
+      res.statusCode = f.status; res.end(t);
+    } catch { try { req.socket.destroy(); } catch { /* gone */ } }
+  });
+  await new Promise((r) => p.server.listen(0, '127.0.0.1', r)); p.url = `http://127.0.0.1:${p.server.address().port}`;
+  p.dropNextUpdate = () => { p.drop = true; };
+  p.stop = () => new Promise((r) => { p.server.closeAllConnections?.(); p.server.close(() => r()); });
+  return p;
+}
+async function world(body, cards) {
+  need();
+  const store = tmpStore('og1629o-'); STORES.push(store); fs.rmSync(store, { recursive: true });
+  let exec = await startExecutor({ store, datasetId: DSID, create: true });
+  const proxy = await startProxy(exec.baseUrl);
+  const mk = (url) => createGraphClient({ baseUrl: url, expectedDatasetId: DSID, timeoutMs: 30000, label: 'origin-1629-s3-outcome' });
+  const ctx = { client: mk(exec.baseUrl), viaProxy: mk(proxy.url), proxy, exec: () => exec,
+    stopExecutor: async () => { await killExecutor(exec); exec = null; },
+  };
+  try {
+    const r = await fetch(`${exec.baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/og1629o-alloc-${process.pid}-${seedN++}` }, body: `INSERT DATA { GRAPH <${BK}> { <${PS('allocator')}> a <${PS('Allocator')}> ; <${PS('postSeqEpoch')}> ${lit(EPOCH)} ; <${PS('nextPostSeq')}> ${lit(100)} ; <${PS('version')}> ${lit(1)} . } }` });
+    assert.equal(r.status, 200, `PRECONDITION: the allocator was seeded (${await r.text()})`);
+    for (const c of cards) {
+      const w = await ctx.client.update({ kind: 'card.write', opId: `urn:ex:op/card/og1629o-seed-${process.pid}-${seedN++}`, actor: PERSON('ada'), parts: [cpart(c, null)] });
+      assert.equal(w.outcome, 'APPLIED', `PRECONDITION: fixture card ${c.id} created (${JSON.stringify(w)})`);
+    }
+    await body(ctx);
+  } finally { await proxy.stop(); if (exec) await killExecutor(exec); }
+}
+const rows = async (client, sparql) => { const q = await client.query(sparql); assert.ok(q.ok, `query answered (${q.reason})`); return q.rows; };
+const bkState = async (client) => (await rows(client, `SELECT ?s ?p ?o WHERE { GRAPH <${BK}> { ?s ?p ?o } }`)).map((r) => `${r.s.value} ${r.p.value} ${r.o.value}`).sort();
+async function prepared(client, o) {
+  assert.equal((await client.update(prepareIntention(o))).outcome, 'APPLIED', 'PRECONDITION: prepare APPLIED');
+  const p = await M.readPreparedOrigin(client, o.mid);
+  assert.equal(p.ok, true, `PRECONDITION: the Prepared record reads ok (${JSON.stringify(p).slice(0, 200)})`);
+  ORIGIN_CANDIDATES.set(o.mid, { descriptor: o.descriptor, plan: o.plan, occurredAt: p.prepared.occurredAt });
+  return p.prepared;
+}
+async function committed(client, o) {
+  const p = await prepared(client, o);
+  assert.equal((await client.update(commitIntention(o, p.occurredAt))).outcome, 'APPLIED', 'PRECONDITION: commit APPLIED');
+  const got = await M.readCommittedOrigin(client, o.mid);
+  assert.equal(got.ok, true, `PRECONDITION: the committed join reads ok (${JSON.stringify(got).slice(0, 200)})`);
+  return got.committed;
+}
+/** The reserved announcement's post.create, built from the committed reservation the way the publisher builds it from an entry. */
+function postFor(o, committedJoin, override = {}) {
+  const res = committedJoin.reservations[0], ob = committedJoin.obligations[0];
+  const d = res.draft;
+  return postCreateIntention({ mutationId: o.mid, slot: ob.slot, postSeq: res.postSeq, publicationAt: res.createdAt, payload: { author: d.author, body: d.body, originActor: d.originActor, occurredAt: d.occurredAt, mentions: d.mentions, ...override } });
+}
+/** The publication values the publisher built its post.create from: the reservation's frozen draft, postSeq and createdAt. */
+const publicationOf = (j, override = {}) => { const r = j.reservations[0]; return { payload: { ...r.draft, ...(override.payload || {}) }, postSeq: override.postSeq ?? r.postSeq, publicationAt: override.publicationAt ?? r.createdAt }; };
+/** The Obligation's OWN status triple(s), independent of the reservation join (45059). */
+const obligationStatusDirect = async (client, obligationId) => (await rows(client, `SELECT ?st WHERE { GRAPH <${BK}> { ?ob a <urn:ex:origin/Obligation> ; <urn:ex:origin/obligationId> ${JSON.stringify(obligationId)} ; <urn:ex:origin/status> ?st } }`)).map((x) => x.st.value);
+const obligationStatus = async (client, o) => (await M.readCommittedOrigin(client, o.mid)).committed?.obligations?.[0]?.status;
+async function outcome(client, mid) {
+  const read = OUTCOME_READ();
+  assert.equal(typeof read, 'function', 'the outcome read is exported (builder\'s name: readOriginOutcome)');
+  return read(client, mid);
+}
+
+// ── OUTCOME ──
+test('#1629 s3 (O1) committed: a prepared and committed origin reads `committed`', TP, async () => {
+  const c = card('o1', 1);
+  await world(async ({ client }) => {
+    const o = claimOrigin(c, 'k-o1');
+    await committed(client, o);
+    const r = await outcome(client, o.mid);
+    assert.equal(r.ok, true, JSON.stringify(r)); assert.equal(r.outcome, OUTCOME.committed, JSON.stringify(r));
+  }, [c]);
+});
+
+test('#1629 s3 (O2) UNKNOWN THAT COMMITTED: the commit applied but its response was lost; the read says `committed`', TP, async () => {
+  const c = card('o2', 1);
+  await world(async ({ client, viaProxy, proxy }) => {
+    const o = claimOrigin(c, 'k-o2');
+    const p = await prepared(client, o);
+    proxy.dropNextUpdate();
+    const seen = await viaProxy.update(commitIntention(o, p.occurredAt));
+    assert.notEqual(seen.outcome, 'APPLIED', `PRECONDITION: the caller did NOT see APPLIED (${JSON.stringify(seen).slice(0, 200)})`);
+    assert.equal(proxy.dropped?.status, 200, `PRECONDITION: the executor did answer the dropped update (${JSON.stringify(proxy.dropped).slice(0, 200)})`);
+    const r = await outcome(client, o.mid);
+    assert.equal(r.outcome, OUTCOME.committed, `O2: UNKNOWN that committed reads committed (${JSON.stringify(r)})`);
+  }, [c]);
+});
+
+test('#1629 s3 (O3) refused: after the card moved, the commit came back PRECONDITION_FAILED; the read says `refused`', TP, async () => {
+  const c = card('o3', 1);
+  await world(async ({ client }) => {
+    const o = claimOrigin(c, 'k-o3');
+    const p = await prepared(client, o);
+    assert.equal((await client.update({ kind: 'card.write', opId: `urn:ex:op/card/og1629o-move-${process.pid}`, actor: PERSON('ada'), parts: [cpart({ ...c, version: 2, title: 'moved' }, '1', c)] })).outcome, 'APPLIED');
+    assert.equal((await client.update(commitIntention(o, p.occurredAt))).outcome, 'PRECONDITION_FAILED', 'PRECONDITION: the commit was refused');
+    const r = await outcome(client, o.mid);
+    assert.equal(r.outcome, OUTCOME.refused, JSON.stringify(r));
+  }, [c]);
+});
+
+test('#1629 s3 (O4) UNRESOLVED: Prepared with no link and no receipt reads `unresolved`, never "never applied"', TP, async () => {
+  const c = card('o4', 1);
+  await world(async ({ client }) => {
+    const o = claimOrigin(c, 'k-o4');
+    await prepared(client, o);
+    const r = await outcome(client, o.mid);
+    assert.equal(r.outcome, OUTCOME.unresolved, JSON.stringify(r));
+    assert.doesNotMatch(JSON.stringify(r), NEVER_APPLIED_WORDS, 'C1: an unresolved origin is never reported as never applied');
+  }, [c]);
+});
+
+test('#1629 s3 (O5) unavailable: with the executor down the read reports it, never a guessed state', TP, async () => {
+  const c = card('o5', 1);
+  await world(async ({ client, stopExecutor }) => {
+    const o = claimOrigin(c, 'k-o5');
+    await committed(client, o);
+    await stopExecutor();
+    const r = await outcome(client, o.mid);
+    assert.equal(r.ok, false, `O5: not ok (${JSON.stringify(r)})`);
+    assert.ok(!Object.values(OUTCOME).includes(r.outcome), `O5: and no outcome state is guessed (${JSON.stringify(r)})`);
+  }, [c]);
+});
+
+test('#1629 s3 (O6) PURE: reading committed, refused and unresolved outcomes changes nothing in the bookkeeping graph', TP, async () => {
+  const a = card('o6a', 1), b = card('o6b', 2), u = card('o6u', 3);
+  await world(async ({ client }) => {
+    const oa = claimOrigin(a, 'k-o6a'), ob = claimOrigin(b, 'k-o6b'), ou = claimOrigin(u, 'k-o6u');
+    await committed(client, oa);
+    const pb = await prepared(client, ob);
+    assert.equal((await client.update({ kind: 'card.write', opId: `urn:ex:op/card/og1629o-o6-${process.pid}`, actor: PERSON('ada'), parts: [cpart({ ...b, version: 2, title: 'moved' }, '1', b)] })).outcome, 'APPLIED');
+    assert.equal((await client.update(commitIntention(ob, pb.occurredAt))).outcome, 'PRECONDITION_FAILED');
+    await prepared(client, ou);
+    const before = await bkState(client);
+    for (let i = 0; i < 2; i++) for (const o of [oa, ob, ou]) await outcome(client, o.mid);
+    assert.deepEqual(await bkState(client), before, 'O6: six outcome reads changed nothing in the bookkeeping graph (receipts and commitSeq included)');
+  }, [a, b, u]);
+});
+
+// ── SETTLEMENT ──
+test('#1629 s3 (S0 CONTROL, today) a committed origin\'s reserved post is created by post.create from its reservation, at the derived postId and reserved postSeq', T, async () => {
+  const c = card('s0', 1);
+  await world(async ({ client }) => {
+    const o = claimOrigin(c, 'k-s0');
+    const j = await committed(client, o);
+    const pc = postFor(o, j);
+    assert.equal(pc.post.id, announcePostId(o.mid, 'claim'), 'the post is at the derived postId');
+    assert.equal(pc.post.postSeq, j.reservations[0].postSeq, 'with the reserved postSeq');
+    const r = await client.update(pc);
+    assert.equal(r.outcome, 'APPLIED', `S0: the reserved post is created (${JSON.stringify(r).slice(0, 300)})`);
+    // the #1629 row convention (#1733 v20): an outcome claim names its read-back; the receipt alone is only what the executor answered
+    const got = Object.fromEntries((await rows(client, `SELECT ?p ?o WHERE { <https://scrumboard.local/entity/${pc.post.id}> ?p ?o }`)).map((x) => [x.p.value.split(/[#/]/).pop(), x.o.value]));
+    assert.equal(got.text, j.reservations[0].draft.body, `S0: the stored post reads back with the frozen body (${JSON.stringify(got)})`);
+    assert.equal(got.postSeq, String(j.reservations[0].postSeq), 'S0: at the reserved postSeq');
+    assert.equal(await obligationStatus(client, o), 'pending', 'S0: and the obligation still reads pending (nothing settles it on today\'s code)');
+  }, [c]);
+});
+
+test('#1629 s3 (S1) settle publish with the post receipt APPLIED: APPLIED, the obligation reads published', TP, async () => {
+  const c = card('s1', 1);
+  await world(async ({ client }) => {
+    const o = claimOrigin(c, 'k-s1');
+    const j = await committed(client, o);
+    assert.equal((await client.update(postFor(o, j))).outcome, 'APPLIED', 'PRECONDITION: the post exists');
+    const r = await client.update(settleIntention(j.obligations[0].obligationId, 'publish', { publication: publicationOf(j) }));
+    assert.equal(r.outcome, 'APPLIED', JSON.stringify(r).slice(0, 300));
+    assert.equal(await obligationStatus(client, o), 'published');
+  }, [c]);
+});
+
+test('#1629 s3 (S2) settle publish with NO post receipt: refused, the obligation stays pending, nothing changed', TP, async () => {
+  const c = card('s2', 1);
+  await world(async ({ client }) => {
+    const o = claimOrigin(c, 'k-s2');
+    const j = await committed(client, o);
+    const before = await bkState(client);
+    const r = await client.update(settleIntention(j.obligations[0].obligationId, 'publish', { publication: publicationOf(j) }));
+    assert.equal(r.outcome, 'PRECONDITION_FAILED', JSON.stringify(r).slice(0, 300));
+    assert.equal(await obligationStatus(client, o), 'pending');
+    const after = (await bkState(client)).filter((t) => !t.startsWith('urn:ex:op/') && !t.includes('urn:ex:commitSeq'));
+    assert.deepEqual(after, before.filter((t) => !t.startsWith('urn:ex:op/') && !t.includes('urn:ex:commitSeq')), 'nothing but the refusal receipt changed');
+  }, [c]);
+});
+
+/**
+ * A WELL-FORMED forged publication, made by the REAL compiler on a THROWAWAY executor that holds no reservation (so G-R is vacuous
+ * there), then copied term for term beneath the compiler into the world's executor (the GD pattern; 45050, 45056). Once G-R is built a
+ * mismatched post.create is refused at the compiler, so S3's state can only be reached beneath it.
+ */
+async function forgeWellFormed(targetExecUrl, foreign) {
+  const store = tmpStore('og1629o-forge-'); STORES.push(store); fs.rmSync(store, { recursive: true });
+  const ex = await startExecutor({ store, datasetId: 'og1629o-forge', create: true });
+  try {
+    const c = createGraphClient({ baseUrl: ex.baseUrl, expectedDatasetId: 'og1629o-forge', timeoutMs: 30000, label: 'og1629o-forge' });
+    const w = await c.update(foreign);
+    assert.equal(w.outcome, 'APPLIED', `PRECONDITION: the foreign publication applies where no reservation exists (${JSON.stringify(w).slice(0, 200)})`);
+    const term = (t) => {
+      if (t.type === 'uri') return `<${t.value}>`;
+      assert.equal(t.type, 'literal', `PRECONDITION: the forged triples hold no blank node (${JSON.stringify(t)})`);
+      const lex = JSON.stringify(t.value);
+      if (t['xml:lang']) return `${lex}@${t['xml:lang']}`;
+      return t.datatype && t.datatype !== `${XSD}string` ? `${lex}^^<${t.datatype}>` : lex;
+    };
+    const lines = { default: [], graphs: {} };
+    for (const iri of [`https://scrumboard.local/entity/${foreign.post.id}`, foreign.opId]) {
+      const dq = await c.query(`SELECT ?p ?o WHERE { <${iri}> ?p ?o }`);
+      const gq = await c.query(`SELECT ?g ?p ?o WHERE { GRAPH ?g { <${iri}> ?p ?o } }`);
+      assert.ok(dq.ok && gq.ok, 'PRECONDITION: the throwaway executor answered');
+      const inNamed = new Set(gq.rows.map((r) => `${r.p.value} ${JSON.stringify(r.o)}`));
+      for (const r of dq.rows) if (!inNamed.has(`${r.p.value} ${JSON.stringify(r.o)}`)) lines.default.push(`<${iri}> <${r.p.value}> ${term(r.o)} .`);
+      for (const r of gq.rows) (lines.graphs[r.g.value] ??= []).push(`<${iri}> <${r.p.value}> ${term(r.o)} .`);
+    }
+    const body = `INSERT DATA { ${lines.default.join(' ')} ${Object.entries(lines.graphs).map(([g, ts]) => `GRAPH <${g}> { ${ts.join(' ')} }`).join(' ')} }`;
+    const r = await fetch(`${targetExecUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/og1629o-forge-${process.pid}-${seedN++}` }, body });
+    assert.equal(r.status, 200, `PRECONDITION: the forged triples were copied in (${await r.text()})`);
+  } finally { await killExecutor(ex); }
+}
+
+test('#1629 s3 (S3) a well-formed APPLIED publication of a DIFFERENT body at the deterministic op (forged beneath the compiler): settle publish is refused with EITHER candidate', TP, async () => {
+  // two candidates (45064), each on its OWN origin so each settle uses the deterministic op once: (true) the reservation's values,
+  // which the foreign receipt's digest does not match; (foreign) the forged post's values, which the reservation does not match
+  const CANDIDATES = [['true values, foreign receipt', {}], ['foreign values, true reservation', { payload: { body: 'not what was frozen' } }]];
+  const cards = CANDIDATES.map((_, k) => card(`s3-${k}`, k + 1));
+  await world(async ({ client, exec }) => {
+    for (const [k, [label, candidate]] of CANDIDATES.entries()) {
+      const o = claimOrigin(cards[k], `k-s3-${k}`);
+      const j = await committed(client, o);
+      const frozen = postFor(o, j);
+      const foreign = postFor(o, j, { body: 'not what was frozen' });
+      await forgeWellFormed(exec().baseUrl, foreign);
+      // the injected state, read back before settle: foreign content at the reserved identity, an APPLIED receipt with the FOREIGN digest
+      const post = Object.fromEntries((await rows(client, `SELECT ?p ?o WHERE { <https://scrumboard.local/entity/${foreign.post.id}> ?p ?o }`)).map((x) => [x.p.value.split(/[#/]/).pop(), x.o.value]));
+      assert.equal(post.text, foreign.post.body, `${label}: injected read-back: the foreign body (${JSON.stringify(post)})`);
+      assert.equal(post.postSeq, String(j.reservations[0].postSeq), `${label}: injected read-back: at the reserved postSeq`);
+      const rc = Object.fromEntries((await rows(client, `SELECT ?p ?o WHERE { GRAPH <${BK}> { <${frozen.opId}> ?p ?o } }`)).map((x) => [x.p.value, x.o.value]));
+      assert.equal(rc['urn:ex:outcome'], 'urn:ex:APPLIED', `${label}: injected read-back: the receipt says APPLIED (${JSON.stringify(rc)})`);
+      assert.equal(rc['urn:ex:digest'], digestOf(canonicalize(foreign)), `${label}: injected read-back: with the foreign publication's digest`);
+      assert.notEqual(rc['urn:ex:digest'], digestOf(canonicalize(frozen)), `${label}: injected read-back: not the frozen payload's`);
+      const r = await client.update(settleIntention(j.obligations[0].obligationId, 'publish', { publication: publicationOf(j, candidate) }));
+      assert.equal(r.outcome, 'PRECONDITION_FAILED', `S3 (${label}): post existence and an APPLIED receipt never satisfy the proof alone (${JSON.stringify(r).slice(0, 300)})`);
+      assert.deepEqual(await obligationStatusDirect(client, j.obligations[0].obligationId), ['pending'], `S3 (${label}): read-back: the obligation stays pending`);
+    }
+  }, cards);
+});
+
+test('#1629 s3 (S4) replay of settle publish: APPLIED again, nothing changes', TP, async () => {
+  const c = card('s4', 1);
+  await world(async ({ client }) => {
+    const o = claimOrigin(c, 'k-s4');
+    const j = await committed(client, o);
+    assert.equal((await client.update(postFor(o, j))).outcome, 'APPLIED');
+    const s = settleIntention(j.obligations[0].obligationId, 'publish', { publication: publicationOf(j) });
+    assert.equal((await client.update(s)).outcome, 'APPLIED');
+    const before = await bkState(client);
+    assert.equal((await client.update(s)).outcome, 'APPLIED', 'the replay returns the original receipt');
+    assert.deepEqual(await bkState(client), before, 'and changed nothing (commitSeq included)');
+  }, [c]);
+});
+
+test('#1629 s3 (S5) terminal: after published, settle block is refused and the status stays published', TP, async () => {
+  const c = card('s5', 1);
+  await world(async ({ client }) => {
+    const o = claimOrigin(c, 'k-s5');
+    const j = await committed(client, o);
+    assert.equal((await client.update(postFor(o, j))).outcome, 'APPLIED');
+    assert.equal((await client.update(settleIntention(j.obligations[0].obligationId, 'publish', { publication: publicationOf(j) }))).outcome, 'APPLIED');
+    const pid = announcePostId(o.mid, 'claim');
+    assert.equal((await client.update({ kind: 'post.redact', opId: `urn:ex:op/redact/${pid}`, actor: PERSON('ada'), post: { id: pid }, authorityRef: 'test-authority-ref', occurredAt: '2026-10-22T12:00:00.000Z' })).outcome, 'APPLIED', 'PRECONDITION: a tombstone exists, so only the terminal state can refuse the block');
+    const r = await client.update(settleIntention(j.obligations[0].obligationId, 'block', { reason: 'tombstoned' }));
+    assert.equal(r.outcome, 'PRECONDITION_FAILED', JSON.stringify(r).slice(0, 300));
+    assert.equal(await obligationStatus(client, o), 'published', 'a terminal state is never overwritten');
+  }, [c]);
+});
+
+test('#1629 s3 (S6) block(tombstoned) on a pending obligation whose post is redacted: APPLIED, it reads blocked', TP, async () => {
+  const c = card('s6', 1);
+  await world(async ({ client }) => {
+    const o = claimOrigin(c, 'k-s6');
+    const j = await committed(client, o);
+    assert.equal((await client.update(postFor(o, j))).outcome, 'APPLIED');
+    const pid = announcePostId(o.mid, 'claim');
+    assert.equal((await client.update({ kind: 'post.redact', opId: `urn:ex:op/redact/${pid}`, actor: PERSON('ada'), post: { id: pid }, authorityRef: 'test-authority-ref', occurredAt: '2026-10-22T12:00:00.000Z' })).outcome, 'APPLIED', 'PRECONDITION: the deterministic post is tombstoned');
+    const r = await client.update(settleIntention(j.obligations[0].obligationId, 'block', { reason: 'tombstoned' }));
+    assert.equal(r.outcome, 'APPLIED', JSON.stringify(r).slice(0, 300));
+    assert.equal(await obligationStatus(client, o), 'blocked');
+  }, [c]);
+});
+
+test('#1629 s3 (S7) block(tombstoned) without a tombstone is refused; a reason outside the closed set never reaches the store', TP, async () => {
+  const c = card('s7', 1);
+  await world(async ({ client }) => {
+    const o = claimOrigin(c, 'k-s7');
+    const j = await committed(client, o);
+    const r = await client.update(settleIntention(j.obligations[0].obligationId, 'block', { reason: 'tombstoned' }));
+    assert.equal(r.outcome, 'PRECONDITION_FAILED', JSON.stringify(r).slice(0, 300));
+    assert.equal(await obligationStatus(client, o), 'pending');
+    assert.ok(!BLOCK_REASONS.includes('because-i-said-so'));
+    assert.throws(() => canonicalize(settleIntention(j.obligations[0].obligationId, 'block', { reason: 'because-i-said-so' })), 'a reason outside the closed set is refused at canonicalization');
+    const { origin: _o, ...noOrigin } = settleIntention(j.obligations[0].obligationId, 'block', { reason: 'tombstoned' });
+    assert.ok(_o, 'PRECONDITION: the helper attaches the origin candidate to block');
+    assert.throws(() => canonicalize(noOrigin), 'a block without its origin candidate is refused at canonicalization (45185)');
+  }, [c]);
+});
+
+test('#1629 s3 (S8) the caller LIES about one publication value at a time (body, author, postSeq, publicationAt): each refused, still pending; the true values settle', TP, async () => {
+  // each lie gets its OWN origin, so every settle uses the deterministic settle op exactly once: a refusal's receipt at that op can
+  // never be what refuses the next attempt, and the outcome asserted is the guard's, PRECONDITION_FAILED, not a shape refusal
+  const LIES = [
+    ['a body that is not the reservation draft\'s', (res) => ({ payload: { body: 'a lie' } })],
+    ['an author that is not the reservation draft\'s', (res) => ({ payload: { author: 'ada' } })],
+    ['a postSeq that is not the reservation\'s', (res) => ({ postSeq: res.postSeq + 1 })],
+    ['a publicationAt that is not the reservation\'s createdAt', (res) => ({ publicationAt: '2026-10-22T00:00:00.000Z' })],
+  ];
+  const cards = [...LIES.map((_, k) => card(`s8-${k}`, k + 1)), card('s8-ok', LIES.length + 1)];
+  await world(async ({ client }) => {
+    for (const [k, [label, lie]] of LIES.entries()) {
+      const o = claimOrigin(cards[k], `k-s8-${k}`);
+      const j = await committed(client, o);
+      assert.equal((await client.update(postFor(o, j))).outcome, 'APPLIED', `PRECONDITION (${label}): the real post exists`);
+      const r = await client.update(settleIntention(j.obligations[0].obligationId, 'publish', { publication: publicationOf(j, lie(j.reservations[0])) }));
+      assert.equal(r.outcome, 'PRECONDITION_FAILED', `S8 (${label}): refused by the guard (${JSON.stringify(r).slice(0, 300)})`);
+      assert.deepEqual(await obligationStatusDirect(client, j.obligations[0].obligationId), ['pending'], `S8 (${label}): read-back: still pending`);
+    }
+    // CONTROL in the same world: an untouched origin's true values settle, so each lie above was refused for its lie
+    const o = claimOrigin(cards[LIES.length], 'k-s8-ok');
+    const j = await committed(client, o);
+    assert.equal((await client.update(postFor(o, j))).outcome, 'APPLIED');
+    const ok = await client.update(settleIntention(j.obligations[0].obligationId, 'publish', { publication: publicationOf(j) }));
+    assert.equal(ok.outcome, 'APPLIED', `S8 CONTROL: the true values settle (${JSON.stringify(ok).slice(0, 300)})`);
+    assert.deepEqual(await obligationStatusDirect(client, j.obligations[0].obligationId), ['published'], 'S8 CONTROL: read-back: published');
+  }, cards);
+});
+
+test('#1629 s3 (S9) a MALFORMED stored proof (the reservation\'s draft removed) never settles, even with the true publication values', TP, async () => {
+  const c = card('s9', 1);
+  await world(async ({ client, exec }) => {
+    const o = claimOrigin(c, 'k-s9');
+    const j = await committed(client, o);
+    const pc = postFor(o, j);
+    assert.equal((await client.update(pc)).outcome, 'APPLIED', 'PRECONDITION: the real post exists');
+    const r0 = await fetch(`${exec().baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/og1629o-s9-${process.pid}-${seedN++}` }, body: `DELETE WHERE { GRAPH <${BK}> { <urn:ex:postseq/reservation/${pc.post.id}> <urn:ex:postseq/draftJson> ?d } }` });
+    assert.equal(r0.status, 200, `PRECONDITION: the reservation's draft was removed (${await r0.text()})`);
+    assert.equal((await rows(client, `SELECT ?d WHERE { GRAPH <${BK}> { <urn:ex:postseq/reservation/${pc.post.id}> <urn:ex:postseq/draftJson> ?d } }`)).length, 0, 'PRECONDITION: read-back: no draft remains');
+    const r = await client.update(settleIntention(j.obligations[0].obligationId, 'publish', { publication: publicationOf(j) }));
+    assert.equal(r.outcome, 'PRECONDITION_FAILED', `S9: refused (${JSON.stringify(r).slice(0, 300)})`);
+    assert.deepEqual(await obligationStatusDirect(client, j.obligations[0].obligationId), ['pending'], 'S9: read-back: still pending');
+  }, [c]);
+});
+
+test('#1629 s3 (S10) settle uses the proof BOUND to its own origin: with A\'s obligation re-linked to B\'s reservation (B\'s post real, its receipt APPLIED), settling A is refused with either candidate', TP, async () => {
+  // 45066: identities are derived from the committed origin, so there is no caller field to lie about; what must be shown is that the
+  // implementation reads THIS obligation's own derived postId/op, not whatever record a link points at. The tamper re-points A's stored
+  // `reservation` link at B's reservation, whose post and APPLIED receipt are real and well-formed. Each candidate on its own origin pair.
+  const CANDIDATES = [['B\'s values (match the linked proof)', 'b'], ['A\'s values (match A\'s own draft)', 'a']];
+  const cards = CANDIDATES.flatMap((_, k) => [card(`s10a-${k}`, 2 * k + 1), card(`s10b-${k}`, 2 * k + 2)]);
+  await world(async ({ client, exec }) => {
+    for (const [k, [label, which]] of CANDIDATES.entries()) {
+      const oa = claimOrigin(cards[2 * k], `k-s10a-${k}`), ob = claimOrigin(cards[2 * k + 1], `k-s10b-${k}`);
+      const ja = await committed(client, oa), jb = await committed(client, ob);
+      assert.equal((await client.update(postFor(ob, jb))).outcome, 'APPLIED', `PRECONDITION (${label}): B's real post exists`);
+      // A's real post too: with A's own values every proof field is A's and well-formed, so only the stored link can refuse it
+      assert.equal((await client.update(postFor(oa, ja))).outcome, 'APPLIED', `PRECONDITION (${label}): A's real post exists`);
+      const resB = `urn:ex:postseq/reservation/${announcePostId(ob.mid, 'claim')}`;
+      const obA = `urn:ex:origin/obligation/${oa.mid}/claim`;
+      const t = await fetch(`${exec().baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/og1629o-s10-${process.pid}-${seedN++}` }, body: `DELETE { GRAPH <${BK}> { <${obA}> <urn:ex:origin/reservation> ?r } } INSERT { GRAPH <${BK}> { <${obA}> <urn:ex:origin/reservation> <${resB}> } } WHERE { GRAPH <${BK}> { <${obA}> <urn:ex:origin/reservation> ?r } }` });
+      assert.equal(t.status, 200, `PRECONDITION (${label}): the link was re-pointed (${await t.text()})`);
+      const link = (await rows(client, `SELECT ?r WHERE { GRAPH <${BK}> { <${obA}> <urn:ex:origin/reservation> ?r } }`)).map((x) => x.r.value);
+      assert.deepEqual(link, [resB], `PRECONDITION (${label}): read-back: A's obligation now links B's reservation only`);
+      const r = await client.update(settleIntention(ja.obligations[0].obligationId, 'publish', { publication: publicationOf(which === 'b' ? jb : ja) }));
+      assert.equal(r.outcome, 'PRECONDITION_FAILED', `S10 (${label}): refused (${JSON.stringify(r).slice(0, 300)})`);
+      assert.deepEqual(await obligationStatusDirect(client, ja.obligations[0].obligationId), ['pending'], `S10 (${label}): read-back: A stays pending`);
+      assert.deepEqual(await obligationStatusDirect(client, jb.obligations[0].obligationId), ['pending'], `S10 (${label}): read-back: B is untouched`);
+    }
+  }, cards);
+});
+
+test('#1629 s3 (S11) a well-formed publication whose postSeq or publicationAt is NOT the reservation\'s, with the caller sending those same values (so the receipt digest MATCHES): refused by the reservation, still pending', TP, async () => {
+  // the reservation's postSeq and createdAt checks are otherwise shadowed by the receipt digest (measured 12:42Z: those two mutants
+  // survived S8, whose lies change the digest). Here the forged receipt is consistent with the caller's lie, so only the reservation refuses.
+  const CASES = [['postSeq', (res) => ({ postSeq: res.postSeq + 7 })], ['publicationAt', (res) => ({ publicationAt: '2026-10-22T01:02:03.000Z' })]];
+  const cards = CASES.map((_, k) => card(`s11-${k}`, k + 1));
+  await world(async ({ client, exec }) => {
+    for (const [k, [label, lie]] of CASES.entries()) {
+      const o = claimOrigin(cards[k], `k-s11-${k}`);
+      const j = await committed(client, o);
+      const res = j.reservations[0], d = res.draft;
+      const pub = publicationOf(j, lie(res));
+      const forged = postCreateIntention({ mutationId: o.mid, slot: 'claim', postSeq: pub.postSeq, publicationAt: pub.publicationAt, payload: { author: d.author, body: d.body, originActor: d.originActor, occurredAt: d.occurredAt, mentions: d.mentions } });
+      await forgeWellFormed(exec().baseUrl, forged);
+      const rc = Object.fromEntries((await rows(client, `SELECT ?p ?o WHERE { GRAPH <${BK}> { <${forged.opId}> ?p ?o } }`)).map((x) => [x.p.value, x.o.value]));
+      assert.equal(rc['urn:ex:digest'], digestOf(canonicalize(forged)), `${label}: injected read-back: the receipt's digest is the forged publication's, which the caller's values rebuild`);
+      const r = await client.update(settleIntention(j.obligations[0].obligationId, 'publish', { publication: pub }));
+      assert.equal(r.outcome, 'PRECONDITION_FAILED', `S11 (${label}): refused by the reservation (${JSON.stringify(r).slice(0, 300)})`);
+      assert.deepEqual(await obligationStatusDirect(client, j.obligations[0].obligationId), ['pending'], `S11 (${label}): read-back: still pending`);
+    }
+  }, cards);
+});
+
+/** One raw tamper beneath the compiler. */
+async function tamper(exec, sparql, label) {
+  const r = await fetch(`${exec.baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/og1629o-tamper-${process.pid}-${seedN++}` }, body: sparql });
+  assert.equal(r.status, 200, `PRECONDITION (${label}): the tamper was written (${await r.text()})`);
+}
+/** Each case on its OWN committed origin with its real, matching post: tamper ONE proof field, read the tampered state back, then settle
+ *  with the TRUE values. It must be PRECONDITION_FAILED and the Obligation's own status triple must stay pending. An untouched origin's
+ *  true values then settle in the same world (the control: each refusal is for its tamper). `readBack(ids, label, q)` asserts the
+ *  tampered state through `q(sparql) → rows`. */
+async function settleRefusedUnder(cases, prefix, transition = 'publish') {
+  const cards = [...cases.map((_, k) => card(`${prefix}-${k}`, k + 1)), card(`${prefix}-ok`, cases.length + 1)];
+  const NAME = prefix.toUpperCase();
+  // block: the real post is REDACTED before the tamper, so the tombstone block needs is present in every case and only the tamper can refuse
+  const settle = (j) => settleIntention(j.obligations[0].obligationId, transition, transition === 'publish' ? { publication: publicationOf(j) } : { reason: 'tombstoned' });
+  const SETTLED = transition === 'publish' ? 'published' : 'blocked';
+  await world(async ({ client, exec }) => {
+    const q = (sparql) => rows(client, sparql);
+    for (const [k, [label, sparqlOf, readBack]] of cases.entries()) {
+      const o = claimOrigin(cards[k], `k-${prefix}-${k}`);
+      const j = await committed(client, o);
+      const pc = postFor(o, j);
+      assert.equal((await client.update(pc)).outcome, 'APPLIED', `PRECONDITION (${label}): the real, matching post exists`);
+      if (transition === 'block') await tombstone(client, pc.post.id, label);
+      const ids = { mid: o.mid, postOp: pc.opId, postId: pc.post.id };
+      await tamper(exec(), sparqlOf(ids), label);
+      await readBack(ids, label, q);
+      const r = await client.update(settle(j));
+      assert.equal(r.outcome, 'PRECONDITION_FAILED', `${NAME} (${label}): refused (${JSON.stringify(r).slice(0, 300)})`);
+      assert.deepEqual(await obligationStatusDirect(client, j.obligations[0].obligationId), ['pending'], `${NAME} (${label}): read-back: still pending`);
+    }
+    const o = claimOrigin(cards[cases.length], `k-${prefix}-ok`);
+    const j = await committed(client, o);
+    const pc = postFor(o, j);
+    assert.equal((await client.update(pc)).outcome, 'APPLIED');
+    if (transition === 'block') await tombstone(client, pc.post.id, 'control');
+    const ok = await client.update(settle(j));
+    assert.equal(ok.outcome, 'APPLIED', `${NAME} CONTROL: the untouched origin settles ${transition} (${JSON.stringify(ok).slice(0, 300)})`);
+    assert.deepEqual(await obligationStatusDirect(client, j.obligations[0].obligationId), [SETTLED], `${NAME} CONTROL: read-back: ${SETTLED}`);
+  }, cards);
+}
+/** Redact the post through the compiler and read the tombstone back. */
+async function tombstone(client, pid, label) {
+  assert.equal((await client.update({ kind: 'post.redact', opId: `urn:ex:op/redact/${pid}`, actor: PERSON('ada'), post: { id: pid }, authorityRef: 'test-authority-ref', occurredAt: '2026-10-22T12:00:00.000Z' })).outcome, 'APPLIED', `PRECONDITION (${label}): the post was redacted`);
+  const t = await rows(client, `SELECT ?t WHERE { <https://scrumboard.local/entity/${pid}> a ?t }`);
+  assert.ok(t.some((x) => x.t.value === 'https://scrumboard.local/ns#RedactedPost'), `PRECONDITION (${label}): read-back: the post is a RedactedPost (${JSON.stringify(t.map((x) => x.t.value))})`);
+}
+const objectsOf = async (q, subject, p) => (await q(`SELECT ?x WHERE { GRAPH <${BK}> { ${subject} ${p} ?x } }`)).map((r) => r.x);
+
+// the committed-origin binding: each stored-proof tamper, with its read-back. S12 settles publish under every one and S15 settles block
+// under every one: the binding is the precondition SHARED by both terminal transitions (R1b, 45182; block carries the candidate, 45185).
+const ORIGIN = (mid) => `<urn:ex:origin/origin/${mid}>`, PREP = (mid) => `<urn:ex:origin/prepared/${mid}>`, COMMIT = (mid) => `<urn:ex:op/origin/commit/${mid}>`;
+const RES = (postId) => `<urn:ex:postseq/reservation/${postId}>`;
+const FOREIGN = 'urn:ex:op/origin/commit/someone-else';
+const repoint = (s, p, to) => `DELETE { GRAPH <${BK}> { ${s} ${p} ?x } } INSERT { GRAPH <${BK}> { ${s} ${p} ${to} } } WHERE { GRAPH <${BK}> { ${s} ${p} ?x } }`;
+const values = async (q, s, p) => (await objectsOf(q, s, p)).map((x) => x.value);
+const ORIGIN_TAMPERS = [
+    ['the Origin subject deleted', ({ mid }) => `DELETE WHERE { GRAPH <${BK}> { ${ORIGIN(mid)} ?p ?o } }`,
+      async ({ mid }, label, q) => assert.equal((await q(`SELECT ?p WHERE { GRAPH <${BK}> { ${ORIGIN(mid)} ?p ?o } }`)).length, 0, `PRECONDITION (${label}): read-back: no Origin triple remains`)],
+    ['the Origin\'s commitOp pointing at a foreign op', ({ mid }) => repoint(ORIGIN(mid), '<urn:ex:origin/commitOp>', `<${FOREIGN}>`),
+      async ({ mid }, label, q) => assert.deepEqual(await values(q, ORIGIN(mid), '<urn:ex:origin/commitOp>'), [FOREIGN], `PRECONDITION (${label}): read-back`)],
+    ['the Prepared committedBy link removed', ({ mid }) => `DELETE WHERE { GRAPH <${BK}> { ${PREP(mid)} <urn:ex:origin/committedBy> ?x } }`,
+      async ({ mid }, label, q) => assert.deepEqual(await values(q, PREP(mid), '<urn:ex:origin/committedBy>'), [], `PRECONDITION (${label}): read-back`)],
+    ['the commit receipt\'s outcome not APPLIED', ({ mid }) => repoint(COMMIT(mid), '<urn:ex:outcome>', '<urn:ex:PRECONDITION_FAILED>'),
+      async ({ mid }, label, q) => assert.deepEqual(await values(q, COMMIT(mid), '<urn:ex:outcome>'), ['urn:ex:PRECONDITION_FAILED'], `PRECONDITION (${label}): read-back`)],
+    ['the reservation\'s reserveOpId pointing at a foreign op', ({ postId }) => repoint(RES(postId), '<urn:ex:postseq/reserveOpId>', `<${FOREIGN}>`),
+      async ({ postId }, label, q) => assert.deepEqual(await values(q, RES(postId), '<urn:ex:postseq/reserveOpId>'), [FOREIGN], `PRECONDITION (${label}): read-back`)],
+    // 45097: the further layer — links alone are not the binding
+    ['the Prepared committedBy pointing at a foreign op', ({ mid }) => repoint(PREP(mid), '<urn:ex:origin/committedBy>', `<${FOREIGN}>`),
+      async ({ mid }, label, q) => assert.deepEqual(await values(q, PREP(mid), '<urn:ex:origin/committedBy>'), [FOREIGN], `PRECONDITION (${label}): read-back`)],
+    ['the commit receipt APPLIED but with a digest that is not the preparation\'s', ({ mid }) => repoint(COMMIT(mid), '<urn:ex:digest>', `"${'f'.repeat(64)}"`),
+      async ({ mid }, label, q) => { assert.deepEqual(await values(q, COMMIT(mid), '<urn:ex:digest>'), ['f'.repeat(64)], `PRECONDITION (${label}): read-back: the digest`); assert.deepEqual(await values(q, COMMIT(mid), '<urn:ex:outcome>'), ['urn:ex:APPLIED'], `PRECONDITION (${label}): read-back: still APPLIED`); }],
+    ['the Origin\'s descriptorDigest not the Prepared\'s', ({ mid }) => repoint(ORIGIN(mid), '<urn:ex:origin/descriptorDigest>', `"${'e'.repeat(64)}"`),
+      async ({ mid }, label, q) => { const o = await values(q, ORIGIN(mid), '<urn:ex:origin/descriptorDigest>'), pr = await values(q, PREP(mid), '<urn:ex:origin/descriptorDigest>'); assert.deepEqual(o, ['e'.repeat(64)], `PRECONDITION (${label}): read-back`); assert.notDeepEqual(o, pr, `PRECONDITION (${label}): read-back: Origin and Prepared now disagree`); }],
+    ['the Origin\'s planDigest not the Prepared\'s', ({ mid }) => repoint(ORIGIN(mid), '<urn:ex:origin/planDigest>', `"${'d'.repeat(64)}"`),
+      async ({ mid }, label, q) => { const o = await values(q, ORIGIN(mid), '<urn:ex:origin/planDigest>'), pr = await values(q, PREP(mid), '<urn:ex:origin/planDigest>'); assert.deepEqual(o, ['d'.repeat(64)], `PRECONDITION (${label}): read-back`); assert.notDeepEqual(o, pr, `PRECONDITION (${label}): read-back: Origin and Prepared now disagree`); }],
+    // measured 13:30Z at 3efeedd: each clause below SURVIVED its own mutant because no case tampered that stored field alone (the commit
+    // digest is rebuilt from the TRUE candidate, so a stored-only tamper leaves only that field's own clause to refuse it)
+    ['the Prepared descriptorJson bytes not the candidate\'s', ({ mid }) => `DELETE { GRAPH <${BK}> { ${PREP(mid)} <urn:ex:origin/descriptorJson> ?x } } INSERT { GRAPH <${BK}> { ${PREP(mid)} <urn:ex:origin/descriptorJson> ?n } } WHERE { GRAPH <${BK}> { ${PREP(mid)} <urn:ex:origin/descriptorJson> ?x } BIND(CONCAT(STR(?x), " ") AS ?n) }`,
+      async ({ mid }, label, q) => assert.ok((await values(q, PREP(mid), '<urn:ex:origin/descriptorJson>'))[0].endsWith(' '), `PRECONDITION (${label}): read-back: the stored bytes changed`)],
+    ['the Prepared planJson bytes not the candidate\'s', ({ mid }) => `DELETE { GRAPH <${BK}> { ${PREP(mid)} <urn:ex:origin/planJson> ?x } } INSERT { GRAPH <${BK}> { ${PREP(mid)} <urn:ex:origin/planJson> ?n } } WHERE { GRAPH <${BK}> { ${PREP(mid)} <urn:ex:origin/planJson> ?x } BIND(CONCAT(STR(?x), " ") AS ?n) }`,
+      async ({ mid }, label, q) => assert.ok((await values(q, PREP(mid), '<urn:ex:origin/planJson>'))[0].endsWith(' '), `PRECONDITION (${label}): read-back: the stored bytes changed`)],
+    ['the Prepared descriptorDigest not the recomputed one', ({ mid }) => repoint(PREP(mid), '<urn:ex:origin/descriptorDigest>', `"${'c'.repeat(64)}"`),
+      async ({ mid }, label, q) => assert.deepEqual(await values(q, PREP(mid), '<urn:ex:origin/descriptorDigest>'), ['c'.repeat(64)], `PRECONDITION (${label}): read-back`)],
+    ['the Prepared planDigest not the recomputed one', ({ mid }) => repoint(PREP(mid), '<urn:ex:origin/planDigest>', `"${'b'.repeat(64)}"`),
+      async ({ mid }, label, q) => assert.deepEqual(await values(q, PREP(mid), '<urn:ex:origin/planDigest>'), ['b'.repeat(64)], `PRECONDITION (${label}): read-back`)],
+    ['the Prepared occurredAt not the candidate\'s', ({ mid }) => repoint(PREP(mid), '<urn:ex:origin/occurredAt>', '"2026-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>'),
+      async ({ mid }, label, q) => assert.deepEqual(await values(q, PREP(mid), '<urn:ex:origin/occurredAt>'), ['2026-01-01T00:00:00Z'], `PRECONDITION (${label}): read-back`)],
+    ['the Prepared type triple removed', ({ mid }) => `DELETE WHERE { GRAPH <${BK}> { ${PREP(mid)} a ?t } }`,
+      async ({ mid }, label, q) => assert.equal((await q(`SELECT ?t WHERE { GRAPH <${BK}> { ${PREP(mid)} a ?t } }`)).length, 0, `PRECONDITION (${label}): read-back: untyped`)],
+    ['the Origin\'s mutationId not the obligation\'s', ({ mid }) => repoint(ORIGIN(mid), '<urn:ex:origin/mutationId>', '"some-other-mutation"'),
+      async ({ mid }, label, q) => assert.deepEqual(await values(q, ORIGIN(mid), '<urn:ex:origin/mutationId>'), ['some-other-mutation'], `PRECONDITION (${label}): read-back`)],
+    ['the reservation\'s index not the slot\'s', ({ postId }) => repoint(RES(postId), '<urn:ex:postseq/index>', '"5"^^<http://www.w3.org/2001/XMLSchema#integer>'),
+      async ({ postId }, label, q) => assert.deepEqual(await values(q, RES(postId), '<urn:ex:postseq/index>'), ['5'], `PRECONDITION (${label}): read-back`)],
+];
+
+test('#1629 s3 (S12) settle is bound to the COMMITTED ORIGIN (review R1, 45097): the Origin gone; commitOp, committedBy or reserveOpId foreign; the commit receipt not APPLIED or APPLIED with a foreign digest; Origin and Prepared digests disagreeing: each refused, still pending', T, async () => {
+  await settleRefusedUnder(ORIGIN_TAMPERS, 's12');
+});
+
+test('#1629 s3 (S15) block(tombstoned) is bound to the COMMITTED ORIGIN too (review R1b, 45182): with the post really redacted, every S12 stored-proof tamper is refused, still pending; an untouched, redacted origin blocks', T, async () => {
+  await settleRefusedUnder(ORIGIN_TAMPERS, 's15', 'block');
+});
+
+test('#1629 s3 (S14) the reservation draft AND its publication rewritten, consistently, to OTHER content: the origin\'s frozen slot still refuses the settle', T, async () => {
+  // the deepest corruption the payload-consistency clause alone stands against (its mutant SURVIVED 13:31Z): the reservation's draft is
+  // rewritten to a foreign body, a well-formed publication of that foreign body is forged beneath the compiler, and the caller sends the
+  // foreign values, so the reservation, the receipt digest and the commit digest (from the TRUE origin candidate) all agree; only the
+  // descriptor's frozen slot content disagrees
+  const c = card('s14', 1), ok = card('s14-ok', 2);
+  await world(async ({ client, exec }) => {
+    const o = claimOrigin(c, 'k-s14');
+    const j = await committed(client, o);
+    const FOREIGN = 'a body the origin never froze';
+    const res = j.reservations[0];
+    const foreignDraft = { ...res.draft, body: FOREIGN };
+    const RES = `<urn:ex:postseq/reservation/${res.postId}>`;
+    const { canonAnnouncementDraft } = await import('../core/postseq-reserve.mjs');
+    const draftLit = JSON.stringify(JSON.stringify(canonAnnouncementDraft(foreignDraft)));
+    await tamper(exec(), `DELETE { GRAPH <${BK}> { ${RES} <urn:ex:postseq/draftJson> ?x } } INSERT { GRAPH <${BK}> { ${RES} <urn:ex:postseq/draftJson> ${draftLit} } } WHERE { GRAPH <${BK}> { ${RES} <urn:ex:postseq/draftJson> ?x } }`, 'S14 draft');
+    const stored = (await rows(client, `SELECT ?d WHERE { GRAPH <${BK}> { ${RES} <urn:ex:postseq/draftJson> ?d } }`)).map((r) => JSON.parse(r.d.value).body);
+    assert.deepEqual(stored, [FOREIGN], `PRECONDITION: read-back: the reservation's draft now says the foreign body (${JSON.stringify(stored)})`);
+    const foreignPost = postFor(o, j, { body: FOREIGN });
+    await forgeWellFormed(exec().baseUrl, foreignPost);
+    const rc = (await rows(client, `SELECT ?d WHERE { GRAPH <${BK}> { <${foreignPost.opId}> <urn:ex:digest> ?d } }`)).map((r) => r.d.value);
+    assert.deepEqual(rc, [digestOf(canonicalize(foreignPost))], 'PRECONDITION: read-back: the receipt carries the foreign publication\'s digest');
+    const r = await client.update(settleIntention(j.obligations[0].obligationId, 'publish', { publication: publicationOf(j, { payload: { body: FOREIGN } }) }));
+    assert.equal(r.outcome, 'PRECONDITION_FAILED', `S14: refused by the origin's frozen slot (${JSON.stringify(r).slice(0, 300)})`);
+    assert.deepEqual(await obligationStatusDirect(client, j.obligations[0].obligationId), ['pending'], 'S14: read-back: still pending');
+    // CONTROL: an untouched origin settles
+    const o2 = claimOrigin(ok, 'k-s14-ok');
+    const j2 = await committed(client, o2);
+    assert.equal((await client.update(postFor(o2, j2))).outcome, 'APPLIED');
+    assert.equal((await client.update(settleIntention(j2.obligations[0].obligationId, 'publish', { publication: publicationOf(j2) }))).outcome, 'APPLIED', 'S14 CONTROL: settles');
+  }, [c, ok]);
+});
+
+test('#1629 s3 (S13) the publication receipt\'s TERMS are strict (review R2): its digest language-tagged, given a datatype, or doubled, or its actor not the author\'s person: each refused, still pending', T, async () => {
+  const D = '<urn:ex:digest>', A = '<urn:ex:actor>';
+  const swap = (op, p, bind) => `DELETE { GRAPH <${BK}> { <${op}> ${p} ?x } } INSERT { GRAPH <${BK}> { <${op}> ${p} ?n } } WHERE { GRAPH <${BK}> { <${op}> ${p} ?x } BIND(${bind} AS ?n) }`;
+  await settleRefusedUnder([
+    ['the digest language-tagged @en', ({ postOp }) => swap(postOp, D, 'STRLANG(STR(?x), "en")'),
+      async ({ postOp }, label, q) => { const t = await objectsOf(q, `<${postOp}>`, D); assert.deepEqual(t.map((x) => x['xml:lang'] ?? null), ['en'], `PRECONDITION (${label}): read-back: one digest, tagged @en (${JSON.stringify(t)})`); }],
+    ['the digest given a datatype (xsd:token)', ({ postOp }) => swap(postOp, D, 'STRDT(STR(?x), <http://www.w3.org/2001/XMLSchema#token>)'),
+      async ({ postOp }, label, q) => { const t = await objectsOf(q, `<${postOp}>`, D); assert.deepEqual(t.map((x) => x.datatype ?? null), ['http://www.w3.org/2001/XMLSchema#token'], `PRECONDITION (${label}): read-back: one digest, typed (${JSON.stringify(t)})`); }],
+    ['a second, different digest', ({ postOp }) => `INSERT DATA { GRAPH <${BK}> { <${postOp}> ${D} "${'f'.repeat(64)}" } }`,
+      async ({ postOp }, label, q) => assert.equal((await objectsOf(q, `<${postOp}>`, D)).length, 2, `PRECONDITION (${label}): read-back: two digests`)],
+    ['the actor not the author\'s person', ({ postOp }) => swap(postOp, A, '<https://scrumboard.local/person/ada>'),
+      async ({ postOp }, label, q) => assert.deepEqual((await objectsOf(q, `<${postOp}>`, A)).map((x) => x.value), ['https://scrumboard.local/person/ada'], `PRECONDITION (${label}): read-back: the actor is ada's person, not the author board's`)],
+  ], 's13');
+});
+
+// ── G-R: the reservation binds the post (r5, from the 45028/45030 finding; non-builder ruling 45032) ──
+// Scoped ONLY to a post.create whose postId names a slice-1 reservation: the reservation's draft must equal this post's canonical
+// announcement draft and its postSeq must match, or PRECONDITION_FAILED with no post, no sequence consumed. Read back, never inferred
+// from a receipt (45029). Measured on today's code (3e98961, 2026-10-22T12:11:56Z probe): a forged body under the deterministic op is
+// APPLIED and stored at the reserved postSeq, which is what GR2 must turn into a refusal.
+const allocatorNext = async (client) => (await rows(client, `SELECT ?n WHERE { GRAPH <${BK}> { <${PS('allocator')}> <${PS('nextPostSeq')}> ?n } }`)).map((r) => r.n.value);
+const storedPost = async (client, id) => Object.fromEntries((await rows(client, `SELECT ?p ?o WHERE { <https://scrumboard.local/entity/${id}> ?p ?o }`)).map((r) => [r.p.value.split(/[#/]/).pop(), r.o.value]));
+const postsAtSeq = async (client, n) => (await rows(client, `SELECT ?s WHERE { ?s ?p ?n FILTER(STRENDS(STR(?p), "postSeq") && STR(?n) = "${n}") }`)).length;
+async function refusedNoPost(client, o, j, intention, label) {
+  const before = { alloc: await allocatorNext(client), atSeq: await postsAtSeq(client, j.reservations[0].postSeq) };
+  const r = await client.update(intention);
+  assert.equal(r.outcome, 'PRECONDITION_FAILED', `${label}: refused (${JSON.stringify(r).slice(0, 300)})`);
+  assert.deepEqual(await storedPost(client, intention.post.id), {}, `${label}: NO post exists at the reserved postId (read back)`);
+  assert.equal(await postsAtSeq(client, j.reservations[0].postSeq), before.atSeq, `${label}: nothing new carries the reserved postSeq`);
+  assert.deepEqual(await allocatorNext(client), before.alloc, `${label}: no sequence was consumed (allocator unchanged)`);
+  // read the Obligation's OWN status triple, not through readCommittedOrigin: that read validates the whole join, reservation included,
+  // so the tamper GR6 makes would make it unreadable and 'stays pending' would be tested through a broken join (45059)
+  const st = (await rows(client, `SELECT ?st WHERE { GRAPH <${BK}> { ?ob a <urn:ex:origin/Obligation> ; <urn:ex:origin/obligationId> ${JSON.stringify(j.obligations[0].obligationId)} ; <urn:ex:origin/status> ?st } }`)).map((x) => x.st.value);
+  assert.deepEqual(st, ['pending'], `${label}: read-back: the obligation's own status triple is exactly one 'pending' (${JSON.stringify(st)})`);
+}
+
+test('#1629 s3 (GR1 POSITIVE, today and after) the reservation\'s own draft at its own postSeq is APPLIED and reads back exactly', T, async () => {
+  const c = card('gr1', 1);
+  await world(async ({ client }) => {
+    const o = claimOrigin(c, 'k-gr1');
+    const j = await committed(client, o);
+    const pc = postFor(o, j);
+    assert.equal((await client.update(pc)).outcome, 'APPLIED');
+    const got = await storedPost(client, pc.post.id);
+    assert.equal(got.text, j.reservations[0].draft.body, `GR1: the stored body is the frozen one (${JSON.stringify(got)})`);
+    assert.equal(got.postSeq, String(j.reservations[0].postSeq), 'GR1: at the reserved postSeq');
+    assert.equal(got.originMutation, o.mid, 'GR1: for this origin');
+  }, [c]);
+});
+
+test('#1629 s3 (GR2) a DIFFERENT BODY under the reserved postId is refused: no post, no sequence consumed, still pending', TP, async () => {
+  const c = card('gr2', 1);
+  await world(async ({ client }) => {
+    const o = claimOrigin(c, 'k-gr2');
+    const j = await committed(client, o);
+    await refusedNoPost(client, o, j, postFor(o, j, { body: 'not what was frozen' }), 'GR2 body');
+  }, [c]);
+});
+
+test('#1629 s3 (GR3) a DIFFERENT AUTHOR or MENTIONS under the reserved postId is refused the same way', TP, async () => {
+  const a = card('gr3a', 1), b = card('gr3b', 2);
+  await world(async ({ client }) => {
+    const oa = claimOrigin(a, 'k-gr3a'), ob = claimOrigin(b, 'k-gr3b');
+    const ja = await committed(client, oa), jb = await committed(client, ob);
+    await refusedNoPost(client, oa, ja, postFor(oa, ja, { author: 'ada' }), 'GR3 author');
+    await refusedNoPost(client, ob, jb, postFor(ob, jb, { mentions: ['grace'] }), 'GR3 mentions');
+  }, [a, b]);
+});
+
+test('#1629 s3 (GR4) the frozen draft at a DIFFERENT postSeq under the reserved postId is refused the same way', TP, async () => {
+  const c = card('gr4', 1);
+  await world(async ({ client }) => {
+    const o = claimOrigin(c, 'k-gr4');
+    const j = await committed(client, o);
+    const pc = postFor(o, j); pc.post.postSeq = j.reservations[0].postSeq + 50;
+    await refusedNoPost(client, o, j, pc, 'GR4 postSeq');
+  }, [c]);
+});
+
+test('#1629 s3 (GR5 CONTROL, today and after) an UNRESERVED post.create still applies and reads back as sent, with intention and receipt digests equal to 3e98961\'s', T, async () => {
+  // r6 §2: the compiled SPARQL is EXPECTED to change for every post.create (detection lives in the update); behaviour and digests are what
+  // is preserved. The digest below was measured at 3e98961 on 2026-10-22 (twice, identical); the receipt's digest equalled the intention's.
+  const UNRELATED = { kind: 'post.create', opId: 'urn:ex:op/announce/00000000-0000-5000-8000-000000000001/claim', actor: 'https://scrumboard.local/person/board',
+    post: { id: 'unrelated-legacy-post-1', body: 'a legacy announcement with no reservation', author: 'board', originActor: 'ada',
+      origin: { mutationId: '00000000-0000-5000-8000-000000000001', slot: 'claim' }, occurredAt: '2026-10-22T06:00:00.000Z', publicationAt: '2026-10-22T06:00:01.000Z', postSeq: 7, mentions: [] } };
+  const DIGEST_AT_3E98961 = 'bd8191dfd7ebddf3d9ceda999979452ef528e25fed33a248fa17cd83da1272e4';
+  const { digestOf } = await import('../core/graph-compiler.mjs');
+  assert.equal(digestOf(canonicalize(UNRELATED)), DIGEST_AT_3E98961, 'GR5: the intention digest is unchanged');
+  await world(async ({ client }) => {
+    const r = await client.update(UNRELATED);
+    assert.equal(r.outcome, 'APPLIED', `GR5: an unreserved post.create is APPLIED (${JSON.stringify(r).slice(0, 200)})`);
+    assert.equal(r.receipt?.digest?.[0]?.value ?? r.digest, DIGEST_AT_3E98961, 'GR5: and its receipt carries the same digest');
+    const got = await storedPost(client, 'unrelated-legacy-post-1');
+    assert.equal(got.text, UNRELATED.post.body, 'GR5: it reads back with the body it was sent');
+    assert.equal(got.postSeq, '7', 'GR5: at the postSeq it was sent');
+    assert.equal(got.originMutation, UNRELATED.post.origin.mutationId, 'GR5: for the origin it named');
+  }, []);
+});
+
+test('#1629 s3 (GR6) FAIL CLOSED: a reservation that is missing a field, duplicated, mistyped or conflicting refuses even the CORRECT post, writing none', TP, async () => {
+  // r6 §1: if ANY reservation subject names this postId it must be well-formed: exactly one subject, exactly one plain-string draftJson
+  // sameTerm-equal to the post's draft, exactly one xsd:integer postSeq equal to the post's. Each case below tampers ONE thing, then sends
+  // the post the publisher would send (the reservation's own frozen draft at its own postSeq), which GR1 shows is APPLIED when well-formed.
+  const RES = (postId) => `<urn:ex:postseq/reservation/${postId}>`;
+  const D = '<urn:ex:postseq/draftJson>', S = '<urn:ex:postseq/postSeq>', PID = '<urn:ex:postseq/postId>', TYPE = '<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>';
+  const INT = `<${XSD}integer>`;
+  const CASES = [
+    ['draft missing', (id) => `DELETE WHERE { GRAPH <${BK}> { ${RES(id)} ${D} ?d } }`],
+    ['postSeq missing', (id) => `DELETE WHERE { GRAPH <${BK}> { ${RES(id)} ${S} ?n } }`],
+    ['two drafts', (id) => `INSERT DATA { GRAPH <${BK}> { ${RES(id)} ${D} "{\\"body\\":\\"a second draft\\"}" } }`],
+    ['two postSeq values', (id, seq) => `INSERT DATA { GRAPH <${BK}> { ${RES(id)} ${S} "${seq + 1}"^^${INT} } }`],
+    ['draft language-tagged', (id) => `DELETE { GRAPH <${BK}> { ${RES(id)} ${D} ?d } } INSERT { GRAPH <${BK}> { ${RES(id)} ${D} ?nd } } WHERE { GRAPH <${BK}> { ${RES(id)} ${D} ?d } BIND(STRLANG(STR(?d), "en") AS ?nd) }`],
+    ['draft typed', (id) => `DELETE { GRAPH <${BK}> { ${RES(id)} ${D} ?d } } INSERT { GRAPH <${BK}> { ${RES(id)} ${D} ?nd } } WHERE { GRAPH <${BK}> { ${RES(id)} ${D} ?d } BIND(STRDT(STR(?d), <http://www.w3.org/1999/02/22-rdf-syntax-ns#JSON>) AS ?nd) }`],
+    ['postSeq as a string literal', (id) => `DELETE { GRAPH <${BK}> { ${RES(id)} ${S} ?n } } INSERT { GRAPH <${BK}> { ${RES(id)} ${S} ?ns } } WHERE { GRAPH <${BK}> { ${RES(id)} ${S} ?n } BIND(STR(?n) AS ?ns) }`],
+    // 45037: detection covers ANY triples at the canonical reservation IRI, so a corrupted postId field never makes it 'unreserved'
+    ['postId field missing at the canonical reservation IRI', (id) => `DELETE WHERE { GRAPH <${BK}> { ${RES(id)} ${PID} ?x } }`],
+    ['postId field wrong at the canonical reservation IRI', (id) => `DELETE { GRAPH <${BK}> { ${RES(id)} ${PID} ?x } } INSERT { GRAPH <${BK}> { ${RES(id)} ${PID} "some-other-post" } } WHERE { GRAPH <${BK}> { ${RES(id)} ${PID} ?x } }`],
+    ['two reservation subjects for the postId', (id, seq, draftLit) => `INSERT DATA { GRAPH <${BK}> { <urn:ex:postseq/reservation/${id}-twin> ${TYPE} <urn:ex:postseq/Reservation> ; ${PID} "${id}" ; ${D} ${draftLit} ; ${S} "${seq}"^^${INT} . } }`],
+  ];
+  const cards = CASES.map((_, k) => card(`gr6-${k}`, k + 1));
+  await world(async ({ client, exec }) => {
+    for (const [k, [label, tamper]] of CASES.entries()) {
+      const o = claimOrigin(cards[k], `k-gr6-${k}`);
+      const j = await committed(client, o);
+      const pc = postFor(o, j);
+      const draftLit = JSON.stringify(JSON.stringify(j.reservations[0].draft));
+      const r = await fetch(`${exec().baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/og1629o-gr6-${process.pid}-${seedN++}` }, body: tamper(pc.post.id, j.reservations[0].postSeq, draftLit) });
+      assert.equal(r.status, 200, `PRECONDITION (${label}): the test's tamper was written (${await r.text()})`);
+      await refusedNoPost(client, o, j, pc, `GR6 ${label}`);
+    }
+  }, cards);
+});
+
+// ── G-P: nothing may already sit at a slot's derived post IRI or its deterministic publication op (narrow amendment, 45044/45046) ──
+// Inside the origin commit's shared atomic precondition, for every slot: ANY triple at the derived post IRI (domain or bookkeeping
+// graph) or at the deterministic post op IRI refuses the commit. On refusal the business state, allocator, reservations and obligations
+// are unchanged (the refusal receipt and commitSeq may change) and the Prepared record stays readable. Ordinary standalone reservations
+// are untouched by this guard (slice 2's B1 pins postseq.reserve's compiled form; this file does not repeat it).
+const rawInsert = async (exec, graph, triples) => {
+  const body = graph ? `INSERT DATA { GRAPH <${graph}> { ${triples} } }` : `INSERT DATA { ${triples} }`;
+  const r = await fetch(`${exec.baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/og1629o-gp-${process.pid}-${seedN++}` }, body });
+  assert.equal(r.status, 200, `PRECONDITION: the test's obstruction was written (${await r.text()})`);
+};
+const cardTriples = async (client, id) => (await rows(client, `SELECT ?p ?o WHERE { <${cardIriOf(id)}> ?p ?o }`)).map((r) => `${r.p.value} ${r.o.value}`).sort();
+async function refusedCommit(client, o, c, p, label) {
+  const before = { card: await cardTriples(client, c.id), alloc: await allocatorNext(client), res: (await rows(client, `SELECT ?s WHERE { GRAPH <${BK}> { ?s a <${PS('Reservation')}> } }`)).length };
+  const r = await client.update(commitIntention(o, p.occurredAt));
+  assert.equal(r.outcome, 'PRECONDITION_FAILED', `${label}: the origin commit is refused (${JSON.stringify(r).slice(0, 300)})`);
+  assert.deepEqual(await cardTriples(client, c.id), before.card, `${label}: read-back: the card is unchanged`);
+  assert.deepEqual(await allocatorNext(client), before.alloc, `${label}: read-back: the allocator is unchanged`);
+  assert.equal((await rows(client, `SELECT ?s WHERE { GRAPH <${BK}> { ?s a <${PS('Reservation')}> } }`)).length, before.res, `${label}: read-back: no reservation was added`);
+  const got = await M.readCommittedOrigin(client, o.mid);
+  assert.equal(got.committed, null, `${label}: read-back: no committed origin and no obligation (${JSON.stringify(got).slice(0, 160)})`);
+  assert.equal((await M.readPreparedOrigin(client, o.mid)).ok, true, `${label}: read-back: the Prepared record is still readable for diagnosis`);
+}
+
+test('#1629 s3 (GP0 CONTROL, today and after) an unobstructed origin commit is APPLIED and its reservation reads back at the derived postId', T, async () => {
+  const c = card('gp0', 1);
+  await world(async ({ client }) => {
+    const o = claimOrigin(c, 'k-gp0');
+    const j = await committed(client, o);
+    assert.equal(j.reservations[0].postId, announcePostId(o.mid, 'claim'), 'GP0: read-back: the reservation sits at the derived postId');
+    assert.equal(j.obligations[0].status, 'pending', 'GP0: read-back: its obligation is pending');
+  }, [c]);
+});
+
+test('#1629 s3 (GP1) a triple already at the slot\'s derived post IRI, in the DOMAIN graph, refuses the origin commit with no effect', TP, async () => {
+  const c = card('gp1', 1);
+  await world(async ({ client, exec }) => {
+    const o = claimOrigin(c, 'k-gp1');
+    const p = await prepared(client, o);
+    await rawInsert(exec(), null, `<https://scrumboard.local/entity/${announcePostId(o.mid, 'claim')}> <https://schema.org/text> "a stranger's post" .`);
+    await refusedCommit(client, o, c, p, 'GP1 domain');
+  }, [c]);
+});
+
+test('#1629 s3 (GP1b) a triple already at the slot\'s derived post IRI, in the BOOKKEEPING graph only, refuses the origin commit with no effect', TP, async () => {
+  const c = card('gp1b', 1);
+  await world(async ({ client, exec }) => {
+    const o = claimOrigin(c, 'k-gp1b');
+    const p = await prepared(client, o);
+    await rawInsert(exec(), BK, `<https://scrumboard.local/entity/${announcePostId(o.mid, 'claim')}> <urn:ex:recordedBy> <urn:ex:op/someone-else> .`);
+    await refusedCommit(client, o, c, p, 'GP1b bookkeeping');
+  }, [c]);
+});
+
+test('#1629 s3 (GP2) ANY triple at the slot\'s deterministic publication op (not only a well-formed receipt) refuses the origin commit with no effect', TP, async () => {
+  const c = card('gp2', 1);
+  await world(async ({ client, exec }) => {
+    const o = claimOrigin(c, 'k-gp2');
+    const p = await prepared(client, o);
+    const op = opIdFor(o.mid, 'claim');   // the announcement's deterministic post op (core/announce-outbox.mjs)
+    await rawInsert(exec(), BK, `<${op}> <urn:ex:outcome> <urn:ex:APPLIED> .`);   // a partial receipt: outcome only, no digest
+    await refusedCommit(client, o, c, p, 'GP2 op');
+  }, [c]);
+});

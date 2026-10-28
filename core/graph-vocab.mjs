@@ -56,6 +56,7 @@ export const EX = Object.freeze({
   grantRev: iri('grantRev'),
   rule: iri('rule'),
   ruleRev: iri('ruleRev'),
+  reason: iri('reason'),   // #1749 a refusal's named code on its receipt (only RECOVERY_HOLD today)
 
   // outcome values
   APPLIED: iri('APPLIED'),
@@ -74,7 +75,7 @@ export const EX = Object.freeze({
  */
 export const RECEIPT_PREDICATES = Object.freeze([
   EX.outcome, EX.digest, EX.actor, EX.target, EX.expected, EX.observed,
-  EX.commitSeq, EX.at, EX.grant, EX.grantRev, EX.rule, EX.ruleRev,
+  EX.commitSeq, EX.at, EX.grant, EX.grantRev, EX.rule, EX.ruleRev, EX.reason,
 ]);
 export const MARKER_SUBJECT = EX.dataset;
 export const MARKER_PREDICATES = Object.freeze([EX.commitSeq]);
@@ -165,8 +166,55 @@ export const POSTSEQ_TERMS = Object.freeze({
   identityJson: psi('identityJson'),
   draftJson: psi('draftJson'),
   OP_PREFIX: `${NS}op/postseq/reserve/`,
+  // #1749 the RECOVERY HOLD: written by the executor's --promote-epoch on a store with an allocator, cleared only by its
+  // --reconcile-postseq maintenance start. While it exists, the ONE allocator guard below does not bind (RECOVERY_HOLD).
+  recoveryHold: psi('recovery-hold'),
+  // A7 v2 (P2): the hold and every ReconciliationRecord live in their OWN named graph, never in the bookkeeping graph.
+  // The compiler only READS it (in WHERE); only the executor's maintenance starts write it.
+  RECOVERY_GRAPH: psi('recovery'),
+  RecoveryHold: psi('RecoveryHold'),
+  RECOVERY_HOLD_CODE: 'RECOVERY_HOLD',
+  // #1749 A8 THE DISPATCH HOLD: one AmbiguousObligation per obligation pending at a held promotion, in the recovery graph,
+  // at ambiguous/<sha256(obligationId)>. While a RecoveryHold exists, or the obligation's record is "held", the compiled
+  // dispatch intentions (the announcement post.create and obligation.settle) refuse DISPATCH_HELD.
+  ambiguousObligation: (sha256OfObligationId) => psi(`ambiguous/${sha256OfObligationId}`),
+  AmbiguousObligation: psi('AmbiguousObligation'),
+  state: psi('state'),
+  DISPATCH_HELD_CODE: 'DISPATCH_HELD',
 });
 
+/**
+ * #1629 slice 2 — the origin vocabulary: a Prepared origin (`origin.prepare`), and the Origin and its Obligations that the
+ * origin-bearing `card.write` commit writes beside the slice-1 reservations. Every term is BOOKKEEPING, like POSTSEQ_TERMS:
+ *
+ *   prepared    <urn:ex:origin/prepared/<mutationId>>            type <urn:ex:origin/Prepared>
+ *   origin      <urn:ex:origin/origin/<mutationId>>              type <urn:ex:origin/Origin>
+ *   obligation  <urn:ex:origin/obligation/<mutationId>/<slot>>   type <urn:ex:origin/Obligation>
+ *
+ * index and slotCount are xsd:integer; occurredAt and committedAt are xsd:dateTime; committedBy, commitOp and reservation
+ * are IRIs; everything else is a plain string literal.
+ */
+export const ORIGIN_NS = `${NS}origin/`;
+const ori = (local) => `<${ORIGIN_NS}${local}>`;
+export const ORIGIN_PREDICATE_NAMES = Object.freeze(['mutationId', 'originKeyJson', 'route', 'originActor', 'descriptorJson', 'descriptorDigest',
+  'planJson', 'planDigest', 'occurredAt', 'committedBy', 'committedAt', 'commitOp', 'slotCount', 'obligationId', 'slot', 'index', 'status',
+  'mode', 'provenanceJson', 'reservation']);
+export const ORIGIN_TERMS = Object.freeze({
+  Prepared: ori('Prepared'), Origin: ori('Origin'), Obligation: ori('Obligation'),
+  ...Object.fromEntries(ORIGIN_PREDICATE_NAMES.map((n) => [n, ori(n)])),
+  preparedSubject: (mutationId) => ori(`prepared/${mutationId}`),
+  originSubject: (mutationId) => ori(`origin/${mutationId}`),
+  obligationSubject: (mutationId, slot) => ori(`obligation/${mutationId}/${slot}`),
+  PREPARE_OP_PREFIX: `${NS}op/origin/prepare/`,
+  COMMIT_OP_PREFIX: `${NS}op/origin/commit/`,
+});
+
+/**
+ * #1744 (#1629 slice 4) — the derived card reference index (core/card-ref-index.mjs). Every term is BOOKKEEPING: it lives in the
+ * bookkeeping graph, is never reachable through the public dataset, and is written only by the compiler and the backfill op.
+ */
+export const CARD_REF_INDEX_PREFIX = 'urn:ex:card-ref-index/';
+export const CARD_REF_INDEX_PREDICATES = Object.freeze(['indexedVersion', 'indexedJsonDigest', 'namesShortId', 'namesCount', 'namesSum', 'namesList', 'complete', 'latchReason', 'latchedAt'].map((n) => `<${CARD_REF_INDEX_PREFIX}${n}>`));
 export const BOOKKEEPING_GRAPH = 'urn:scrum:bookkeeping:executor';
 export const BK = `<${BOOKKEEPING_GRAPH}>`;
 export const MARKER_PREDICATES_ALL = Object.freeze([
@@ -182,8 +230,10 @@ export const BOOKKEEPING_PREDICATES = Object.freeze([...new Set([
   POSTSEQ_TERMS.postId, POSTSEQ_TERMS.mode, POSTSEQ_TERMS.reserveOpId,
   POSTSEQ_TERMS.reserveDigest, POSTSEQ_TERMS.postSeq, POSTSEQ_TERMS.createdAt,
   POSTSEQ_TERMS.index, POSTSEQ_TERMS.identityJson, POSTSEQ_TERMS.draftJson,
+  ...ORIGIN_PREDICATE_NAMES.map((n) => ORIGIN_TERMS[n]),
+  ...CARD_REF_INDEX_PREDICATES,
 ])]);
-export const BOOKKEEPING_SUBJECT_PREFIXES = Object.freeze([`${NS}op/`, `${NS}selfcheck/`, POSTSEQ_NS]);
+export const BOOKKEEPING_SUBJECT_PREFIXES = Object.freeze([`${NS}op/`, `${NS}selfcheck/`, POSTSEQ_NS, ORIGIN_NS, CARD_REF_INDEX_PREFIX]);
 export const BOOKKEEPING_SUBJECTS = Object.freeze([`${NS}dataset`]);
 const BK_PRED_SET = new Set(BOOKKEEPING_PREDICATES.map((p) => p.replace(/^<|>$/g, '')));
 /** Is this (subject IRI, predicate IRI) bookkeeping? Bare IRIs or <angle> form both accepted. */

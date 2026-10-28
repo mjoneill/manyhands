@@ -592,8 +592,13 @@
       let total = null;
       for (let i = 0; i < 20; i++) {           // hard bound: 20 pages = 10,000 cards
         const q = '/api/cards?limit=500' + (before != null ? '&before=' + encodeURIComponent(before) : '');
-        const res = await (await fetch(q)).json();
-        const page = Array.isArray(res) ? res : (res && Array.isArray(res.cards) ? res.cards : []);
+        // #1795 (#144 review) — a refused page is an ERROR, never an empty page: an empty answer ends the paging and reads
+        // as "no cards", which left the Raised-hands panel loaded with no card high-water, so its next tick re-read the corpus.
+        const r = await fetch(q);
+        if (!r.ok) throw new Error(`cards ${r.status}`);
+        const res = await r.json();
+        if (!Array.isArray(res) && !(res && Array.isArray(res.cards))) throw new Error('cards: unexpected reply shape');
+        const page = Array.isArray(res) ? res : res.cards;
         if (total == null && res && typeof res.cardsTotal === 'number') total = res.cardsTotal;
         if (!page.length) break;
         all.push(...page);
@@ -642,46 +647,74 @@
       catch { return null; }
     }
     /** Every row past the cursor, following pages until the feed is live and empty; null on a 409 (re-boot), throws otherwise. */
+    // #1795 (#144 review) — pages on a LOCAL cursor and returns it with the rows; the caller commits both together, and only
+    // once the paired card read has also succeeded. Advancing blocked.convoCursor here, page by page, meant a card failure
+    // discarded fetched rows AFTER the cursor had moved past them, so the retry skipped those raises for good.
     async function feedSince() {
       const out = [];
+      let cursor = blocked.convoCursor;
       for (let guard = 0; guard < 20; guard++) {
-        const r = await fetch('/api/conversations?afterCommit=' + encodeURIComponent(blocked.convoCursor) + '&limit=200');
+        const r = await fetch('/api/conversations?afterCommit=' + encodeURIComponent(cursor) + '&limit=200');
         if (r.status === 409) return null;
         const page = await r.json();
         if (!r.ok || !page || !Array.isArray(page.conversations) || typeof page.nextAfterCommit !== 'string') throw new Error('feed unavailable');
         for (const c of page.conversations) if (c && !c.redacted && c.op !== 'redact') out.push(c);
-        blocked.convoCursor = page.nextAfterCommit;
+        cursor = page.nextAfterCommit;
         if (page.phase === 'live' && page.conversations.length === 0) break;
       }
-      return out;
+      return { rows: out, cursor };
     }
     const maxStamp = (cur, rows, key) => rows.reduce((m, r) => (typeof r[key] === 'string' && (!m || r[key] > m) ? r[key] : m), cur);
     const raiseRow = (m) => m && typeof m.attachedTo === 'string' && m.attachedTo
       && (RAISE_RE.test(m.body || '') || RESOLVE_RE.test(m.body || ''));
+    // #1795 — the FAILURE path of the boot read. A full read that failed (a 503 under load) left convoSince unset, so every
+    // 8 s tick started ANOTHER whole-corpus read; each outlasted the interval, they piled up, the executor saturated, and the
+    // reads kept failing (measured 2026-10-27 01:20–01:38Z: one tab, 64 full reads at 30–90 s each). So: one refresh at a
+    // time, an error reply is an error (never "zero posts"), and a failed boot read backs off (16 s, doubling, ≤ 5 min).
+    let blockedBusy = false, blockedBackoffMs = 0, blockedRetryAt = 0;
     async function refreshBlocked() {
+      if (blockedBusy || Date.now() < blockedRetryAt) return;
+      blockedBusy = true;
       try {
         let changed = false;
         if (!blocked.loaded || !blocked.convoSince || !blocked.cardSince) {
+          const bootAt = new Date(Date.now() - 60_000).toISOString();   // #1795 — a minute's margin for clock skew
           if (useFeed) blocked.convoCursor = await feedTip();   // the tip FIRST, then the full read
-          const [convos, cards] = await Promise.all([
-            fetch('/api/conversations').then((r) => r.json()),
+          // #1795 (#144 review) — allSettled, not all: Promise.all rejects on the FIRST failure while the other read is still
+          // running, so the guard would be released with a whole-corpus read still in flight and the next refresh could start
+          // a second. The guard is held until BOTH have settled; then any failure is thrown (and backs off).
+          const [convosR, cardsR] = await Promise.allSettled([
+            fetch('/api/conversations').then((r) => { if (!r.ok) throw new Error(`conversations ${r.status}`); return r.json(); }),
             fetchCardSummaries(),
           ]);
+          if (convosR.status === 'rejected') throw convosR.reason;
+          if (cardsR.status === 'rejected') throw cardsR.reason;
+          const convos = convosR.value, cards = cardsR.value;
           const rows = Array.isArray(convos) ? convos : [];
           for (const m of rows) if (raiseRow(m)) blocked.convos.set(m.id, m);
           for (const c of (Array.isArray(cards) ? cards : [])) blocked.cards.set(c.id, c);
-          blocked.convoSince = maxStamp(blocked.convoSince, rows, 'createdAt');
-          blocked.cardSince = maxStamp(blocked.cardSince, [...blocked.cards.values()], 'updatedAt');
+          // #1795 — a boot that SUCCEEDED but found nothing (no posts, or no cards) must still set its high-water: a null one
+          // is read as "not loaded" and forced a whole-corpus read on every 8 s tick. The boot's start time is the high-water.
+          blocked.convoSince = maxStamp(blocked.convoSince, rows, 'createdAt') || bootAt;
+          blocked.cardSince = maxStamp(blocked.cardSince, [...blocked.cards.values()], 'updatedAt') || bootAt;
           blocked.loaded = true;
           changed = true;
         } else {
-          const [convos, res] = await Promise.all([
+          // the same rule for the deltas: hold the guard until both settle, and a refused read is an error, not an empty delta
+          const okJson = (r) => { if (!r.ok) throw new Error(`delta ${r.status}`); return r.json(); };
+          const [convosR, resR] = await Promise.allSettled([
             blocked.convoCursor
               ? feedSince()
-              : fetch('/api/conversations?since=' + encodeURIComponent(blocked.convoSince)).then((r) => r.json()),
-            fetch('/api/cards?limit=500&updatedSince=' + encodeURIComponent(blocked.cardSince)).then((r) => r.json()),
+              : fetch('/api/conversations?since=' + encodeURIComponent(blocked.convoSince)).then(okJson),
+            fetch('/api/cards?limit=500&updatedSince=' + encodeURIComponent(blocked.cardSince)).then(okJson),
           ]);
-          if (convos === null) { blocked.loaded = false; return; }   // 409: another store; re-boot on the next tick
+          if (convosR.status === 'rejected') throw convosR.reason;
+          if (resR.status === 'rejected') throw resR.reason;   // the feed cursor has NOT moved: the rows will be read again
+          const fed = convosR.value, res = resR.value;
+          if (fed === null) { blocked.loaded = false; return; }   // 409: another store; re-boot on the next tick
+          // both reads succeeded: commit the feed's rows and its cursor together
+          const convos = blocked.convoCursor && fed && !Array.isArray(fed) ? fed.rows : fed;
+          if (blocked.convoCursor && fed && !Array.isArray(fed)) blocked.convoCursor = fed.cursor;
           const cards = res && Array.isArray(res.cards) ? res.cards : [];
           for (const m of (Array.isArray(convos) ? convos : [])) {
             if (!raiseRow(m) || blocked.convos.has(m.id)) continue;
@@ -697,13 +730,18 @@
           blocked.convoSince = maxStamp(blocked.convoSince, Array.isArray(convos) ? convos : [], 'createdAt');
           blocked.cardSince = maxStamp(blocked.cardSince, cards, 'updatedAt');
         }
+        blockedBackoffMs = 0;   // the reads answered: a later failure starts its backoff from 16 s again
         if (!changed) return;
         const cardById = blocked.cards;
         const raises = openRaises([...blocked.convos.values()], cardById);
         blockedToggle.textContent = `🚧 Raised hands · ${raises.length}`;
         blockedToggle.classList.toggle('has-items', raises.length > 0);
         renderBlocked(raises, cardById);
-      } catch (_) { /* offline — leave last state */ }
+      } catch (_) {
+        // offline or refused — leave last state, and wait longer before trying again (never a retry every tick)
+        blockedBackoffMs = Math.min(blockedBackoffMs ? blockedBackoffMs * 2 : 16000, 300000);
+        blockedRetryAt = Date.now() + blockedBackoffMs;
+      } finally { blockedBusy = false; }
     }
     refreshBlocked();
     setInterval(refreshBlocked, 8000);

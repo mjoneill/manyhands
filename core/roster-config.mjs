@@ -82,14 +82,16 @@ export function loadRoster(file = rosterFilePath(), onWarn = () => {}) {
 const SEAT_KEY_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/i;
 const HEX_COLOR_RE = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
 
-export function validateRoster(input) {
+export function validateRoster(input, { maxSeats = 64 } = {}) {
   const seats = input && typeof input === 'object' && input.seats ? input.seats : input;
   if (!seats || typeof seats !== 'object' || Array.isArray(seats)) {
     throw new Error('roster must be an object of seats');
   }
   const keys = Object.keys(seats);
   if (keys.length === 0) throw new Error('a roster with no seats would empty the room — add at least one');
-  if (keys.length > 64) throw new Error('more than 64 seats is almost certainly a mistake');
+  // #1764 — 64 bounds what a person can SAVE; the history gate's export is a transitional superset (old ∪ new, so up to
+  // twice that), and only that writer raises the bound.
+  if (keys.length > maxSeats) throw new Error(`more than ${maxSeats} seats is almost certainly a mistake`);
 
   const clean = {};
   for (const key of keys) {
@@ -190,8 +192,8 @@ export function loadRosterRoles(file = rosterFilePath()) {
  * caller passed `roles`, writes those too — a save that says nothing about
  * roles keeps the file's; an explicit empty value clears one).
  */
-export function writeRoster(input, file = rosterFilePath()) {
-  const clean = validateRoster(input);
+export function writeRoster(input, file = rosterFilePath(), { maxSeats = 64 } = {}) {
+  const clean = validateRoster(input, { maxSeats });
   const rolesGiven = input && typeof input === 'object' && Object.prototype.hasOwnProperty.call(input, 'roles');
   const roles = rolesGiven ? validateRoles(input.roles, clean) : null;
 

@@ -24,8 +24,10 @@ async function pair(extraEnv = {}) {
   const restPort = await freePort(); const mcpPort = await freePort();
   const cfgFile = path.join(os.tmpdir(), `ring-1424-${process.pid}-${restPort}.json`);
   fs.writeFileSync(cfgFile, JSON.stringify(RING));
-  const rest = await startRestServer({ port: restPort, mcpNotifyUrl: `http://127.0.0.1:${mcpPort}/internal/notify` });
-  const mcp = await startMcpServer({ port: mcpPort, restApiBase: rest.baseUrl, env: { SCRUM_CHANNEL_STAGGER: '', SCRUM_CHANNEL_CONFIG_FILE: cfgFile, ...extraEnv } });
+  // #1784 — MCP reads the channel config from REST (refreshed every MCP_CHANNEL_CONFIG_REFRESH_MS), never a file of its own; the
+  // config file is REST's (unit off, REST reads it live), so a rewrite reaches MCP within one refresh.
+  const rest = await startRestServer({ port: restPort, channelConfigFile: cfgFile, mcpNotifyUrl: `http://127.0.0.1:${mcpPort}/internal/notify` });
+  const mcp = await startMcpServer({ port: mcpPort, restApiBase: rest.baseUrl, env: { SCRUM_CHANNEL_STAGGER: '', MCP_CHANNEL_CONFIG_REFRESH_MS: '100', ...extraEnv } });
   return { rest, mcp, cfgFile, async stop() { await mcp.stop(); await rest.stop(); try { fs.unlinkSync(cfgFile); } catch { /* */ } } };
 }
 const post = (base, body) => fetch(`${base}/api/conversations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ body, author: 'alex' }) });
@@ -43,7 +45,7 @@ test('#1424 A — a lease held when the mode flips OFF quiesces at the next time
     const env1 = await stream.next('notifications/claude/channel');
     assert.equal(env1.params.meta.token_ring_lease_id, '1', 'control: lease 1 granted under token-ring');
     // The owner flips the mode OFF while lease 1 is held (the trial's 14:25:22Z).
-    fs.writeFileSync(p.cfgFile, JSON.stringify(OFF));
+    fs.writeFileSync(p.cfgFile, JSON.stringify(OFF));   // REST reads it live; MCP sees it at its next refresh (100 ms, inside the 500 ms TTL)
     const log = () => p.mcp.stdoutText();
     assert.ok(await poll(() => /"stage":"board\.timeout\.fired".*"leaseId":"1"/.test(log()), 3000), 'lease 1 times out');
     assert.ok(await poll(() => /"stage":"board\.quiesce".*"reason":"mode-off"/.test(log()), 2000), `the timeout in off mode QUIESCES: ${log().slice(-600)}`);

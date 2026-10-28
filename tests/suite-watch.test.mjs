@@ -66,6 +66,9 @@ function makeUniverse() {
   // #1672 — run-test-files.mjs imports the suite's temp owner too
   const suiteTmp = path.join(ROOT, 'scripts', 'suite-tmp.mjs');
   if (fs.existsSync(suiteTmp)) fs.copyFileSync(suiteTmp, path.join(dir, 'scripts', 'suite-tmp.mjs'));
+  // #1588 — and the host-preservation guard it consults before and during a full suite
+  const hostGuard = path.join(ROOT, 'scripts', 'host-guard.mjs');
+  if (fs.existsSync(hostGuard)) fs.copyFileSync(hostGuard, path.join(dir, 'scripts', 'host-guard.mjs'));
   // ...and suite-tmp.mjs runs proc-env-owned.py on macOS to decide which processes are the run's
   const procEnv = path.join(ROOT, 'scripts', 'proc-env-owned.py');
   if (fs.existsSync(procEnv)) fs.copyFileSync(procEnv, path.join(dir, 'scripts', 'proc-env-owned.py'));

@@ -18,6 +18,7 @@
  * and is guaranteed to lead the file (domainToJsonLd places it first).
  */
 
+import { assertDocumentNotRetired } from './document-retired.mjs';
 import { readFileSync, writeFileSync, renameSync, existsSync, statSync } from 'node:fs';
 import { countLegacy } from './legacy-counters.mjs';
 import { boardToDomain } from './mapping.mjs';
@@ -124,6 +125,7 @@ function _parseDomain(filePath) {
  * the timestamp (test determinism). Returns the written JSON-LD document.
  */
 export function saveDomain(filePath, domain, opts = {}) {
+  assertDocumentNotRetired(filePath);   // #1743
   countLegacy('saveDomain');
   let stamped = { ...domain, lastUpdated: opts.now || new Date().toISOString() };
   // #686 — a ROSTERED writer materializes Person nodes into the document

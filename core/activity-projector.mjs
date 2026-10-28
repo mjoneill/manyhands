@@ -26,7 +26,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import oxigraph from 'oxigraph';
 import { SEGMENT_RE } from './event-log.mjs';
-import { projectActivityItem, isProjectableEvent, projectWorkLedger } from './graph-replica.mjs';
+import { projectActivityItem, isProjectableEvent } from './graph-replica.mjs';
+import { WRITE_PROTOCOL, WRITE_PROTOCOL_HEADER } from './graph-client.mjs';
 
 export const BOOK_GRAPH = 'urn:scrum:bookkeeping:activity-projector';
 const CURSOR = 'urn:scrum:bookkeeping:activity-projector:cursor';
@@ -126,43 +127,6 @@ export function readLogStrict(logDir, sinceSeq, limit) {
   return { events: out.slice(0, limit), pendingTail };
 }
 
-/**
- * STRICT, SINGLE READ of the work ledger, for the same reason: the ledger cursor is a ROW INDEX, so a
- * skipped line would shift every later index. Read once, every line validated (id, seq, transition.type),
- * and the batch projects these parsed rows. An unterminated LAST line is an append in flight: waiting, never
- * projected, even if it already parses (the same completion rule as the log).
- * REFUSES: a missing work directory; a missing ledger file (at any cursor); a cursor
- * past the ledger's row count (SOURCE REGRESSION).
- */
-export const WORK_FILE = 'work-objects.jsonl';
-export function readLedgerStrict(workDir, cursorRows) {
-  let st = null; try { st = fs.statSync(workDir); } catch { /* reported below */ }
-  if (!st || !st.isDirectory()) throw new Error(`MISSING SOURCE: the work store directory ${workDir} does not exist — nothing sent`);
-  const full = path.join(workDir, WORK_FILE);
-  // A missing ledger is refused even before the first projected row: a wrong path would otherwise read
-  // as an empty ledger and look caught up (#1641 review). There is no "no-ledger" mode; nothing needs one.
-  if (!fs.existsSync(full)) throw new Error(`MISSING SOURCE: ${WORK_FILE} is missing from ${workDir} (ledger cursor at row ${cursorRows}) — nothing sent`);
-  const text = fs.readFileSync(full, 'utf8');
-  const lines = text.split('\n');
-  const rows = []; let pendingTail = null;
-  for (let i = 0; i < lines.length; i++) {
-    const l = lines[i];
-    if (!l.trim()) continue;
-    const inFlightTail = i === lines.length - 1 && !text.endsWith('\n');
-    if (inFlightTail) { pendingTail = { segment: WORK_FILE, line: i + 1 }; continue; }   // the same completion rule as the log
-    let r;
-    try { r = JSON.parse(l); } catch {
-      throw new Error(`UNREADABLE line ${i + 1} of ${WORK_FILE} in ${workDir}: not JSON — not skipped; nothing sent, cursor unchanged`);
-    }
-    if (typeof r?.id !== 'string' || r.seq == null || !r.transition || !r.transition.type) {
-      throw new Error(`UNREADABLE line ${i + 1} of ${WORK_FILE} in ${workDir}: missing id, seq or transition.type — not skipped; nothing sent, cursor unchanged`);
-    }
-    rows.push(r);
-  }
-  if (rows.length < cursorRows) throw new Error(`SOURCE REGRESSION: the ledger cursor is at row ${cursorRows} but ${WORK_FILE} holds ${rows.length} row(s) — nothing sent`);
-  return { rows, pendingTail };
-}
-
 const nTriples = (store) => store.match(null, null, null, oxigraph.defaultGraph()).map((q) => `${q.subject} ${q.predicate} ${q.object} .`);
 
 /**
@@ -171,16 +135,17 @@ const nTriples = (store) => store.match(null, null, null, oxigraph.defaultGraph(
  * a second projector on the same executor applies nothing and is told so. Returns {projected, cursor} —
  * projected 0 means caught up and NOTHING was sent.
  */
-export async function projectBatch({ logDir, workDir, executorUrl, graph = BOOK_GRAPH, batchSize = 500 }) {
-  for (const [k, v] of Object.entries({ logDir, workDir, executorUrl })) if (!v) throw new Error(`projectBatch: ${k} is required (no default)`);
+// #1763 — the work ledger is RETIRED: its 53 rows are already executor nodes. `workDir` is still ACCEPTED (an old caller, or
+// tonight's plist, still passes it) and IGNORED; nothing reads the ledger file, and the cursor's workRows stays where it is,
+// so the compare-and-set keeps its exact shape.
+export async function projectBatch({ logDir, workDir, executorUrl, graph = BOOK_GRAPH, batchSize = 500 }) {   // eslint-disable-line no-unused-vars
+  for (const [k, v] of Object.entries({ logDir, executorUrl })) if (!v) throw new Error(`projectBatch: ${k} is required (no default)`);
   if (graph !== BOOK_GRAPH) throw new Error(`projectBatch: the cursor graph is ${BOOK_GRAPH}`);
   const cursor = await readCursor(executorUrl);
   const log = readLogStrict(logDir, cursor.seq, batchSize);
-  const ledger = readLedgerStrict(workDir, cursor.workRows);
-  const pendingTail = log.pendingTail ?? ledger.pendingTail;
+  const pendingTail = log.pendingTail;
   const events = log.events;
-  const workSlice = ledger.rows.slice(cursor.workRows, cursor.workRows + batchSize);
-  if (!events.length && !workSlice.length) return { projected: 0, cursor, pendingTail };
+  if (!events.length) return { projected: 0, cursor, pendingTail };
 
   // MALFORMED INPUT FAILS CLOSED, naming the event. The old copy skips such events silently; here a
   // skip would advance the cursor past history nobody looked at. 0 of 91,506 live events were
@@ -194,9 +159,7 @@ export async function projectBatch({ logDir, workDir, executorUrl, graph = BOOK_
   const scratch = new oxigraph.Store();
   let items = 0;
   for (const ev of events) if (projectActivityItem(scratch, ev)) items++;
-  projectWorkLedger(scratch, workSlice);
-  items += workSlice.length;
-  const next = { seq: events.length ? events.at(-1).seq : cursor.seq, workRows: cursor.workRows + workSlice.length };
+  const next = { seq: events.at(-1).seq, workRows: cursor.workRows };   // #1763 — the ledger cursor no longer moves
 
   const guard = cursor.present
     ? `GRAPH <${BOOK_GRAPH}> { <${CURSOR}> <${P_SEQ}> ?s . <${CURSOR}> <${P_WORK}> ?w . <${CURSOR}> ?p ?o } FILTER(?s = ${cursor.seq} && ?w = ${cursor.workRows})`
@@ -213,6 +176,8 @@ export async function projectBatch({ logDir, workDir, executorUrl, graph = BOOK_
   const opId = `urn:ex:op/activity-projector/${crypto.randomUUID()}`;
   const r = await post(executorUrl, '/update', sparql, {
     'content-type': 'application/sparql-update', 'x-op-id': opId, ...(epoch != null ? { 'x-epoch': epoch } : {}),
+    // #1748: the write floor admits only clients that declare the protocol; a store without a floor ignores it
+    [WRITE_PROTOCOL_HEADER]: WRITE_PROTOCOL,
   });
   if (r.status !== 200) throw new Error(`update refused: HTTP ${r.status} ${r.text.slice(0, 300)}`);
   const after = await readCursor(executorUrl);

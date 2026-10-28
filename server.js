@@ -42,6 +42,8 @@ import { validateCompare, evaluateCompareAsync } from './core/check-compare.mjs'
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { countLegacy, setLegacyContext, installStructuredCloneCounter, legacyCounters } from './core/legacy-counters.mjs';
 import { createGraphSlice } from './core/graph-slice-routes.mjs';
+import { historyNativeOn } from './core/durable-update.mjs';   // #1762 S1b
+import { refusalIntention, refusalSeat, routeTemplate, adapterRoute, createRefusalAuditMeter, UNLISTED as REFUSAL_UNLISTED } from './core/refusal-record.mjs';   // #1762 S2
 // #1561 — the log-born unit (memory, decision, seat-state) on the graph executor, behind
 // SCRUM_GRAPH_UNIT_LOGBORN=1. The folds live there now; with the flag OFF they are the only part used.
 import {
@@ -64,12 +66,14 @@ import { KIND_DECLARATIONS, PROJECTED_TYPES, divergence } from './core/kind-regi
 import { SHAPE_QUERY, withObjectShapes } from './core/predicate-shapes.mjs';
 import { shortenTypeIri, PERSON_IRI_BASE } from './core/jsonld.mjs';
 // #805 — the boot migration's inputs (the live flat sources) and its builder.
-import { readPool, recentWhispers, DEFAULT_POOL, poolFilePath } from './whisper-store.mjs';
-import { readTendingConfig, writeTendingConfig } from './tending-config.mjs';
+import { readPool, recentWhispers, DEFAULT_POOL, poolFilePath, whisperStateFilePath } from './whisper-store.mjs';
+import { readTendingConfig, validateTendingConfig, tendingConfigFilePath } from './tending-config.mjs';   // #1785 — the file is read ONCE, by the boot import
 import { buildTendingEntities, person as personIri } from './core/tending-bootstrap.mjs';
 import { resolvePool as resolveWhisperPool, bagState } from './core/tending-pool.mjs';
 import { mintId } from './core/tending-ids.mjs';
-import { createPrompt, editPrompt, setEnabled, reorderPlaylist, removePrompt, setShuffle, readShuffle, assertSlug } from './core/tending-authoring.mjs';
+import { windowReserved, reservationEntity, claimStateFor, grantEntity, claimHistory } from './core/whisper-graph.mjs';   // #1786
+import { claimWhisper, HOUR_MS } from './core/whisper-window.mjs';   // #1786 — the claim decision, unchanged, over graph state
+import { createPrompt, editPrompt, setEnabled, reorderPlaylist, removePrompt, setShuffle, readShuffle, assertSlug, readTendingConfigFrom, setTendingConfig, tendingConfigImported } from './core/tending-authoring.mjs';
 import { resolveProvenance } from './core/tending-provenance.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
 import { moveFenceIds, moveFenceEntity } from './core/move-fences.mjs';   // #1707
@@ -90,8 +94,10 @@ import { commentMetadata } from './core/card-comments.mjs';
 import { cardOutline } from './core/card-outline.mjs';
 import { roleSectionFor, heldRoleKey } from './core/role-section.mjs';   // #1376
 import { validateDeclaration, seatState, tendingEligibility, declarationsFromRows, UNKNOWN as SEAT_UNKNOWN } from './core/seat-state.mjs';
-import { readConfig, writeConfig, LIMITS } from './channel-config.mjs';
-import { droppedAgentSeats, loadRoster, writeRoster, rosterFilePath, loadRosterRoles } from './core/roster-config.mjs';
+import { readConfig, writeConfig, validateConfig, configFilePath, LIMITS } from './channel-config.mjs';
+import { channelConfigEntity, channelConfigFrom, channelConfigInGraph, CHANNEL_CONFIG_IRI } from './core/channel-config-graph.mjs';   // #1784
+import { droppedAgentSeats, loadRoster, writeRoster, rosterFilePath, loadRosterRoles, validateRoster, validateRoles } from './core/roster-config.mjs';
+import { rosterEntities, seatsFrom, rolesFrom, rosterInGraph, supersetSeats } from './core/roster-graph.mjs';   // #1764
 import { extractMentions as extractMentionsFromRoster } from './core/people.mjs';
 // #868 — the graph modules are imported LAZILY, at the bottom of this file's
 // graph section, and deliberately NOT here. They reach `oxigraph`, an npm
@@ -104,8 +110,10 @@ import { probeModel, PROTOCOL_NAMES as MODEL_PROTOCOLS } from './core/model-adap
 import { deriveGraph, personByKey } from './core/people.mjs';
 import { queryCards, facetCards, excerptOf, EXCERPT_CEILING } from './core/cards-query.mjs';
 import { similarCards } from './core/similar-cards.mjs';
-import { queryChangesFromLog, parseSince, EPOCH_CHANGED } from './core/changes-log-query.mjs';
+import { queryChangesFromLog, parseSince, EPOCH_CHANGED, incarnationTag } from './core/changes-log-query.mjs';
 import { feedQuery, feedRowsFromBindings, postFeedQuery, postFeedRows, REDACTED_IDS_QUERY, redactedIdsFrom } from './core/logborn-feed.mjs';   // #1561 — the unit's writes in the change feed
+import { FRONTIER_QUERY, classifyFrontier } from './core/history-frontier.mjs';   // #1762 S3 — card history from the graph past F
+import { legacyQuery, legacyEventsFromBindings, nativeQuery, nativeRowsFromBindings, refusalQuery, refusalRowsFromBindings, markerOf, instantKey } from './core/history-graph-read.mjs';
 import { readEvents, nextSeq, oldestRetainedAt, seqAsOf, seqOfEntityEvent, activityReadWindow, advanceActivityCursor } from './core/event-log.mjs';
 import { writeSnapshot, readSnapshot, sweepSnapshotTemps, snapshotPaths } from './core/graph-snapshot.mjs';   // #884 · #1386 reads the sidecar
 import { staleClaims, STALE_CLAIM_HOURS } from './core/stale-claims.mjs';   // #455
@@ -121,6 +129,8 @@ import {
   discardPendingServes, headSeq, PULL_LIMIT, graphAckedOf, ackFor, parseAckToken,   // #1576
   ACK_TOKEN_INVALID, ACK_UNKNOWN_LANE, ACK_FENCED, CURSOR_ROLLED_BACK,   // #1561 rollback
 } from './core/cursor-service.mjs';
+import { setCursorsDataDir, setCursorsOwnedFile, cursorsPath, loadCursors, CURSOR_STATE_INVALID } from './core/cursors.mjs';
+import { lanePageFromHistory } from './core/history-lane.mjs';   // #1762 S4 — the proven lane log half past F   // #1762 S4 — the relocated lane state
 import { configureIdentities, usingDefaultRoster } from './core/identity.mjs';
 import { hostAllowed, parseAllowedHosts, refuseHost } from './core/host-guard.mjs';
 import { agentConstraints, unseenLayers } from './core/agent-constraints.mjs';   // #1350
@@ -133,6 +143,9 @@ const DELIVERIES_UNIT = process.env.SCRUM_GRAPH_UNIT_DELIVERIES === '1';
 // `card.write` per locked write. The document's own card list is neither read nor written while the flag is on.
 const CARDS_UNIT = process.env.SCRUM_GRAPH_UNIT_CARDS === '1';
 let CARDS = null;
+let ORIGIN_MOD = null;   // #1629 s3 — core/origin-commit.mjs, loaded at boot in executor-owned mode only
+let COMPILER_MOD = null;   // #1629 s3 — core/graph-compiler.mjs (the publication digest, settleOpId), same
+let POSTSEQ_MOD = null;   // #1629 s3 G1 — core/postseq-reserve.mjs (ordinary posts reserve from the one allocator), same
 const FILE_CARDS = Symbol('fileCards');           // the document's card list, put back before the document is written
 const FILE_NEXT_SHORT_ID = Symbol('fileNextShortId');
 const FILE_ORIGINS = Symbol('fileOutboxOrigins');   // #1598 K4 — the outbox mutations the document already held when read
@@ -145,9 +158,40 @@ const SMALLKINDS_UNIT = process.env.SCRUM_GRAPH_UNIT_SMALLKINDS === '1';
 // FAIL-CLOSED: read-off and off refuse to start unless every authoritative unit is on AND every field that only the
 // document holds has an owner. The refusal names everything missing, in one line, before the server listens.
 const BOARD_DOCUMENT = process.env.SCRUM_BOARD_DOCUMENT ?? 'on';
+// #1629 slice 3 — EXECUTOR-OWNED ANNOUNCEMENTS. In read-off/off (which the gate below admits only with every unit on) the
+// announcement outbox lives in the executor: an origin route commits its Origin, Obligations and reservations in its own
+// card.write (slice 2's primitive), GET /api/outbox and /publish read the executor, settlement is obligation.settle, and
+// boot never requeues into the document or drains inline. In `on` nothing here runs: today's document path, unchanged.
+// ⚠️ ISOLATED AND INCOMPLETE (commons 45032): owning the outbox is CODE COVERAGE, not migrated-state readiness or cutover
+// permission. Two origin shapes still refuse here until #1629 slice 4 — a page create (wiki-create) and a done-move that
+// shifts a sibling — and existing document outbox entries are not migrated (M1/M2 deferred).
+const ORIGIN_EXECUTOR = BOARD_DOCUMENT !== 'on';
+// #1744 — a card create or delete must prove the derived reference index complete (core/card-ref-index.mjs): always in
+// executor-owned mode, and in mode on once its backfill has run and SCRUM_CARD_REF_INDEX=enforce (F3: backfill BEFORE
+// enforcement, so no mode-on write is stranded on a missing index). Every card write maintains the index either way.
+const CARD_REF_INDEX_ENFORCE = ORIGIN_EXECUTOR || process.env.SCRUM_CARD_REF_INDEX === 'enforce';
+// Everywhere else (mode on, not enforced) the guard is MARKER-KEYED (finding 5): a create or delete proves the index once
+// the store holds the completion marker, so a backfilled store cannot be written around by an unset environment variable.
+const CARD_REF_INDEX_GUARD = CARD_REF_INDEX_ENFORCE ? true : 'marker';
+/** #1744 — after a guarded write is refused: is the INDEX the reason (true), or a stale version (false)? null = unknown. */
+// #1769 — "incomplete" is what the write guard refuses on: the completion marker is not exactly one xsd:boolean `true`. It
+// used to run the whole-index invariant query (31–34 s on the real board, past this 15 s bound, so a mode-off boot refused
+// with "not checkable"). The whole-index proof is verifyIndex's (core/card-ref-index-verify.mjs), which the boot gate runs
+// first and which is strictly stronger.
+async function cardRefIndexIncomplete() {
+  try {
+    const { cardRefIndexMarkerValuesSparql } = await import('./core/graph-compiler.mjs');
+    const c = createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 15000, label: 'card-ref-index' });
+    const m = await c.query(cardRefIndexMarkerValuesSparql());
+    if (!m.ok) return null;
+    if (!m.rows.length) return CARD_REF_INDEX_ENFORCE;   // marker-keyed: with no marker at all the index held nothing back
+    const v = m.rows.map((b) => b.ixmk);
+    return !(v.length === 1 && v[0].value === 'true' && v[0].datatype === 'http://www.w3.org/2001/XMLSchema#boolean');
+  } catch { return null; }
+}
 // the fields no unit holds yet, each with the card that gives it an owner; `owned` flips when that card's build lands
 const DOCUMENT_ONLY_FIELDS = [
-  { field: 'outbox (announcement origins and entries)', card: '#1629', owned: () => false },
+  { field: 'outbox (announcement origins and entries)', card: '#1629', owned: () => ORIGIN_EXECUTOR },
   // #1640 — the labelAliases collection family is held by the collections unit, which the smallkinds unit turns on
   { field: 'labelAliases', card: '#1640', owned: () => SMALLKINDS_UNIT },
   // #1707 — the moveFences collection family is held by the collections unit, which the smallkinds unit turns on
@@ -214,14 +258,26 @@ const ALLOWED_HOSTS = parseAllowedHosts(process.env.SCRUM_ALLOWED_HOSTS);
 // loopback client that names its port. Set in the listen callback.
 let BOUND_PORT = PORT;
 const PROJECT_DIR = path.dirname(fileURLToPath(import.meta.url));
-const BOARD_DATA_FILE = process.env.SCRUM_BOARD_FILE || path.join(PROJECT_DIR, 'board-data.json');
+// #1788 — ONE data folder. SCRUM_DATA_DIR names it, and the board file defaults into it; unset, the folder is the board file's
+// own (every path below is then exactly what it was before). Every explicit per-file variable still wins.
+const BOARD_DATA_FILE = process.env.SCRUM_BOARD_FILE || path.join(process.env.SCRUM_DATA_DIR || PROJECT_DIR, 'board-data.json');
+const DATA_DIR = process.env.SCRUM_DATA_DIR || path.dirname(BOARD_DATA_FILE);
+setCursorsDataDir(DATA_DIR);   // #1762 S4 — a relocated cursors.json in the data folder is THE lane state once it exists
+setCursorsOwnedFile(process.env.SCRUM_CURSORS_FILE || null);   // #1762 S4 v1.1 A3 — configured ownership: the only state, never a fallback
+// the event log and the misses log are named for the board file's IDENTITY (#669: two boards never share a log). Its basename
+// suffices only when the board lives IN the data folder (two files in one folder cannot share a name); a board kept elsewhere
+// adds a short hash of its absolute path, so two `board.json` files from different folders cannot collide in one DATA_DIR.
+// Production (board inside its folder) keeps exactly its existing names.
+const BOARD_STEM = path.basename(BOARD_DATA_FILE).replace(/\.json$/, '')
+  + (path.resolve(path.dirname(BOARD_DATA_FILE)) === path.resolve(DATA_DIR) ? ''
+    : `-${crypto.createHash('sha256').update(path.resolve(BOARD_DATA_FILE)).digest('hex').slice(0, 8)}`);
 
 // #1343 — seat credentials. Env-var-else-BESIDE-THE-BOARD: the file the MCP
 // adapter reads (SCRUM_SEAT_TOKENS) is this one; with no env it is the board
 // file's sibling, which is where the deployment keeps it. Absent = DORMANT.
 // The mode is per PROCESS, read once at boot, and a misspelling THROWS here
 // rather than running open (core/credentials.mjs readAuthMode).
-const SEAT_TOKENS_PATH = process.env.SCRUM_SEAT_TOKENS || path.join(path.dirname(BOARD_DATA_FILE), 'seat-tokens.json');
+const SEAT_TOKENS_PATH = process.env.SCRUM_SEAT_TOKENS || path.join(DATA_DIR, 'seat-tokens.json');   // #1788
 const AUTH_MODE = readAuthMode(process.env.SCRUM_AUTH);
 const authStats = { refused: 0, unknownBearers: 0, expiredBearers: 0, mismatched: 0 };
 let _creds = null, _credsMtime = -1, _credsCheckedAt = 0;
@@ -260,7 +316,7 @@ const INSTANCE_ID = process.env.SCRUM_INSTANCE_ID || '';
 // two stores in one directory silently share a log, which is the worst possible
 // failure for an append-only record. Day-segmented files land inside.
 const EVENT_LOG_DIR = process.env.SCRUM_EVENT_LOG_DIR
-  || `${BOARD_DATA_FILE.replace(/\.json$/, '')}-events`;
+  || path.join(DATA_DIR, `${BOARD_STEM}-events`);   // #1788 — in the data folder; unset, that is the board file's folder
 // Root directory for static file serving. Defaults to the project dir;
 // overridable so tests can exercise the traversal guard in isolation.
 const STATIC_DIR = process.env.SCRUM_STATIC_DIR || PROJECT_DIR;
@@ -319,21 +375,42 @@ function agentSeats(data) {
 let _rosterCache = { key: null, seats: null };
 let _rosterComputing = false;   // re-entrancy guard: readBoard → mentions → roster → readBoard
 function fileKey(file) { if (file === BOARD_DATA_FILE) countLegacy('boardStat'); try { const st = fs.statSync(file); return `${st.mtimeMs}:${st.size}`; } catch { return 'absent'; } }   // #1563 — a stat of the board file is a touch, counted
+// #1764 — with the collections unit holding `rosterSeats`, the CONFIGURED seats and roles are graph state; roster.json is a
+// one-time import and then an export for the pre-push history gate only (core/roster-graph.mjs). Unit off: the file, as before.
+const rosterHeld = () => !!(COLLECTIONS && COLLECTIONS.keys.includes('rosterSeats'));
+function configuredSeats(onWarn, ents = null) {
+  if (rosterHeld()) {
+    const e = ents ?? COLLECTIONS.snapshot().rosterSeats ?? [];
+    if (rosterInGraph(e)) return seatsFrom(e);
+  }
+  return loadRoster(undefined, onWarn) || {};   // unit off, or a graph with no roster yet: the file (or the shipped example)
+}
+function configuredRoles(ents = null) {
+  if (rosterHeld()) {
+    const e = ents ?? COLLECTIONS.snapshot().rosterSeats ?? [];
+    if (rosterInGraph(e)) return rolesFrom(e);
+  }
+  return loadRosterRoles();
+}
+/** #1764 — the history gate's copy (severance-check reads roster.json). Throws when it cannot be written. */
+// The export may hold up to twice the save limit: mid-save it is the superset of the old and new rosters (#1764 C1).
+const writeRosterExport = (seats, roles) => writeRoster({ seats, roles }, rosterFilePath(), { maxSeats: 128 });
+
 function currentRoster(data = null) {
   if (!data) {
     const key = `${DOCUMENT_READS ? fileKey(BOARD_DATA_FILE) : `collections-${COLLECTIONS?.generation ?? 0}`}|${fileKey(rosterFilePath())}`;   // #1563 — invalidated by the agents collection, not the file
     if (_rosterCache.key === key && _rosterCache.seats) return configureIdentities(_rosterCache.seats);
-    if (_rosterComputing) return configureIdentities(loadRoster(undefined, warnRosterOnce));   // never recurse into readBoard
+    if (_rosterComputing) return configureIdentities(configuredSeats(warnRosterOnce));   // never recurse into readBoard
     let board = null;
     _rosterComputing = true;
     try { board = readBoard(); } catch (e) { warnRosterOnce(`board unreadable for agent seats: ${e.message}`); } finally { _rosterComputing = false; }
-    const fileSeats = loadRoster(undefined, warnRosterOnce) || {};
+    const fileSeats = configuredSeats(warnRosterOnce, board?.rosterSeats ?? null);   // #1764
     const merged = mergeSeats(fileSeats, agentSeats(board));
     const seats = Object.keys(merged).length ? merged : null;
     _rosterCache = { key, seats };
     return configureIdentities(seats);
   }
-  const fileSeats = loadRoster(undefined, warnRosterOnce) || {};
+  const fileSeats = configuredSeats(warnRosterOnce, data.rosterSeats ?? null);   // #1764
   const merged = mergeSeats(fileSeats, agentSeats(data));
   return configureIdentities(Object.keys(merged).length ? merged : null);
 }
@@ -571,6 +648,7 @@ function appendClaimAnnouncement(data, card, actor, action) {
 // If the direct post was skipped (it is best-effort), the entry has no proof
 // and /publish blocks it as legacy-proof-missing rather than guessing.
 function commitCardObligation(data, card, actor, slot, action, announced = null) {
+  if (ORIGIN_EXECUTOR) throw new OriginShapeRefused('a legacy-mode announcement is not created when the executor owns the outbox (#1629 s3, S2)', 'LEGACY_ORIGIN_REFUSED');
   const mutationId = crypto.randomUUID();
   const body = announced?.body || claimAnnouncement(card, actor, action) || `${actor} ${action} #${card.shortId}`;
   if (announced) announced.origin = { mutationId, slot };
@@ -599,6 +677,7 @@ function usesAnnouncementPublisher(data) {
   return !!ANNOUNCE_EXECUTOR && postSeqState(data).state !== 'clean';
 }
 function commitPublisherAnnouncement(data, { slot, body, author = CLAIM_ANNOUNCER, notify, origin, actor }) {
+  if (ORIGIN_EXECUTOR) return stageOriginAnnouncement(data, { slot, body, author, notify, origin, actor });   // #1629 s3
   if (!usesAnnouncementPublisher(data) || typeof body !== 'string' || !body) return null;
   const mutationId = crypto.randomUUID();
   const at = new Date().toISOString();
@@ -618,6 +697,38 @@ function commitPublisherAnnouncement(data, { slot, body, author = CLAIM_ANNOUNCE
   data[OUTBOX_FIELD] = { origins: ob.origins, entries: { ...ob.entries, [id]: entry } };
   events.push(announcementEvent(entry, actor));
   return { entry, events, nextMark: n + 1 };
+}
+
+/**
+ * #1629 s3 — executor-owned mode: the announcement is NOT written into the document. It is STAGED on this locked write's
+ * context, and the lock commits it as slice 2's origin (origin.prepare, then the card.write that carries the business
+ * change, the Origin, its Obligation and the reserved postSeq — CARDS.commitOrigin). The route keeps its shape: `entry`
+ * is a handle the lock fills with the committed identity, `events` add nothing, and there is no document mark to raise.
+ * originActor is the seat that caused the write when the route names one, else the system actor `board` (r2 §2, A1);
+ * the post's author stays the route's. The slot names the route (claim, release, done-nudge, wiki, agent-rest/-retire).
+ */
+function stageOriginAnnouncement(data, { slot, body, author, notify, origin, actor }) {
+  if (typeof body !== 'string' || !body) throw new OriginShapeRefused('an executor-owned announcement needs a body (#1629 s3)');
+  const staged = cardWriteContext.getStore();
+  if (!staged) throw new Error('#1629 s3: an announcement outside withWriteLock cannot be committed to the graph');
+  if (staged.origin) throw new OriginShapeRefused('one origin per write (#1629 s3)');
+  const handle = { mode: 'publisher', executorOwned: true, slot, mutationId: null, obligationId: null };
+  staged.origin = {
+    route: slot, slot, body, author, notify: !!notify, provenance: origin,
+    originActor: typeof actor === 'string' && ASSIGNEE_KEY_RE.test(actor) ? actor : 'board',
+    mentions: extractMentionsFromRoster(body, currentRoster(data)), handle,
+    // G2 — minted ONCE per staged origin (one lock attempt) and frozen into the Prepared identity via requestKey. UNKNOWN
+    // is reconciled under the same intention (durableUpdate); only a new attempt after a definitive refusal mints anew.
+    nonce: crypto.randomUUID(),
+  };
+  return { entry: handle, events: [], nextMark: null };
+}
+/** #1629 s3 — an origin shape this slice does not migrate, or a legacy creation, refused BEFORE any durable effect. */
+class OriginShapeRefused extends Error {
+  constructor(m, code = 'ORIGIN_SHAPE_NOT_MIGRATED') {
+    super(m); this.code = code;
+    const ctx = requestContext.getStore(); if (ctx) ctx.originRefused = { code, message: m };
+  }
 }
 
 // README block injected into every write so the warning is the first thing
@@ -895,6 +1006,18 @@ function logRefused(req, statusCode, data) {
     let tail = rawTail;
     try { tail = decodeURIComponent(rawTail); } catch { /* malformed escape — the raw form is the only id it has */ }
     const actor = (request && (request.by || request.author || request.createdBy || request.decidedBy)) || null;
+    // #1762 S2 — with native history on, the refusal is ONE content-free graph record and nothing goes to the event log.
+    if (historyNativeOn()) {
+      if (req._noRefusalAudit) return;   // the audit write of a refusal report failed: that failure is counted, not recorded
+      const mr = meterRoute.getStore();
+      const facts = {
+        route: mr && mr.path === url ? routeTemplate(req.method, mr.route) : REFUSAL_UNLISTED, status: statusCode,
+        code: data && data.code, rule: null, entityKind: kindEntry ? kindEntry[1] : 'request', entityId: tail || null,
+        requestId: request && request.requestId, authSeat: req.auth && req.auth.seat, declared: actor,
+      };
+      setImmediate(() => { recordRefusal(facts); });   // v2.2 §3: after the response is handed on, never on its path
+      return;
+    }
     // #1574 W39/W40 — A REFUSED POST LEAVES NO COPY OF WHAT IT SAID. This log is append-only and redaction never reaches
     // it, so a refused conversation write (a retry of a redacted post above all) would put the post's text back into a
     // retained store. Its audit keeps the outcome and the identifiers: who, which requestId, which status and code. Not the
@@ -929,6 +1052,25 @@ function logRefused(req, statusCode, data) {
   }
 }
 
+// #1762 S2 — the refusal audit's writer and its health counter. Fire-and-forget from the response path (a refusal goes
+// out unchanged whatever happens here); awaited by POST /api/refusals, which answers with what the graph holds.
+const REFUSAL_AUDIT = createRefusalAuditMeter();
+const rosterKeysOrEmpty = () => { try { return new Set(Object.keys(currentRoster() || {})); } catch { return new Set(); } };
+// v2.2 §2/§6: only APPLIED is "recorded" (an identical retry replays its APPLIED receipt). An intent-collision (the same
+// scope and id with CHANGED facts), a failed precondition, UNKNOWN or REJECTED is an audit failure: counted, never assumed.
+async function recordRefusal({ authSeat, declared, ...facts }) {
+  return REFUSAL_AUDIT.run(async () => {
+    try {
+      if (!ANNOUNCE_EXECUTOR) { REFUSAL_AUDIT.unavailable('no graph executor is configured'); return false; }
+      const i = refusalIntention({ actor: graphActor('board'), ...facts, seat: refusalSeat({ authSeat, declared, rosterKeys: rosterKeysOrEmpty() }) });
+      const r = await ANNOUNCE_EXECUTOR.update(i);
+      if (r.outcome === 'APPLIED') return true;
+      REFUSAL_AUDIT.unavailable(`${r.outcome}${r.reason ? `: ${r.reason}` : ''}`);
+      return false;
+    } catch (e) { REFUSAL_AUDIT.unavailable(e?.message || 'error'); return false; }
+  });
+}
+
 /**
  * #1167 — POST /api/refusals: record a refusal the SERVER did not produce.
  *
@@ -952,6 +1094,17 @@ async function handleReportRefusal(req, res) {
     if (typeof reason !== 'string' || !reason) return sendJSON(res, 400, { error: 'reason is required — what the caller was told' });
     if (!entity || typeof entity !== 'object' || !entity.kind) return sendJSON(res, 400, { error: 'entity {kind, id} is required — what the refused action was about' });
     if (!ENTITY_KINDS.has(entity.kind)) return sendJSON(res, 400, { error: `unknown entity.kind "${entity.kind}" — vocabulary is ${[...ENTITY_KINDS].join('|')}` });
+    if (historyNativeOn()) {
+      // #1762 S2 — the adapter's refusal as ONE content-free record: its rule (registered, else unlisted), never its reason
+      // or request. A record that could not be written is a 503 that is itself NOT audited (no recursion).
+      const ok = await recordRefusal({
+        route: adapterRoute(body.route), status: 403, code: null, rule, entityKind: entity.kind,
+        entityId: entity.id != null && entity.id !== '' ? String(entity.id) : null,
+        requestId: request && typeof request === 'object' ? request.requestId : null, authSeat: req.auth && req.auth.seat, declared: actor,
+      });
+      if (!ok) { req._noRefusalAudit = true; return sendJSON(res, 503, { error: 'the refusal could not be recorded: the graph executor did not accept it', code: 'GRAPH_UNAVAILABLE' }); }
+      return sendJSON(res, 201, { recorded: true });
+    }
     const stored = appendEvent(EVENT_LOG_DIR, {
       op: 'refused',
       entity: { kind: entity.kind, id: entity.id != null && entity.id !== '' ? String(entity.id) : rule },
@@ -987,7 +1140,14 @@ function sendJSON(res, statusCode, data) {
   const unitRefused = statusCode === 500 && data && typeof data.error === 'string' && /^(card|collection) write refused: /.test(data.error);
   if (statusCode === 500 && ((graphCtx && graphCtx.writeRefused) || unitRefused)) {
     statusCode = 409;
-    data = { error: `the graph refused this write as stale or conflicting; nothing was written: ${unitRefused ? data.error : graphCtx.writeRefused}`, code: 'WRITE_CONFLICT' };
+    data = graphCtx && graphCtx.indexIncomplete
+      ? { error: 'the card reference index is incomplete or damaged, so a card create or delete cannot prove which cards it must re-project; nothing was written (run scripts/card-ref-index-1744.mjs --backfill with writers stopped)', code: 'INDEX_INCOMPLETE' }
+      : { error: `the graph refused this write as stale or conflicting; nothing was written: ${unitRefused ? data.error : graphCtx.writeRefused}`, code: 'WRITE_CONFLICT' };
+  }
+  // #1629 s3 — an origin shape refused in executor-owned mode, BEFORE any durable effect: 503 with its code, never a 500
+  if (statusCode === 500 && graphCtx && graphCtx.originRefused) {
+    statusCode = 503;
+    data = { error: graphCtx.originRefused.message, code: graphCtx.originRefused.code };
   }
   if (statusCode === 500 && ((graphCtx && graphCtx.graphUnavailable) || unitUnavailable)) {
     statusCode = 503;
@@ -1236,6 +1396,9 @@ const convEvent = (conv, actor = null) => ({
 const memoryEvent = (op, identity, actor = null) => ({
   op, actor, entity: { kind: 'memory', id: identity['@id'] }, state: identity,
 });
+// #1762 S1 — a column write's declared actor (#675 `by`, as card edits take it): recorded on the event and the activity, never
+// stored on the column. A value that is not a plain seat key is dropped (the write is then attributed to the board).
+const columnActor = (body) => (body && typeof body.by === 'string' && /^[A-Za-z0-9._~-]{1,100}$/.test(body.by) ? body.by : null);
 const columnEvent = (op, col, actor = null) => ({
   op, actor, entity: { kind: 'column', id: col.id }, state: col,
 });
@@ -1392,7 +1555,7 @@ let _graphProjectedThrough = null;
 // events may pass before the next one. 0 = no snapshot written by this
 // process yet (a warm boot sets it to the loaded snapshot's seq).
 const GRAPH_SNAPSHOT_EVERY = Number(process.env.SCRUM_GRAPH_SNAPSHOT_EVERY || 500);
-const GRAPH_SNAPSHOT_DIR = path.dirname(BOARD_DATA_FILE);
+const GRAPH_SNAPSHOT_DIR = DATA_DIR;   // #1788
 let _graphSnapshotSeq = 0;
 // #1386 — what the store meter reads about the boot that built this replica:
 // which path (warm|cold), how long, and the first sync after it (the replay
@@ -1459,8 +1622,7 @@ function writeWatermark() {
   return { generation: _graphGeneration, projectedThrough: _graphProjectedThrough };
 }
 // #1112 item 3 — one warning per boot when the ledger cannot be projected here.
-let _workStoreWarned = false;
-const GRAPH_QUERY_LOG = path.join(path.dirname(BOARD_DATA_FILE), 'graph-query-log.jsonl');
+const GRAPH_QUERY_LOG = path.join(DATA_DIR, 'graph-query-log.jsonl');   // #1788
 // ── #1086 item 13 — QUERY → CARD retrieval, as a feature ──────────────────────
 // The embedder is CONFIGURED, never assumed: an unset URL/model answers
 // {available:false, reason} — this week's silent-zero theme must not arrive in
@@ -1469,8 +1631,8 @@ const GRAPH_QUERY_LOG = path.join(path.dirname(BOARD_DATA_FILE), 'graph-query-lo
 // board content — .gitignored in the same commit that creates them).
 const SEARCH_EMBED_URL = process.env.SEARCH_EMBED_URL || '';
 const SEARCH_EMBED_MODEL = process.env.SEARCH_EMBED_MODEL || '';
-const SEARCH_INDEX_FILE = path.join(path.dirname(BOARD_DATA_FILE), 'search-index.jsonl');
-const SEARCH_LOG_FILE = path.join(path.dirname(BOARD_DATA_FILE), 'search-log.jsonl');
+const SEARCH_INDEX_FILE = path.join(DATA_DIR, 'search-index.jsonl');   // #1788
+const SEARCH_LOG_FILE = path.join(DATA_DIR, 'search-log.jsonl');   // #1788
 const numEnv = (name, dflt) => { const v = Number(process.env[name]); return Number.isFinite(v) ? v : dflt; };
 const SEARCH_ABSTAIN_BELOW = numEnv('SEARCH_ABSTAIN_BELOW', 0.5);
 const SEARCH_ASK_WITHIN = numEnv('SEARCH_ASK_WITHIN', 0.03);
@@ -1658,7 +1820,7 @@ async function warmGraphStore() {
 
 async function warmGraphStoreOnce() {
   countLegacy('graphReplicaSync');
-  const { buildGraphStore, syncGraphStoreChunked, verifyHashCache, projectActivities, projectLabelAliases, projectWorkLedger } = await loadGraphModules();
+  const { buildGraphStore, syncGraphStoreChunked, verifyHashCache, projectActivities, projectLabelAliases } = await loadGraphModules();
   let rebuiltMs = null;
   if (_graphDirty || !_graphStore) {
     // #714 — INCREMENTAL. The old path threw the store away and re-projected
@@ -1781,26 +1943,7 @@ async function warmGraphStoreOnce() {
       console.error(`${new Date().toISOString()} graph-replica: ACTIVITIES NOT PROJECTED (${e?.message}) — traversal is unaffected, but prov:Activity is incomplete past seq ${_activitySeq}`);
     }
 
-    // #1112 item 3 — the WORK LEDGER is part of the graph (Decision 3956b66b).
-    // Same wiring lesson as the block above: projectWorkLedger existed for zero
-    // minutes before this call site, on purpose. The store is small (53 rows on
-    // 2026-08-30) and the projection is idempotent by (id, seq), so it re-runs
-    // whole on every sync — no cursor to hold. An UNSET env is a named absence,
-    // once per boot, not a silent zero: this server historically did not carry
-    // SCRUM_WORK_STORE (only the MCP process did), and a deploy that forgets
-    // the plist line must be discoverable from the log.
-    try {
-      const workDir = process.env.SCRUM_WORK_STORE;
-      if (workDir) {
-        const { readWorkObjectRows } = await import('./core/work-store.mjs');
-        projectWorkLedger(_graphStore, readWorkObjectRows(workDir));
-      } else if (!_workStoreWarned) {
-        _workStoreWarned = true;
-        console.error(`${new Date().toISOString()} graph-replica: WORK LEDGER NOT PROJECTED — SCRUM_WORK_STORE is unset on this process, so schema:Action answers zero for a protocol that has rows elsewhere`);
-      }
-    } catch (e) {
-      console.error(`${new Date().toISOString()} graph-replica: WORK LEDGER NOT PROJECTED (${e?.message}) — traversal is unaffected, but schema:Action is incomplete`);
-    }
+    // #1763 — the work ledger is RETIRED; its 53 transitions are already executor nodes, so nothing is projected here.
 
     // #949 — recorded from the stamp of the bytes we actually projected, NOT
     // from the log's head at this instant. If a write landed during the awaited
@@ -1903,10 +2046,13 @@ function readSnapshotMeta() {
 // #1386 — the meter as one object: readings + crossed ceilings. Throws when the
 // replica is not built (a boot that has not built it yet is an error, not zero rows).
 function graphStoreMeter() {
+  // #1789 — with the in-process copy retired (mode off/read-off) there is no store to meter, and the snapshot it would
+  // describe was last written before the cutover: refuse BEFORE reading graph-snapshot.json, so nothing touches it.
+  if (!DOCUMENT_READS) throw Object.assign(new Error(`the in-process copy is retired under SCRUM_BOARD_DOCUMENT=${BOARD_DOCUMENT}: no store to meter`), { code: 'REPLICA_RETIRED' });
   return readStoreMeter({ store: _graphStore, memory: process.memoryUsage(), boot: _graphBoot, replayTailMs: _graphReplayTailMs, snapshot: readSnapshotMeta(), ceilings: meterCeilings() });
 }
-// One line an hour so the trend is in the log without anyone polling /api/checks.
-setInterval(() => {
+// One line an hour so the trend is in the log without anyone polling /api/checks. #1789 — only while the copy exists.
+if (DOCUMENT_READS) setInterval(() => {
   try { const m = graphStoreMeter(); console.error(`${new Date().toISOString()} ${meterLine(m.readings, m.crossed)}`); } catch { /* not built yet — the boot line covers it */ }
 }, Number(process.env.SCRUM_METER_LOG_MS ?? 3_600_000)).unref();
 
@@ -3193,7 +3339,10 @@ async function updateMemoryOnGraph(req, res, id, body, flags) {
     if (cur.rev == null) return sendJSON(res, 500, { error: `memory ${id} has no write revision (urn:ex:ver) in the graph store: it was not written by this unit or its migration` });
     actor ??= logbornActor(req, res, 'memory.revise');
     if (!actor) return;
-    const r = await LOGBORN.write(memoryReviseIntention({ actor, identity: composed.identity, newVersions: composed.added, expectedRev: cur.rev }));
+    // #1762 S1b — the activity's versionAfter is the version REST will answer with, which a title-only revise does not carry
+    const versionAfter = Math.max(0, ...[...cur.versions, ...composed.added].map((v) => Number(v['scrum:version']) || 0));
+    const r = await LOGBORN.write({ ...memoryReviseIntention({ actor, identity: composed.identity, newVersions: composed.added, expectedRev: cur.rev }),
+      ...(historyNativeOn() && versionAfter > 0 ? { history: { versionAfter } } : {}) });
     if (r.outcome === 'PRECONDITION_FAILED') continue;
     if (r.outcome !== 'APPLIED') return logbornWriteFailed(res, r);
     let after;
@@ -6897,7 +7046,7 @@ async function handleListDecisions(req, res) {
 //
 // ⭐ And the automatic capture it said was unavailable had already shipped one
 // endpoint over. This makes it durable and queryable instead of stderr-only.
-const MISS_LOG_FILE = BOARD_DATA_FILE.replace(/\.json$/, '') + '-misses.jsonl';
+const MISS_LOG_FILE = path.join(DATA_DIR, `${BOARD_STEM}-misses.jsonl`);   // #1788
 
 function recordMisses(params, seat, url) {
   const at = new Date().toISOString();
@@ -7116,7 +7265,7 @@ const STANDING_CHECKS = [
     claim: 'the roster\'s `board` and `wiki` seats carry `kind: system` — the mark the history gate exempts '
       + 'them by; without it their names become guarded words and every push is refused (#600, #1380)',
     run: () => {
-      const seats = loadRoster(undefined, () => {}) || {};
+      const seats = configuredSeats(() => {});   // #1764
       return ['board', 'wiki']
         .filter((k) => Object.prototype.hasOwnProperty.call(seats, k))
         .filter((k) => !(seats[k] && seats[k].kind === 'system'))
@@ -7350,6 +7499,8 @@ async function handleHealth(req, res) {
     // #1574 attempt 3 — the read gate, visible: running/lost/waiting from the gate itself. null when the conversations
     // unit is off (there is no gate), never a fabricated zero.
     readGate: READ_GATE ? READ_GATE.stats() : null,
+    // #1762 S2 — refusals the graph could not record (native history on): {count, since}; since is null at 0
+    refusalAuditUnavailable: REFUSAL_AUDIT.stats(),
     // #1563 — the board file's touches since boot, from #1558's always-on counters: what `read-off`/`off` must keep at 0.
     // attemptedOpens = every load, shared load and save of the document, plus every stat of it.
     document: (() => { const c = legacyCounters(); return { mode: BOARD_DOCUMENT, attemptedOpens: (c.loadDomain || 0) + (c.loadDomainShared || 0) + (c.saveDomain || 0) + (c.boardStat || 0), counters: { loadDomain: c.loadDomain || 0, loadDomainShared: c.loadDomainShared || 0, saveDomain: c.saveDomain || 0, boardStat: c.boardStat || 0 } }; })(),
@@ -7789,12 +7940,29 @@ async function lockedWithCards(fn) {
         const colParts = COLUMNS && data[FILE_COLUMNS] ? COLUMNS.plan(data.columns) : [];
         const tUpdate = performance.now();
         try {
-          if (CARDS_UNIT && data[FILE_CARDS]) {
+          if (CARDS_UNIT && data[FILE_CARDS] && staged.origin && !staged.origin.done) {
+            // #1629 s3 — executor-owned: the staged announcement commits as an ORIGIN with this write (prepare, then ONE
+            // card.write carrying the business change, the Origin, its Obligation and the reservation). No K4 envelope.
+            if (cw) cw.cards = true;
+            const o = staged.origin;
+            if (colParts.length) throw new OriginShapeRefused('an origin write moves no columns (#1629 s3)');
+            // #1744 — a done-move's shifted siblings are sibling-order parts, with the walk's anchor; every origin may pause at
+            // the test-only after-origin-prepare barrier (a no-op unless a test armed it)
+            const subjectIri = o.provenance?.cardId ? `https://scrumboard.local/entity/${o.provenance.cardId}` : null;
+            const siblingOrder = o.route === 'done-nudge' && staged.walk;
+            if (siblingOrder) staged.noReplan = true;   // #1744 D9 — a refused done-move with siblings is never silently replanned
+            const r = await CARDS.commitOrigin(data.cards, data.nextShortId, { collections: collParts, describe: (parts) => originDescriptor(o, parts, collParts),
+              ...(siblingOrder ? { decorate: (parts) => parts.map((x) => (x.iri === subjectIri ? x : { ...x, reason: 'sibling-order' })), walk: staged.walk } : {}),
+              afterPrepare: () => testBarrier('after-origin-prepare') });
+            if (r.outcome === 'APPLIED') { o.handle.mutationId = r.mutationId; o.handle.obligationId = `${r.mutationId}:${o.slot}`; }
+            o.done = true;
+            if (collParts.length) COLLECTIONS.applied(data, collParts);
+          } else if (CARDS_UNIT && data[FILE_CARDS]) {
             if (cw) cw.cards = true;   // #1659 — this request writes cards, so a slow one gets a line
             const ob = outboxOf(data);
             const pending = Object.entries(ob.origins).filter(([mid, o]) => !data[FILE_ORIGINS]?.has(mid) && o?.origin?.cardId)
               .map(([mid, o]) => ({ cardId: o.origin.cardId, mutationId: mid, json: JSON.stringify({ origin: o, entries: Object.fromEntries(Object.entries(ob.entries).filter(([, e]) => e?.mutationId === mid)) }) }));
-            await CARDS.commit(data.cards, data.nextShortId, { actor, opId, pending, collections: [...collParts, ...colParts] });
+            await CARDS.commit(data.cards, data.nextShortId, { actor, opId, pending, collections: [...collParts, ...colParts], indexGuard: CARD_REF_INDEX_GUARD });
             if (collParts.length) COLLECTIONS.applied(data, collParts);
             if (colParts.length) COLUMNS.applied(data.columns, colParts);
           } else if (colParts.length) {
@@ -7815,12 +7983,46 @@ async function lockedWithCards(fn) {
       }
       return result;
     } catch (e) {
-      if (e && e.code === 'CARD_WRITE_CONFLICT' && attempt === 1) continue;
-      if (e && e.code === 'CARD_WRITE_CONFLICT') { const ctx = requestContext.getStore(); if (ctx) ctx.writeRefused = e.message; }
+      if (e && e.code === 'CARD_WRITE_CONFLICT' && attempt === 1 && !staged.noReplan) continue;
+      if (e && e.code === 'CARD_WRITE_CONFLICT') {
+        const ctx = requestContext.getStore();
+        if (ctx) ctx.writeRefused = e.message;
+        // #1744 — a refusal BECAUSE the reference index is incomplete is named as such, never a plain stale-write conflict
+        if (ctx && (await cardRefIndexIncomplete()) === true) ctx.indexIncomplete = true;
+      }
       markGraphUnavailable(e);   // an unresolved UNKNOWN (or an executor away): the response is 503, never a bare 500
       throw e;
     }
   }
+}
+
+/**
+ * #1629 s3 — the origin descriptor of a staged announcement, built from the ORDERED parts the cards unit will send.
+ * requestKey is "v" + the subject's NEW version + ":" + the staged origin's nonce (G2, 45075): the identity of ONE
+ * attempt's preparation, never a retry key (r2 R-A0..A3) — so a preparation refused without the subject moving can never
+ * wedge the next attempt. An agent route's releasedCards follow the card parts.
+ */
+function originDescriptor(o, parts, collParts) {
+  const { originKeyOf, mutationIdOf } = ORIGIN_MOD;
+  const slots = [{ slot: o.slot, author: o.author, body: o.body, mentions: o.mentions, notify: o.notify }];
+  if (o.route === 'agent-rest' || o.route === 'agent-retire') {
+    const agent = o.provenance?.agent;
+    const part = collParts.find((p) => p.collection === 'agents');
+    if (!agent || !part) throw new OriginShapeRefused('an agent origin needs the agent entity in the same write (#1629 s3)');
+    const releasedCards = parts.map((p) => decodeURIComponent(String(p.iri).split('/').pop()));
+    const requestKey = `v${part.version}:${o.nonce}`;
+    const mutationId = mutationIdOf(originKeyOf(o.route, agent, requestKey, o.originActor));
+    return { route: o.route, subject: agent, requestKey, originActor: o.originActor, mutationId, provenance: { agent, releasedCards }, slots };
+  }
+  // the card part's version is the cards unit's GRAPH write counter (urn:ex:ver), not the card JSON's `version`: slice 2
+  // binds provenance.version to the part, so both it and the requestKey come from the part this write sends
+  const cardId = o.provenance?.cardId;
+  const part = parts.find((p) => decodeURIComponent(String(p.iri).split('/').pop()) === cardId);
+  if (!cardId || !part) throw new OriginShapeRefused('a card origin names a card this write changes (#1629 s3)');
+  const version = Number(part.version);
+  const requestKey = `v${version}:${o.nonce}`;
+  const mutationId = mutationIdOf(originKeyOf(o.route, cardId, requestKey, o.originActor));
+  return { route: o.route, subject: cardId, requestKey, originActor: o.originActor, mutationId, provenance: { cardId, version }, slots };
 }
 
 // Lookup helper: :id can be the card's UUID (data.id) or its shortId (numeric).
@@ -8980,6 +9182,21 @@ async function handleChanges(req, res) {
     // previous reply (one position per source). The log is read synchronously, so
     // its high-water and its rows come from one moment.
     const from = parseSince(q.since);
+    const convQuery = ANNOUNCE_EXECUTOR ? async (sparql) => {
+      const r = await POSTS_READER.query(sparql);
+      if (!r.ok) throw Object.assign(new Error(`the graph could not be read: ${r.reason || 'unreadable'}`), { code: 'GRAPH_EXECUTOR_UNAVAILABLE' });
+      return r.rows;
+    } : null;
+    // #1762 S3 — a VALID history frontier F moves card-side history to the graph. Read before anything else, and read
+    // every time: only a CONFIRMED absence keeps today's path; an unreadable F is a 503, never a guess.
+    const histQuery = LOGBORN ? (sparql) => logbornFeedQuery(sparql) : convQuery;
+    if (histQuery) {
+      let fr;
+      try { fr = classifyFrontier(await histQuery(FRONTIER_QUERY)); } catch (e) { if (graphRefused(res, e)) return; throw e; }
+      if (fr.state === 'invalid') return sendJSON(res, 503, { error: `the history frontier is invalid: ${fr.reason}`, code: 'HISTORY_FRONTIER_INVALID' });
+      if (fr.state === 'mismatch') return sendJSON(res, 503, { error: `the history frontier belongs to another store: ${fr.reason}`, code: 'HISTORY_FRONTIER_STORE_MISMATCH' });
+      if (fr.state === 'valid') return await handleChangesFromGraph(res, { q, from, F: fr.frontier, marker: fr.marker, histQuery, convQuery, unsupported });
+    }
     const events = from.cursor
       ? readEvents(EVENT_LOG_DIR, { sinceSeq: from.log })
       : readEvents(EVENT_LOG_DIR, { sinceDate: q.since });
@@ -9012,11 +9229,6 @@ async function handleChanges(req, res) {
     // #1574 C1–C6 — with the conversations unit ON, posts and redactions are graph receipts too, and the log's older
     // conversation rows are projected through the graph's tombstones. Either unit makes the executor a REQUIRED source:
     // unreadable is a 503, never a log-only answer.
-    const convQuery = ANNOUNCE_EXECUTOR ? async (sparql) => {
-      const r = await POSTS_READER.query(sparql);
-      if (!r.ok) throw Object.assign(new Error(`the graph could not be read: ${r.reason || 'unreadable'}`), { code: 'GRAPH_EXECUTOR_UNAVAILABLE' });
-      return r.rows;
-    } : null;
     if (LOGBORN || convQuery) {
       try {
         const after = from.cursor ? from.graph : 0;
@@ -9075,6 +9287,98 @@ async function handleChanges(req, res) {
     console.error('GET /api/changes:', e.message);
     sendJSON(res, 500, { error: 'Failed to compute changes' });
   }
+}
+
+/**
+ * #1762 S3 — /api/changes with a VALID history frontier F (contract v2 + v2.1–v2.3 on #1762). Card-side history (every kind
+ * but posts) comes from the GRAPH: the projected seq-nodes ≤ F.logSeq with the backfill's facts, and S1's native
+ * ChangeActivities past F.commitSeq. Posts and log-born receipts come from the same graph feed as today. NO event-log file
+ * is opened on this path (the no-log-access recorder pins it), and the envelope, cursors and paging are today's code.
+ */
+async function handleChangesFromGraph(res, { q, from, F, marker, histQuery, convQuery, unsupported }) {
+  // posts live with the conversations unit; without it a graph-only answer cannot include them, so it is refused, never partial
+  if (!convQuery) return sendJSON(res, 503, { error: 'a history frontier is present but the conversations unit is off: posts cannot be served from the graph, and the log is not read past F', code: 'HISTORY_CONFIG_UNSUPPORTED' });
+  if (from.cursor && from.log > F.logSeq) {
+    return sendJSON(res, 409, { error: `this cursor's log half (${from.log}) is past the history frontier (${F.logSeq}): no board minted it`, code: 'CURSOR_BEYOND_FRONTIER' });
+  }
+  if (!from.cursor && (q.since == null || q.since === '')) return queryChangesFromLog([], { since: q.since });   // throws MISSING_SINCE (400), as today
+  // the window compares INSTANTS at full precision (Date.parse would round .0005Z to .000Z and move a row across the cutoff)
+  const sinceKey = from.cursor ? null : instantKey(q.since);
+  if (!from.cursor && sinceKey == null) return sendJSON(res, 400, { error: `since must be an ISO timestamp or a cursor (got ${JSON.stringify(String(q.since).slice(0, 80))})` });
+  const history = q.history === 'true';
+  const inWindow = (at) => from.cursor || (instantKey(at) ?? '') >= sinceKey;
+
+  // ONE PAGE, ONE SNAPSHOT (contract v2 §1). The reads are separate queries, so every one also reads the store's commit
+  // high-water, and F and the marker are re-read at the end. The page is served only if all of them saw the snapshot the
+  // first frontier read saw. Otherwise it is read again ONCE, and refused on a second miss; rows that never coexisted are never served.
+  const readPage = async (expectHw) => {
+    const legacyB = await histQuery(legacyQuery({ logSeqMax: F.logSeq, sinceIso: from.cursor ? null : q.since, afterSeq: from.cursor ? from.log : null }));
+    const after = from.cursor ? from.graph : 0;
+    const graph = feedRowsFromBindings(await (LOGBORN ? logbornFeedQuery(feedQuery(after)) : convQuery(feedQuery(after))));
+    graph.rows = [...graph.rows, ...postFeedRows(await convQuery(postFeedQuery(after)), graph.through)];
+    const redactedPostIds = redactedIdsFrom(await convQuery(REDACTED_IDS_QUERY));
+    const nativeB = await histQuery(nativeQuery({ afterCommitSeq: F.commitSeq, through: graph.through }));
+    const refusalB = await histQuery(refusalQuery({ afterCommitSeq: F.commitSeq, through: graph.through }));
+    const again = classifyFrontier(await histQuery(FRONTIER_QUERY));
+    const hws = [markerOf(legacyB), graph.through, markerOf(nativeB), markerOf(refusalB), again.marker?.commitSeq];
+    const same = again.state === 'valid' && JSON.stringify(again.frontier) === JSON.stringify(F) && hws.every((h) => Number(h) === expectHw);
+    return same ? { legacy: legacyEventsFromBindings(legacyB), graph, redactedPostIds, native: nativeRowsFromBindings(nativeB), refusals: refusalRowsFromBindings(refusalB) } : null;
+  };
+  let page;
+  try {
+    page = await readPage(marker.commitSeq);
+    if (!page) {
+      const fr = classifyFrontier(await histQuery(FRONTIER_QUERY));
+      if (fr.state === 'valid' && JSON.stringify(fr.frontier) === JSON.stringify(F)) page = await readPage(fr.marker.commitSeq);
+    }
+    if (!page) return sendJSON(res, 503, { error: 'the store moved while this answer was being read, twice; nothing is served from mixed snapshots — ask again', code: 'HISTORY_FRONTIER_INVALID' });
+  } catch (e) {
+    if (graphRefused(res, e)) return;
+    throw e;
+  }
+  let { native } = page;
+  // a reproject part is DERIVED (a re-written namer): history:true serves it; the default latest view neither shows nor counts it
+  if (!history) native = native.filter((r) => r.graph.nativeOp !== 'reproject');
+  // ONE ROW PER (opId, part): a log-born write records both a receipt (the feed row) and its native activity; the native part
+  // carries the provenance, so the receipt row for an opId that has native parts is not served again. Different parts stay.
+  // A POST keeps its feed row: the conversations unit's row is the authoritative one, carrying the payload and the redaction
+  // semantics, so the native provenance is folded INTO it (part, nativeOp) and the content-free native duplicate is dropped.
+  // Every other kind keeps the native row, and its receipt row is not served again.
+  const nativeByOp = new Map();
+  for (const r of native) (nativeByOp.get(r.graph.opId) || nativeByOp.set(r.graph.opId, []).get(r.graph.opId)).push(r);
+  const foldedNative = new Set();
+  const feed = [];
+  for (const r of page.graph.rows) {
+    const twins = r.graph ? nativeByOp.get(r.graph.opId) : null;
+    if (!twins) { feed.push(r); continue; }
+    if (r.kind !== 'conversation') continue;                                   // the native row stands in for a non-post receipt
+    const twin = twins.find((t) => t.kind === 'conversation' && t.id === r.id) ?? twins[0];
+    foldedNative.add(twin);
+    feed.push({ ...r, graph: { ...r.graph, part: twin.graph.part, nativeOp: twin.graph.nativeOp } });
+  }
+  const graphRows = [...feed, ...native.filter((r) => !foldedNative.has(r)), ...page.refusals].filter((r) => inWindow(r.at));
+  const legacy = page.legacy.filter((ev) => inWindow(ev.recorded_at));
+  const result = queryChangesFromLog(legacy, {
+    redactedPostIds: page.redactedPostIds,
+    graphRows,
+    graphThrough: page.graph.through,
+    graphEpoch: page.graph.epoch,
+    graphEpochBase: page.graph.epochBase,
+    graphIncarnation: page.graph.incarnation,
+    graphIncarnationFrom: page.graph.incarnationFrom,
+    logThrough: F.logSeq,          // the log half stops at F: nothing past it is log history
+    oldestRetainedSeq: null,       // the graph keeps every pre-F row; there is no retention floor to refuse at
+    since: q.since,
+    windowFiltered: !from.cursor,  // the window was applied above, at full precision
+    before: q.before,
+    oldestRetained: null,
+    history,
+    entity: q.entity,
+    actor: q.actor,
+    limit: { cards: q.limitCards ?? q.limit, posts: q.limitPosts ?? q.limit },
+  });
+  if (unsupported.length) result.unsupported = unsupported;
+  return sendJSON(res, 200, result);
 }
 
 /**
@@ -9374,7 +9678,7 @@ function handleGetBoard(req, res) {
 // matters when someone is trying to work out why their colours didn't take.
 function handleGetRoster(req, res) {
   const seats = currentRoster();
-  sendJSON(res, 200, { seats, roles: loadRosterRoles(), usingDefaults: usingDefaultRoster() });   // #1368 — roles.po: the PO seat, read not hardcoded
+  sendJSON(res, 200, { seats, roles: configuredRoles(), usingDefaults: rosterHeld() && rosterInGraph(COLLECTIONS.snapshot().rosterSeats ?? []) ? false : usingDefaultRoster() });   // #1764   // #1368 — roles.po: the PO seat, read not hardcoded
 }
 
 // ── POST /api/roster (#506) — a human edits their own room, no agent required.
@@ -9391,15 +9695,56 @@ async function handleSetRoster(req, res) {
   try {
     const body = JSON.parse(await readBody(req));
     let clean;
-    try {
-      clean = writeRoster(body);
-    } catch (ve) {
-      return sendJSON(res, 400, { error: ve.message });
+    let savedRoles = null;
+    if (rosterHeld()) {
+      // #1764 — the graph is the roster. Under the write lock: the export as a SUPERSET of the old and new seats, the graph
+      // commit, then (below, once the commit is in) the export as exactly the new seats. At every instant the file's seats
+      // ⊇ the graph's, so the history gate can over-guard after a crash but never miss a seat (#600's forbidden direction).
+      let rolesGiven;
+      try {
+        clean = validateRoster(body);
+        rolesGiven = body && typeof body === 'object' && Object.prototype.hasOwnProperty.call(body, 'roles');
+        if (rolesGiven) savedRoles = validateRoles(body.roles, clean);
+      } catch (ve) {
+        return sendJSON(res, 400, { error: ve.message });
+      }
+      await withWriteLock(async () => {
+        const data = readBoard();
+        const prevEnts = data.rosterSeats ?? [];
+        const prev = rosterInGraph(prevEnts) ? seatsFrom(prevEnts) : {};
+        if (!rolesGiven) { const r = rolesFrom(prevEnts); savedRoles = r.po && clean[r.po] ? r : {}; }   // a save that names no roles keeps them
+        writeRosterExport(supersetSeats(prev, clean), savedRoles);   // throws: nothing is committed
+        data.rosterSeats = rosterEntities(clean, savedRoles);
+        writeBoard(data, [{ op: 'update', actor: body.by || null, entity: { kind: 'board-meta', id: 'roster' }, state: { seats: Object.keys(clean), roles: savedRoles } }]);
+      });
+      try {
+        // TEST-ONLY seam (#1764 builder row): fail ONLY the narrowing write, after the graph commit. Unset, a no-op.
+        if (process.env.SCRUM_TEST_FAIL_ROSTER_EXPORT_NARROW === '1') throw new Error('injected: the narrowing export write failed');
+        // TEST-ONLY seam: hold a save that names this seat key between its commit and its narrowing, so a LATER save commits
+        // in between (the interleaving the narrowing must survive). Unset, a no-op.
+        if (process.env.SCRUM_TEST_DELAY_ROSTER_NARROW_FOR && clean[process.env.SCRUM_TEST_DELAY_ROSTER_NARROW_FOR]) await new Promise((r) => setTimeout(r, 1500));
+        // UNDER THE LOCK, and from the graph's CURRENT roster, never this save's own `clean`: a concurrent save may have
+        // committed after ours, and narrowing the file to ours would then leave its seats unguarded (the PR #140 review's
+        // concurrent-save case). Whatever order saves finish in, the last narrowing writes exactly what the graph holds.
+        await withWriteLock(async () => {
+          const ents = COLLECTIONS.snapshot().rosterSeats ?? [];
+          writeRosterExport(seatsFrom(ents), rolesFrom(ents));
+        });
+      } catch (e) {
+        console.error(`#1764 roster saved to the graph, but its export could not be narrowed to the new seats (it still lists a superset, which the history gate over-guards): ${e.message}`);
+        return sendJSON(res, 500, { error: `the roster was saved, but roster.json (the history gate's copy) could not be updated: ${e.message}` });
+      }
+    } else {
+      try {
+        clean = writeRoster(body);
+      } catch (ve) {
+        return sendJSON(res, 400, { error: ve.message });
+      }
     }
     // #1380 — a client that sends the merged read back gets told which seats
     // were agent records and were not written, rather than finding out later.
     const dropped = droppedAgentSeats(body);
-    sendJSON(res, 200, { seats: clean, roles: loadRosterRoles(), file: rosterFilePath(), appliesOnRestart: true, ...(dropped.length ? { dropped } : {}) });
+    sendJSON(res, 200, { seats: clean, roles: savedRoles ?? loadRosterRoles(), file: rosterFilePath(), appliesOnRestart: !rosterHeld(), ...(dropped.length ? { dropped } : {}) });
   } catch (e) {
     console.error('POST /api/roster:', e.message);
     sendJSON(res, 500, { error: 'Failed to save roster' });
@@ -9424,9 +9769,13 @@ function handleGetConfigLimits(req, res) {
   sendJSON(res, 200, LIMITS);
 }
 
+// #1784 — with the collections unit on, the config is the `channelConfig` family's one node and channel-config.json is a
+// one-time import (below, before listen); off, the file is read and written exactly as before.
+const channelConfigHeld = () => !!(COLLECTIONS && COLLECTIONS.keys.includes('channelConfig'));
+
 function handleGetConfig(req, res) {
   try {
-    sendJSON(res, 200, readConfig());
+    sendJSON(res, 200, channelConfigHeld() ? channelConfigFrom(readBoard().channelConfig) : readConfig());
   } catch (e) {
     console.error('GET /api/config:', e.message);
     sendJSON(res, 500, { error: 'Failed to read config' });
@@ -9438,9 +9787,19 @@ async function handleSetConfig(req, res) {
     const body = JSON.parse(await readBody(req));
     let clean;
     try {
-      clean = writeConfig(body); // validates; throws on out-of-bounds input
+      clean = channelConfigHeld() ? validateConfig(body) : writeConfig(body); // validates; throws on out-of-bounds input
     } catch (ve) {
       return sendJSON(res, 400, { error: ve.message });
+    }
+    if (channelConfigHeld()) {
+      // #1784 — the graph node, through the collections unit's guarded write; the file is never touched
+      await withWriteLock(async () => {
+        const data = readBoard();
+        const prior = (Array.isArray(data.channelConfig) ? data.channelConfig : []).find((e) => e && e['@id'] === CHANNEL_CONFIG_IRI) ?? null;
+        const entity = channelConfigEntity(clean, { prior });
+        data.channelConfig = [entity];
+        writeBoard(data, [{ op: prior ? 'update' : 'create', actor: body.by || null, entity: { kind: 'board-meta', id: CHANNEL_CONFIG_IRI }, state: entity }]);
+      });
     }
     sendJSON(res, 200, clean);
   } catch (e) {
@@ -9465,9 +9824,10 @@ async function handleSetConfig(req, res) {
 // Deliberately mirrors /api/config (#263) rather than inventing a shape: same
 // loopback trust model, same validate-then-persist, same 400-with-the-
 // validator's-own-message. One pattern on one page beats two.
+// #1785 — the switch and the threshold are graph state (TendingState); the file is no longer read or written by a route.
 function handleGetTendingConfig(req, res) {
   try {
-    sendJSON(res, 200, readTendingConfig());
+    sendJSON(res, 200, readTendingConfigFrom(tendingEntities()));
   } catch (e) {
     console.error('GET /api/tending-config:', e.message);
     sendJSON(res, 500, { error: 'Failed to read tending config' });
@@ -9479,13 +9839,15 @@ async function handleSetTendingConfig(req, res) {
     const body = JSON.parse(await readBody(req));
     let clean;
     try {
-      // Validates and refuses; a rejected write leaves the previous file
+      // Validates and refuses; a rejected write leaves the previous state
       // untouched, so a typo cannot silently become the room's threshold.
-      clean = writeTendingConfig(body);
+      clean = validateTendingConfig(body);
     } catch (ve) {
       return sendJSON(res, 400, { error: ve.message });
     }
-    sendJSON(res, 200, clean);
+    const at = new Date().toISOString();
+    await withWriteLock(async () => { writeTendingEntities(setTendingConfig(tendingEntities(), { ...clean, at }), { actor: typeof body.by === 'string' ? body.by : null, op: 'update' }); });
+    sendJSON(res, 200, readTendingConfigFrom(tendingEntities()));
   } catch (e) {
     console.error('POST /api/tending-config:', e.message);
     sendJSON(res, 500, { error: 'Failed to save tending config' });
@@ -9636,6 +9998,58 @@ async function handleCreateMint(req, res) {
     console.error('POST /api/tending/mints:', e.message);
     sendJSON(res, 500, { error: 'Failed to record mint' });
   }
+}
+
+// ── #1786 — the whisper's two once-per-window guards, as graph state decided under the write lock (core/whisper-graph.mjs).
+// REST is the one writer, so the check and the write cannot interleave: two MCP processes or ticks racing one window get
+// one 201 and one 409 (a send), or one grant and one refusal (a whisper). The MCP no longer keeps whisper-state.json.
+const periodOf = (v) => (Number.isSafeInteger(v) && v > 0 ? v : HOUR_MS);
+async function handleReserveWindow(req, res) {
+  try {
+    const raw = await readBody(req);
+    const { window, by } = raw ? JSON.parse(raw) : {};
+    if (!window || typeof window !== 'string') return sendJSON(res, 400, { error: 'window is required' });
+    const out = await withWriteLock(async () => {
+      if (windowReserved(tendingEntities(), window)) return { already: true };
+      writeTendingEntities([reservationEntity(window, new Date().toISOString())], { actor: by || 'board', op: 'create' });
+      return { reserved: true };
+    });
+    return out.already ? sendJSON(res, 409, { already: true, window }) : sendJSON(res, 201, { reserved: true, window });
+  } catch (e) {
+    console.error('POST /api/tending/windows:', e.message);
+    sendJSON(res, 500, { error: 'Failed to reserve the window' });
+  }
+}
+async function handleClaimWhisper(req, res) {
+  try {
+    const raw = await readBody(req);
+    const body = raw ? JSON.parse(raw) : {};
+    const { window, seat } = body;
+    if (!window || !seat) return sendJSON(res, 400, { error: 'window and seat are required' });
+    const receivedAt = typeof body.receivedAt === 'string' ? body.receivedAt : new Date().toISOString();
+    let r;
+    try {
+      r = await withWriteLock(async () => {
+        const ents = tendingEntities();
+        const now = new Date().toISOString();
+        const d = claimWhisper({ state: claimStateFor(ents, window), prompt: { window }, seat, now, periodMs: periodOf(body.periodMs) });
+        if (d.granted) writeTendingEntities([grantEntity({ ents, window, seat, receivedAt, completedAt: now, reached: body.reached })], { actor: seat, op: 'create' });
+        return d;
+      });
+    } catch (e) {
+      if (/claimWhisper:/.test(e.message)) return sendJSON(res, 400, { granted: false, reason: 'invalid', error: e.message });
+      throw e;
+    }
+    const { state: _state, ...answer } = r;   // the settlement state is the graph's, not the caller's
+    sendJSON(res, 200, answer);
+  } catch (e) {
+    console.error('POST /api/tending/claims:', e.message);
+    sendJSON(res, 500, { error: 'Failed to settle the claim' });
+  }
+}
+function handleGetClaims(req, res) {
+  const limit = Math.min(200, Math.max(1, Number(new URL(req.url, 'http://x').searchParams.get('limit')) || 24));
+  sendJSON(res, 200, { history: claimHistory(tendingEntities(), limit) });
 }
 
 function handleGetWhispers(req, res) {
@@ -9998,7 +10412,9 @@ function makeRoomInColumn(cardsArr, moved, anchor) {
     if (!c || c === moved || c.column !== moved.column) return;
     seq.push({ c, o: Number(c.order) || 0, i });
   });
-  seq.sort((a, b) => (a.o - b.o) || (a.i - b.i));
+  // #1744 (F1) — with the cards unit the tie-break is (order, shortId), the same rule the compiler checks the walk by; the
+  // document-only path keeps its array order
+  seq.sort((a, b) => (a.o - b.o) || (CARDS_UNIT ? (Number(a.c.shortId) || 0) - (Number(b.c.shortId) || 0) : 0) || (a.i - b.i));
   let walk;
   if (anchor === undefined) walk = seq.filter(({ o }) => o >= at);
   else if (anchor === null) walk = seq;
@@ -10476,6 +10892,10 @@ async function handleUpdateCard(req, res, idOrShortId) {
           }
         }
         shifted = makeRoomInColumn(data.cards, card, anchor);
+        // #1744 (#1629 slice 4) — executor-owned: the shifted siblings ride the done-nudge origin as sibling-order parts,
+        // and the walk's anchor rides with it so the compiler can prove the shifted set is exactly the walk
+        // (only when the walk shifted a sibling: a zero-shift move keeps its one retry, D9's scope is sibling-shifting moves)
+        if (shifted.length) { const st = cardWriteContext.getStore(); if (st) st.walk = { anchor: anchor === undefined ? undefined : anchor === null ? null : `https://scrumboard.local/entity/${anchor.id}` }; }
         // #1584 — the move's identity, on the stored card, so the fence can
         // tell a committed move from one that may still arrive (handleMoveFence).
         if (typeof patch.requestId === 'string') card.lastMoveRequestId = patch.requestId;
@@ -10841,6 +11261,12 @@ async function handleGetOutbox(req, res) {
     const q = new URL(req.url, 'http://x').searchParams;
     const status = q.get('status') || undefined;
     const mutationId = q.get('mutationId') || undefined;
+    if (ORIGIN_EXECUTOR) {   // #1629 s3 — from the executor; a read never allocates, repairs or republishes (§5, L5)
+      try { return sendJSON(res, 200, await xoListOutbox({ status, mutationId })); } catch (e) {
+        if (e instanceof OutboxUnavailable) return sendJSON(res, 503, { error: `the outbox could not be read from the graph executor: ${e.message}`, code: 'OUTBOX_UNAVAILABLE' });
+        throw e;
+      }
+    }
     const listed = await withWriteLock(async () => listOutbox(readBoard(), { status, mutationId }));
     sendJSON(res, 200, listed);
   } catch (e) {
@@ -10859,7 +11285,14 @@ async function handleCompleteOutbox(req, res, rawId) {
     await readBody(req);   // drained, and deliberately not consulted
     let obligationId;
     try { obligationId = decodeURIComponent(rawId); } catch { return sendJSON(res, 400, { error: 'malformed obligation id' }); }
-    const known = await withWriteLock(async () => Boolean(outboxOf(readBoard()).entries[obligationId]));
+    let known;
+    if (ORIGIN_EXECUTOR) {   // #1629 s3 — known means committed in the executor; a caller's receipt is still never accepted
+      const m = XO_RE.exec(obligationId);
+      try { known = Boolean(m && (await xoOrigin(m[1]))?.entries?.some((e) => e.slot === m[2])); } catch (e) {
+        if (e instanceof OutboxUnavailable) return sendJSON(res, 503, { error: `the outbox could not be read: ${e.message}`, code: 'OUTBOX_UNAVAILABLE' });
+        throw e;
+      }
+    } else known = await withWriteLock(async () => Boolean(outboxOf(readBoard()).entries[obligationId]));
     if (!known) return sendJSON(res, 404, { error: 'Obligation not found', obligationId });
     sendJSON(res, 503, {
       error: 'The post cannot be verified: no graph lookup is available. A caller-supplied receipt is never accepted; the obligation stays pending.',
@@ -10904,6 +11337,10 @@ let POSTS_BULK_READER = null;
 let READ_GATE = null;
 let LOGBORN_FEED_READER = null;
 const POSTS_BULK_READ_TIMEOUT_MS = 10000;
+// #1779 — the feed bootstrap's ONE whole-history snapshot read (single-flight, then cached per store and baseline): measured
+// ~47 s on the real board under load, so it gets its own long budget instead of the bulk reader's 10 s, which it never met.
+const POSTS_SNAPSHOT_READ_TIMEOUT_MS = 180000;
+let POSTS_SNAPSHOT_READER = null;
 const DOC_POST_CHECK_DISABLED = 'disabled under the graph conversations unit (#1574): it reads document posts and would misread a seat that posts only to the graph';
 const REPLICA_NOT_MEASURED = 'not measured on the executor pass (#1645 2d): it measures the in-process copy, which checks no longer build or read';
 
@@ -11045,6 +11482,18 @@ async function dispatchAnnouncement(entry) {
 /** The inline attempt for entries the caller just committed. Never awaited by a request: a down executor never costs the write. */
 function publishAnnouncements(entries) {
   if (!ANNOUNCE_EXECUTOR) return;
+  if (ORIGIN_EXECUTOR) {   // #1629 s3 — the one after-write attempt; a failure leaves it pending for the supervised publisher
+    for (const h of entries) {
+      const id = h?.obligationId;
+      if (!id || ANNOUNCE_INFLIGHT.has(id)) continue;
+      ANNOUNCE_INFLIGHT.add(id);
+      void xoPublish(id, { inline: true })
+        .then((r) => { if (r.status === 'pending') console.error(`#1629 s3: announcement ${id} not settled inline (${r.reason ?? 'pending'}); left pending for the publisher`); })
+        .catch((e) => console.error(`#1629 s3: announcement ${id} inline attempt failed (${e.message}); left pending for the publisher`))
+        .finally(() => ANNOUNCE_INFLIGHT.delete(id));
+    }
+    return;
+  }
   for (const entry of entries) {
     if (!entry?.obligationId || entry.mode !== 'publisher') continue;
     void publishOneAnnouncement(entry);
@@ -11118,12 +11567,169 @@ async function flushAnnouncementCompletions() {
   }
 }
 
+// ── #1629 s3 — EXECUTOR-OWNED OUTBOX (ORIGIN_EXECUTOR): the same routes, read from and settled in the executor ──
+// An entry is built from the committed origin join (slice 2's readers): the Prepared descriptor, the Obligation and its
+// reservation. Only COMMITTED origins are listed (PR1: nothing is visible before origin commit). A publish is:
+//   post.create from the frozen reservation (G-R refuses anything else) → [after-executor-apply] → VERIFY the proof in
+//   the executor (the post op's receipt APPLIED with this intention's digest, the post a live Comment) → dispatch the
+//   frozen notify policy → [after-dispatch-before-complete] → obligation.settle publish.
+// The obligation stays pending through dispatch (r3 C2): a crash anywhere before settle leaves it recoverable, and a
+// replay re-dispatches (a ping may repeat; a post never does). A proof that does not verify is an INTEGRITY FAULT
+// (G-D): no dispatch, no settle, the entry stays pending, and the answer says so (`integrity: true`).
+const BOARD_PERSON = 'https://scrumboard.local/person/board';
+class OutboxUnavailable extends Error {}
+const XO_RE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):([a-z][a-z0-9-]{0,31})$/;
+
+/** One committed origin as outbox records, or {integrity} / null. Throws OutboxUnavailable when the executor does not answer. */
+async function xoOrigin(mutationId) {
+  const c = ANNOUNCE_EXECUTOR;
+  const P = await ORIGIN_MOD.readPreparedOrigin(c, mutationId);
+  if (!P.ok) { if (P.status === 'UNAVAILABLE') throw new OutboxUnavailable(P.reason); return { integrity: P.reason }; }
+  const J = await ORIGIN_MOD.readCommittedOrigin(c, mutationId);
+  if (!J.ok) { if (J.status === 'UNAVAILABLE') throw new OutboxUnavailable(J.reason); return { integrity: J.reason }; }
+  if (J.committed?.kind === 'imported') {
+    // #1747 R1 — an origin the cutover imported: its history as the outbox showed it before cutover (the SOURCE mode, the
+    // STORED status), marked imported. It has no preparation to prove, so nothing here can dispatch or settle it.
+    const { origin: O, obligations } = J.committed;
+    const origin = { mutationId, slots: obligations.map((x) => x.slot), committedAt: O.committedAt, occurredAt: O.occurredAt, originActor: O.originActor, mode: O.mode, imported: true };
+    const entries = obligations.map((ob) => ({ obligationId: ob.obligationId, mutationId, slot: ob.slot, status: ob.status, mode: ob.mode, imported: true, ...(ob.postId ? { postId: ob.postId } : {}) }));
+    return { imported: true, origin, entries };
+  }
+  if (!P.prepared || !J.committed) return null;
+  const d = JSON.parse(P.prepared.descriptorJson);
+  const { origin: O, obligations, reservations } = J.committed;
+  const origin = { mutationId, slots: d.slots.map((x) => x.slot), origin: d.provenance, committedAt: O.committedAt, occurredAt: P.prepared.occurredAt, originActor: d.originActor, mode: 'publisher' };
+  const entries = d.slots.map((x, i) => {
+    const ob = obligations[i], res = reservations[i];
+    return {
+      obligationId: ob.obligationId, mutationId, slot: ob.slot, status: ob.status, mode: 'publisher',
+      postSeq: res.postSeq, publicationAt: res.createdAt, ...(ob.status === 'published' ? { postId: res.postId } : {}),
+      payload: { author: x.author, body: x.body, mentions: [...x.mentions], notify: x.notify, occurredAt: P.prepared.occurredAt, originActor: d.originActor, origin: d.provenance, mutationId, slot: x.slot },
+    };
+  });
+  // R1 — the frozen preparation, carried to obligation.settle as candidates (the update re-verifies every byte)
+  return { origin, entries, proof: { descriptor: d, plan: JSON.parse(P.prepared.planJson), occurredAt: P.prepared.occurredAt } };
+}
+
+/** GET /api/outbox's shape, from the executor. `integrity` lists committed origins whose join did not validate. */
+async function xoListOutbox({ status, mutationId } = {}) {
+  const R = await ORIGIN_MOD.enumerateOriginRecords(ANNOUNCE_EXECUTOR);
+  if (!R.ok) throw new OutboxUnavailable(R.reason);
+  // #1747 R1 — an imported origin is never pending (its reader refuses a pending one), so a pending-only scan skips it
+  // unread; every other listing reads and validates it like any origin
+  // Only a GENUINE imported origin may be skipped: it carries a migrationId AND has no Prepared node. A native origin (it has a
+  // Prepared node) that also carries a migrationId is read, so its reader flags it INVALID into `integrity` (#122 review).
+  const skipImported = status === 'pending';
+  const prepared = new Set(R.records.filter((x) => x.type === 'Prepared' && x.mutationId).map((x) => x.mutationId));
+  // the readers count ANY triple at an origin's Prepared subject, typed or not (#122 review, finding 5), so a skip candidate
+  // whose Prepared subject holds anything at all is read and validated, never skipped
+  if (skipImported) {
+    const { ORIGIN_TERMS } = await import('./core/graph-vocab.mjs');
+    const cands = [...new Set(R.records.filter((x) => x.type === 'Origin' && x.imported && x.mutationId && !prepared.has(x.mutationId)).map((x) => x.mutationId))];
+    for (let i = 0; i < cands.length; i += 500) {
+      const slice = cands.slice(i, i + 500);
+      const r = await ANNOUNCE_EXECUTOR.query(`SELECT DISTINCT ?s WHERE { VALUES ?s { ${slice.map((m) => ORIGIN_TERMS.preparedSubject(m)).join(' ')} } { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }`);
+      if (!r.ok) throw new OutboxUnavailable(r.reason);
+      const held = new Set(r.rows.map((b) => b.s.value));
+      for (const m of slice) if (held.has(ORIGIN_TERMS.preparedSubject(m).replace(/^<|>$/g, ''))) prepared.add(m);
+    }
+  }
+  const mids = [...new Set(R.records.filter((x) => x.type === 'Origin' && x.mutationId && (!mutationId || x.mutationId === mutationId) && !(skipImported && x.imported && !prepared.has(x.mutationId))).map((x) => x.mutationId))];
+  const origins = [], entries = [], integrity = [];
+  for (const mid of mids) {
+    const o = await xoOrigin(mid);
+    if (!o) continue;
+    if (o.integrity) { integrity.push({ mutationId: mid, reason: o.integrity }); continue; }
+    origins.push(o.origin);
+    for (const e of o.entries) if (!status || e.status === status) entries.push(e);
+  }
+  return { origins, entries, ...(integrity.length ? { integrity } : {}) };
+}
+
+/** An integrity fault: logged by name, never dispatched, never settled; the entry stays pending. */
+function xoIntegrity(obligationId, why) {
+  console.error(`#1629 s3 INTEGRITY FAULT on ${obligationId}: ${why} — not dispatched, not settled, left pending`);
+  return { status: 'pending', integrity: true, reason: `integrity fault: ${why}` };
+}
+
+/** Publish ONE executor-owned obligation. `inline` = the after-write attempt (its barrier), else the explicit route. */
+async function xoPublish(obligationId, { inline = false } = {}) {
+  const m = XO_RE.exec(obligationId);
+  if (!m) return { unknown: true };
+  const [, mutationId, slot] = m;
+  const c = ANNOUNCE_EXECUTOR;
+  let o;
+  try { o = await xoOrigin(mutationId); } catch (e) { return { status: 'pending', reason: `executor-unavailable: ${e.message}` }; }
+  if (!o) return { unknown: true };
+  if (o.integrity) return xoIntegrity(obligationId, `the committed origin does not validate (${o.integrity})`);
+  const entry = o.entries.find((e) => e.slot === slot);
+  if (!entry) return { unknown: true };
+  // #1747 R1 — an imported obligation is settled history: never dispatched, never settled, whatever its status says
+  if (o.imported) return { status: entry.status, code: 'IMPORTED_SETTLED', ...(entry.postId ? { postId: entry.postId } : {}) };
+  if (entry.status === 'published') return { status: 'published', postId: entry.postId };
+  if (entry.status === 'blocked') return { status: 'blocked', reason: 'blocked' };
+  if (entry.status === 'retired') return { status: 'retired', reason: 'retired by a disposition (#1749 A8): never dispatched' };
+  // #1749 A8-2 — THE DISPATCH HOLD, checked first and logged by name (the compiled guard in post.create and obligation.settle is
+  // the authority): while a RecoveryHold exists, or this obligation's AmbiguousObligation is held, nothing is posted or sent
+  const held = await c.ask(`ASK { GRAPH <urn:ex:postseq/recovery> { { <urn:ex:postseq/recovery-hold> ?hp ?ho } UNION { <urn:ex:postseq/ambiguous/${crypto.createHash('sha256').update(obligationId, 'utf8').digest('hex')}> <urn:ex:postseq/state> ?st FILTER(STR(?st) = "held") } } }`);
+  if (!held.ok) return { status: 'pending', reason: `executor-unavailable: the dispatch hold could not be read (${held.reason})` };
+  if (held.boolean) {
+    console.error(`#1749 DISPATCH_HELD: announcement ${obligationId} is held (a restore left it ambiguous, or a recovery hold is in place) — not posted, not dispatched; only an operator's --dispose-obligation settles it`);
+    return { status: 'pending', code: 'DISPATCH_HELD', reason: 'DISPATCH_HELD: this obligation is held after a restore; only an executor --dispose-obligation settles it, and nothing re-dispatches it' };
+  }
+  const intention = postCreateIntention(entry);
+  const settle = async (transition, extra) => c.update({ kind: 'obligation.settle', opId: COMPILER_MOD.settleOpId(obligationId, transition), actor: BOARD_PERSON, obligationId, transition, ...extra });
+  const r = await c.update(intention);
+  if (r.outcome === 'REJECTED' && r.reason === 'intent-collision') return xoIntegrity(obligationId, 'the deterministic post op already holds a different publication');
+  if (r.outcome === 'PRECONDITION_FAILED' || r.outcome === 'REJECTED') {
+    const t = await c.query(`SELECT ?t WHERE { <https://scrumboard.local/entity/${intention.post.id}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> ?t }`);
+    if (t.ok && t.rows.some((x) => x.t.value === 'https://scrumboard.local/ns#RedactedPost')) {
+      const b = await settle('block', { reason: 'tombstoned', origin: o.proof });
+      return b.outcome === 'APPLIED' ? { status: 'blocked', reason: 'POST_REDACTED' } : { status: 'pending', reason: `settle-${b.outcome}` };
+    }
+    return xoIntegrity(obligationId, `the reserved post could not be written (${r.outcome}${r.reason ? `: ${r.reason}` : ''})`);
+  }
+  if (r.outcome !== 'APPLIED') return { status: 'pending', reason: `executor-${String(r.outcome).toLowerCase()}${r.reason ? `: ${r.reason}` : ''}` };
+  if (!inline) testBarrier('after-executor-apply');   // TEST-ONLY: the executor answered, nothing recorded, no lock held
+  // G-D — the proof, read from the executor, BEFORE any dispatch
+  const want = COMPILER_MOD.compile(intention).digest;
+  // R2 — the receipt is read WHOLE and every proof term checked exactly: one outcome (the APPLIED IRI), one digest (a plain
+  // xsd:string equal to this intention's), one actor (the author's person). Anything else is an integrity fault.
+  const q = await c.query(`SELECT ?p ?o WHERE { GRAPH <urn:scrum:bookkeeping:executor> { <${intention.opId}> ?p ?o } }`);
+  const ty = await c.query(`SELECT ?t WHERE { <https://scrumboard.local/entity/${intention.post.id}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> ?t }`);
+  if (!q.ok || !ty.ok) return { status: 'pending', reason: 'executor-unavailable: the publication proof could not be read' };
+  const terms = (pred) => q.rows.filter((x) => x.p.value === pred).map((x) => x.o);
+  const [outs, digs, acts] = ['urn:ex:outcome', 'urn:ex:digest', 'urn:ex:actor'].map(terms);
+  const plainStr = (t) => t.type === 'literal' && t['xml:lang'] == null && (t.datatype == null || t.datatype === 'http://www.w3.org/2001/XMLSchema#string');
+  const proofOk = outs.length === 1 && outs[0].type === 'uri' && outs[0].value === 'urn:ex:APPLIED'
+    && digs.length === 1 && plainStr(digs[0]) && digs[0].value === want
+    && acts.length === 1 && acts[0].type === 'uri' && acts[0].value === intention.actor;
+  if (!proofOk) return xoIntegrity(obligationId, 'the post op\'s receipt is not this publication\'s (its outcome, digest or actor is not the exact expected term)');
+  const types = ty.rows.map((x) => x.t.value);
+  if (types.includes('https://scrumboard.local/ns#RedactedPost')) {
+    const b = await settle('block', { reason: 'tombstoned', origin: o.proof });
+    return b.outcome === 'APPLIED' ? { status: 'blocked', reason: 'POST_REDACTED' } : { status: 'pending', reason: `settle-${b.outcome}` };
+  }
+  if (!types.includes('https://schema.org/Comment')) return xoIntegrity(obligationId, 'the reserved post is not a live post');
+  await dispatchAnnouncement(entry);
+  if (inline) testBarrier('after-dispatch-before-complete');   // TEST-ONLY: dispatched, settlement not yet recorded
+  const p = entry.payload;
+  const s = await settle('publish', { publication: { payload: { author: p.author, body: p.body, originActor: p.originActor, occurredAt: p.occurredAt, mentions: p.mentions, notify: p.notify }, postSeq: entry.postSeq, publicationAt: entry.publicationAt }, origin: o.proof });
+  if (s.outcome === 'APPLIED') return { status: 'published', postId: intention.post.id };
+  return { status: 'pending', reason: `settle-${String(s.outcome).toLowerCase()}${s.reason ? `: ${s.reason}` : ''}` };
+}
+
 async function handlePublishOutbox(req, res, rawId) {
   try {
     await readBody(req);   // drained; nothing the caller sends is consulted
     let obligationId;
     try { obligationId = decodeURIComponent(rawId); } catch { return sendJSON(res, 400, { error: 'malformed obligation id' }); }
     const actor = req.auth?.seat ?? null;
+    if (ORIGIN_EXECUTOR) {   // #1629 s3 — no document: post, verify, dispatch, settle, all against the executor
+      const r = await xoPublish(obligationId, { inline: false });
+      if (r.unknown) return sendJSON(res, 404, { error: 'Obligation not found', obligationId });
+      return sendJSON(res, 200, r);
+    }
     const first = await withWriteLock(async () => {
       const data = readBoard();
       assertPostSeqWritable(data);   // #1592 — a corrupt post sequence refuses the WHOLE write, before any change
@@ -11200,7 +11806,7 @@ async function handleCreateColumn(req, res) {
       const order = typeof body.order === 'number' ? body.order : data.columns.length;
       const col = { id, name: body.name.trim(), order };
       data.columns.push(col);
-      writeBoard(data, [columnEvent('create', col)]);
+      writeBoard(data, [columnEvent('create', col, columnActor(body))]);
       return col;
     });
     sendJSON(res, 201, created);
@@ -11248,11 +11854,12 @@ async function handleUpdateColumn(req, res, columnId) {
       const col = data.columns[idx];
       for (const [k, v] of Object.entries(patch)) {
         if (isEchoOfStored(v, col[k])) continue;        // #844 — nothing was attempted
+        if (k === 'by') continue;                       // #1762 S1 — the declared actor (#675), not a column field
         if (k === 'id') { refusedFields.push(k); continue; } // immutable, and now said so
         if (!PATCHABLE_COLUMN_FIELDS.has(k)) { ignoredFields.push(k); continue; } // #299
         col[k] = v;
       }
-      writeBoard(data, [columnEvent('update', col)]);
+      writeBoard(data, [columnEvent('update', col, columnActor(patch))]);
       return col;
     });
     if (!updated) return sendJSON(res, 404, { error: 'Column not found' });
@@ -11569,7 +12176,7 @@ async function listByCommit(q, res) {
     conversation: typeof q.conversation === 'string' && q.conversation ? q.conversation : null,
   };
   try {
-    return sendJSON(res, 200, await postFeed(POSTS_BULK_READER || ANNOUNCE_EXECUTOR, { after: q.afterCommit, limit, filters }));   // #1574 attempt 2 — through the gate
+    return sendJSON(res, 200, await postFeed(POSTS_BULK_READER || ANNOUNCE_EXECUTOR, { after: q.afterCommit, limit, filters, snapshotClient: POSTS_SNAPSHOT_READER }));   // #1574 attempt 2 — through the gate
   } catch (e) {
     if (e instanceof DiscoveryError) return sendJSON(res, e.status, e.body);
     throw e;
@@ -12170,6 +12777,34 @@ async function createPostThroughGraph(res, body) {
       replay = true;
     } else if (q.rows.length) {
       return sendJSON(res, 409, { error: 'this requestId names a node that is not a readable post', code: 'POST_NODE_UNREADABLE', requestId });
+    } else if (ORIGIN_EXECUTOR) {
+      // 3′. #1629 s3 G1(b) — executor-owned: the number comes from slice 1's ONE allocator (postseq.reserve, ordinary
+      // mode, keyed by author + requestId), the same allocator every announcement slot reserves from. A re-sent request
+      // with the same content replays the original reservation (its number and time); different content under the same
+      // requestId is an intent-collision and is refused, as the document path's receipt would refuse it.
+      const c = ANNOUNCE_EXECUTOR;
+      const before = await POSTSEQ_MOD.readPostSeqReservation(c, postId);
+      if (!before.ok) return before.status === 'UNAVAILABLE'
+        ? sendJSON(res, 503, unknownBody(requestId, `the reservation could not be read: ${before.reason}`))
+        : sendJSON(res, 409, { error: `this requestId's reservation does not read back well-formed: ${before.reason}`, code: 'POST_SEQ_RESERVATION_INVALID', requestId });
+      // #1747 R1 — the number was reserved by the document before cutover and its post never landed. The original
+      // content was not kept, so the board can neither replay it nor reserve again: hold, with nothing consumed.
+      if (before.reservation?.kind === 'imported') return sendJSON(res, 409, { error: 'this requestId was reserved before the cutover and its post was never written; its original content is not recoverable, so it is held, not re-reserved', code: 'LEGACY_HOLD', requestId });
+      const item = { mode: 'ordinary', author, requestId, draft: {
+        body: post.body, attachedTo: post.attachedTo ?? null, mentions: Array.isArray(post.mentions) ? [...post.mentions] : [],
+        attachments: (post.attachments || []).map((a) => ({ id: a.id, mime: a.mime, name: a.name, size: a.size })),
+        conversation: post.conversation ?? null, onBehalfOf: post.onBehalfOf ?? null,
+      } };
+      let opId;
+      try { opId = POSTSEQ_MOD.reserveOpId(POSTSEQ_MOD.canonReservationBatch([item], 'reservations')); } catch (e) { return sendJSON(res, 400, { error: e.message, code: 'INVALID_POST' }); }
+      const rr = await c.update({ kind: 'postseq.reserve', opId, actor: `https://scrumboard.local/person/${author}`, reservations: [item] });
+      if (rr.outcome === 'REJECTED' && rr.reason === 'intent-collision') return sendJSON(res, 409, { error: 'this requestId was reserved for different content', code: 'INTENT_COLLISION', requestId });
+      if (rr.outcome === 'PRECONDITION_FAILED') return sendJSON(res, 503, { error: 'the post-sequence allocator refused the reservation (missing, malformed or ambiguous); nothing was written', code: 'POST_SEQ_ALLOCATOR_REFUSED', requestId });
+      if (rr.outcome !== 'APPLIED') return sendJSON(res, 503, unknownBody(requestId, `the reservation's outcome is ${rr.outcome}${rr.reason ? `: ${rr.reason}` : ''}`));
+      const got = await POSTSEQ_MOD.readPostSeqReservation(c, postId);
+      if (!got.ok || !got.reservation) return sendJSON(res, 503, unknownBody(requestId, `the reservation did not read back: ${got.reason ?? 'absent'}`));
+      post = { ...post, postSeq: got.reservation.postSeq, createdAt: got.reservation.createdAt };
+      heldBefore = !!before.reservation;
     } else {
       // 3. mint, under the lock, re-checked
       const minted = await withWriteLock(async () => {
@@ -12395,7 +13030,8 @@ function appendWikiNotice(data, verb, card) {
   const body = `📄 page ${verb}: **${title}** (#${card.shortId})`;
   // #1574 1b — unit on: an obligation in the caller's write (author `wiki`, NO notify: the frozen feed-only policy).
   // The caller adds `pub.events` to its write and publishes `pub.entry` after the lock. Unit off: today's post.
-  const pub = commitPublisherAnnouncement(data, { slot: 'wiki', body, author: 'wiki', notify: false, origin: { cardId: card.id, version: card.version }, actor: card.createdBy ?? null });
+  // #1629 s3 (Q-B): executor-owned, the origin actor is who CAUSED the write; the page's creator is not that, so `board`
+  const pub = commitPublisherAnnouncement(data, { slot: 'wiki', body, author: 'wiki', notify: false, origin: { cardId: card.id, version: card.version }, actor: ORIGIN_EXECUTOR ? null : (card.createdBy ?? null) });
   if (pub) return { pub };
   const conv = createConversationFromPayload({ body, author: 'wiki' });
   pushPost(data, conv);
@@ -12410,6 +13046,8 @@ async function handleCreateNode(req, res) {
     if (!body.title || !body.title.trim()) return sendJSON(res, 400, { error: 'title is required' });
     const verr = validateCardFields({ type: body.type });
     if (verr) return sendJSON(res, 400, { error: verr });
+    // #1744 (#1629 slice 4) — executor-owned: the page create is a `wiki-create` origin (createNodeAsOrigin, below)
+    if (ORIGIN_EXECUTOR) return await createNodeAsOrigin(res, body);
     let notice = null;
     const created = await withWriteLock(async () => {
       const data = readBoard();
@@ -12449,6 +13087,96 @@ async function handleCreateNode(req, res) {
     console.error('POST /api/nodes:', e.message);
     sendJSON(res, 500, { error: 'Failed to create node' });
   }
+}
+
+/**
+ * #1744 (#1629 slice 4) — a page create in executor-owned mode, as ONE `wiki-create` origin (contract v2 V2-1, F4):
+ *   identity  requestId (the caller's, or minted here and returned) → mutationId = UUIDv5(["origin-v1","wiki-create","wiki",
+ *             requestId,"board"]) and the card id DERIVED from it, so a retry can never mint a second card;
+ *   request   the canonical semantic request, frozen as requestDigest in the descriptor (and so in its digest);
+ *   plan      the new card at the counter's shortId, the counter advance, every card naming that shortId (reference-resolve),
+ *             and the version of every ancestor the plan read (parent and apex chain), all from the cards unit's own plan;
+ *   retry     same key + same digest after the commit → the ORIGINAL card, nothing written; before the commit → the frozen
+ *             plan's timestamps are reused, so an unchanged world replays the prepare and commits, and a changed one is
+ *             refused as STALE_PREPARED (never a silent replan); same key + another digest → REQUEST_CONFLICT.
+ * The notice is the obligation's slot `wiki` (author wiki, feed-only), published after the answer like any origin's.
+ */
+async function createNodeAsOrigin(res, body) {
+  const requestId = typeof body.requestId === 'string' && body.requestId ? body.requestId : crypto.randomUUID();
+  const originActor = 'board';   // F4: appendWikiNotice's actor policy in executor mode, never the declared createdBy
+  const { originKeyOf, mutationIdOf, WIKI_CREATE_ROUTE } = COMPILER_MOD;
+  const mutationId = mutationIdOf(originKeyOf(WIKI_CREATE_ROUTE, 'wiki', requestId, originActor));
+  const cardId = mutationIdOf(`${mutationId}:card`);
+  const conflict = (code, error) => sendJSON(res, 409, { error, code, requestId });
+  let handle = null, node = null, replayed = false;
+  try {
+    node = await withWriteLock(async () => {
+      if (CARDS_UNIT) await CARDS.ensureFresh();
+      const data = readBoard();   // executor-owned: built from the units, no document read (#1563)
+      const snap = CARDS.snapshot(data.nextShortId);
+      const card = createCardFromPayload({ id: cardId, title: body.title, description: body.body || '', type: body.type || 'reference', createdBy: body.createdBy }, snap.nextShortId);
+      if (typeof body.parent === 'string') card.parent = body.parent;
+      if (body.attachments !== undefined) card.attachments = sanitizeAttachments(body.attachments);
+      const canonical = JSON.stringify({ v: 1, title: card.title, description: card.description, type: card.type, parent: typeof body.parent === 'string' ? body.parent : null, attachments: body.attachments === undefined ? null : card.attachments, createdBy: card.createdBy ?? null });
+      const requestDigest = crypto.createHash('sha256').update(`wikiCreateRequestV 1\n${canonical}`).digest('hex');
+      const prior = await ORIGIN_MOD.readPreparedOrigin(ANNOUNCE_EXECUTOR, mutationId);
+      if (!prior.ok) throw Object.assign(new Error(`the prepared origin could not be read (${prior.reason})`), { code: 'CARDS_UNAVAILABLE' });
+      if (prior.prepared) {
+        const was = JSON.parse(prior.prepared.descriptorJson);
+        if (was.provenance?.requestDigest !== requestDigest) { replayed = 'conflict'; return null; }
+        if (prior.prepared.committedBy) {   // the same request, already committed: the ORIGINAL card, nothing written
+          replayed = 'committed';
+          const live = CARDS.snapshot(data.nextShortId).cards.find((c) => c.id === cardId);
+          return live ? cardToNode(live) : null;
+        }
+        // prepared, never committed: reuse the FROZEN plan's timestamps, so the identical world rebuilds the identical plan
+        const stored = JSON.parse(prior.prepared.planJson).parts.find((x) => x.iri === `https://scrumboard.local/entity/${cardId}`);
+        if (stored) { const j = JSON.parse(stored.json); card.createdAt = j.createdAt; card.updatedAt = j.updatedAt; }
+        replayed = 'prepared';
+      }
+      const cards = [...snap.cards, card];
+      if (card.parent != null) applyApexLabels(cards, card.id);   // #902 item 4 — born labelled
+      // every ancestor the plan READ, pinned at its graph version (F4: the whole parent/apex chain, not just the parent)
+      const reads = [];
+      for (let id = card.parent, seen = new Set(); id && !seen.has(id); id = cards.find((c) => c.id === id)?.parent) {
+        seen.add(id);
+        const v = CARDS.versionOf(id);
+        if (v != null) reads.push({ iri: `https://scrumboard.local/entity/${id}`, version: String(v) });
+      }
+      const subject = `https://scrumboard.local/entity/${cardId}`;
+      const noticeBody = `📄 page created: **${(card.title || 'untitled').trim()}** (#${card.shortId})`;
+      const r = await CARDS.commitOrigin(cards, snap.nextShortId + 1, {
+        create: true, reads,
+        decorate: (parts) => parts.map((x) => (x.iri === subject ? x : { ...x, reason: 'reference-resolve' })),
+        describe: () => ({ route: WIKI_CREATE_ROUTE, subject: 'wiki', requestKey: requestId, originActor, mutationId,
+          provenance: { cardId, version: 1, requestDigest },
+          slots: [{ slot: 'wiki', author: 'wiki', body: noticeBody, mentions: extractMentionsFromRoster(noticeBody, currentRoster(data)), notify: false }] }),
+        afterPrepare: () => testBarrier('after-origin-prepare'),
+      });
+      if (r.outcome === 'APPLIED') {
+        handle = { mode: 'publisher', executorOwned: true, slot: 'wiki', mutationId: r.mutationId, obligationId: `${r.mutationId}:wiki` };
+        // the same post-commit bookkeeping as every unit write: the create event (/api/changes), the replica marked dirty,
+        // the pending count, lastUpdated. The document keeps its own card list (FILE_CARDS), as for any unit write.
+        writeDocument(data, [cardEvent('create', card, card.createdBy)]);
+      }
+      return cardToNode(card);
+    });
+  } catch (e) {
+    if (e instanceof PostSeqStateCorrupt) return sendJSON(res, 500, e.body);
+    if (e && e.code === 'CARD_WRITE_CONFLICT') {
+      if (CARD_REF_INDEX_ENFORCE && (await cardRefIndexIncomplete()) === true) return sendJSON(res, 409, { error: 'the card reference index is incomplete or damaged; nothing was written (run scripts/card-ref-index-1744.mjs --backfill with writers stopped)', code: 'INDEX_INCOMPLETE', requestId });
+      // a keyed retry whose frozen plan no longer matches the world: the prepare under the same key refuses (intent collision)
+      if (replayed === 'prepared') return conflict('STALE_PREPARED', 'this request was prepared against a board that has since changed; it is not replanned under the same key (use a new requestId)');
+      return conflict('WRITE_CONFLICT', `the graph refused this page create; nothing was written: ${e.message}`);
+    }
+    if (e && (e.code === 'CARDS_UNAVAILABLE' || e.code === 'COLLECTIONS_UNAVAILABLE')) return sendJSON(res, 503, { error: `the graph executor is not answering; nothing is reported as written: ${e.message}`, code: 'GRAPH_UNAVAILABLE', requestId });
+    console.error('POST /api/nodes (wiki-create):', e.message);
+    return sendJSON(res, 500, { error: 'Failed to create node', requestId });
+  }
+  if (replayed === 'conflict') return conflict('REQUEST_CONFLICT', 'this requestId was already used for a different page request; nothing was written');
+  if (!node) return sendJSON(res, 503, { error: 'the committed page could not be read back', code: 'GRAPH_UNAVAILABLE', requestId });
+  sendJSON(res, replayed === 'committed' ? 200 : 201, { ...node, requestId });
+  if (handle) publishAnnouncements([handle]);
 }
 
 // #220 — would setting node `childId`'s parent to `newParentId` create a cycle?
@@ -12566,19 +13294,24 @@ function queryGuard(req, res, extra = CURSOR_PARAMS) {
 }
 
 /** GET /api/cursors — the reachability projection, inbound-evidence only. */
-function handleCursorReport(req, res) {
+async function handleCursorReport(req, res) {
   const q = queryGuard(req, res, new Set(['as', 'inputs', 'streamOpen']));
   if (!q) return;
   try {
+    // #1762 S4 — past a valid F the lag is against F.logSeq and the retired log is not read
+    const lf = await lifecycleFrontier(res);
+    if (lf === undefined) return;
+    const head = lf?.fr.state === 'valid' ? lf.fr.frontier.logSeq : null;
     // `inputs=stream_open` is the card's POSITIVE CONTROL and nothing else: the
     // banned instrument, kept runnable so its disagreement with the inbound
     // projection can be demonstrated rather than argued. It scored a seat
     // healthy for eight hours while it received nothing.
     const report = reachabilityReport(EVENT_LOG_DIR, {
-      inputs: q.inputs === 'stream_open' ? 'stream_open' : 'inbound',
+      inputs: q.inputs === 'stream_open' ? 'stream_open' : 'inbound', head,
     });
-    sendJSON(res, 200, { head_seq: headSeq(EVENT_LOG_DIR), lanes: report });
+    sendJSON(res, 200, { head_seq: head ?? headSeq(EVENT_LOG_DIR), lanes: report });
   } catch (e) {
+    if (e?.code === CURSOR_STATE_INVALID) return sendJSON(res, 503, { error: e.message, code: e.code, file: e.file });   // #1762 S4
     console.error('GET /api/cursors:', e.message);
     sendJSON(res, 500, { error: 'Failed to compute reachability' });
   }
@@ -12606,8 +13339,94 @@ async function graphHeadOrNull() {
 }
 
 /** POST /api/cursors/register — a lane announces itself. Known lanes KEEP their cursor. */
+/**
+ * #1762 S4 — the history frontier as the LANE routes see it: null when no executor is configured, else the classified F
+ * (absent | valid | invalid | mismatch) plus a query function. Unreadable throws GRAPH_EXECUTOR_UNAVAILABLE.
+ */
+function laneHistoryQuery() {
+  if (LOGBORN) return (sparql) => logbornFeedQuery(sparql);
+  if (ANNOUNCE_EXECUTOR) return async (sparql) => { const r = await POSTS_READER.query(sparql); if (!r.ok) throw Object.assign(new Error(`the graph could not be read: ${r.reason || 'unreadable'}`), { code: 'GRAPH_EXECUTOR_UNAVAILABLE' }); return r.rows; };
+  return null;
+}
+const laneConvQuery = () => (ANNOUNCE_EXECUTOR ? async (sparql) => { const r = await POSTS_READER.query(sparql); if (!r.ok) throw Object.assign(new Error(`the graph could not be read: ${r.reason || 'unreadable'}`), { code: 'GRAPH_EXECUTOR_UNAVAILABLE' }); return r.rows; } : null);
+async function laneFrontier() {
+  const query = laneHistoryQuery();
+  if (!query) return null;
+  return { query, convQuery: laneConvQuery(), fr: classifyFrontier(await query(FRONTIER_QUERY)) };
+}
+/** the history object a lifecycle envelope takes past a valid F (no page read: the log half's age is reported unknown) */
+const laneHistoryOf = (lf) => (lf?.fr.state === 'valid' ? { frontierLogSeq: lf.fr.frontier.logSeq, frontierCommitSeq: lf.fr.frontier.commitSeq } : null);
+/**
+ * #1762 S4 — the frontier for a cursor LIFECYCLE route (register / inbound / ack / listing / push mark): null when no executor is
+ * configured or F is absent. A refused or unreadable F has already been answered (503) when this returns `undefined`.
+ */
+async function lifecycleFrontier(res) {
+  let lf = null;
+  try { lf = await laneFrontier(); } catch (e) { if (graphRefused(res, e)) return undefined; throw e; }
+  if (lf && frontierRefused(res, lf.fr)) return undefined;
+  return lf;
+}
+/**
+ * #1762 S4 — one lane page past F: the PROVEN log half (core/history-lane.mjs) and the graph half (log-born receipts, S1's
+ * native activities and S2's refusal records past F.commitSeq, one row per (opId, part)), read in ONE snapshot: the marker's
+ * commitSeq seen by the frontier read must be the one every later read saw, or the page is read again once, then refused.
+ */
+async function lanePastFrontier(identity, limit, lf) {
+  const read = async (fr) => {
+    const F = fr.frontier, query = lf.query, startHw = fr.marker.commitSeq;
+    const lane = loadCursors(EVENT_LOG_DIR).seats[identity];
+    const graphAcked = lane ? (lane.graph_acked ?? 0) : 0;
+    const logPage = lane ? await lanePageFromHistory({ query, readPost: readGraphPost, F, acked: lane.acked, limit }) : { events: [], logHigh: null };
+    const feed = LOGBORN ? feedRowsFromBindings(await LOGBORN.query(feedQuery(graphAcked))) : null;
+    const through = feed ? feed.through : startHw;
+    // #1762 S4 (review of 60a02f8, finding 1) — graph-born POST receipts are owed from the lane's OWN graph position, below F as
+    // well as above it: a pre-F post has no legacy seq-node, so F must not be what erases it. Cut to the same high-water.
+    const posts = postFeedRows(await lf.convQuery(postFeedQuery(graphAcked)), through);
+    const nativeB = await query(nativeQuery({ afterCommitSeq: F.commitSeq, through }));
+    const refusalB = await query(refusalQuery({ afterCommitSeq: F.commitSeq, through }));
+    const again = classifyFrontier(await query(FRONTIER_QUERY));
+    const same = again.state === 'valid' && JSON.stringify(again.frontier) === JSON.stringify(F)
+      && [through, markerOf(nativeB), markerOf(refusalB), again.marker.commitSeq].every((h) => Number(h) === startHw);
+    if (!same) return null;
+    const native = nativeRowsFromBindings(nativeB);
+    // ONE ROW PER (opId, part), as /api/changes does: a non-post receipt with a native twin is not served again (the native
+    // row carries its provenance); a POST keeps its receipt row (the conversations unit's row is the authoritative one) with
+    // the native provenance folded into it, and the content-free native duplicate is dropped
+    const nativeByOp = new Map();
+    for (const r of native) (nativeByOp.get(r.graph.opId) || nativeByOp.set(r.graph.opId, []).get(r.graph.opId)).push(r);
+    const folded = new Set();
+    const receipts = [];
+    for (const r of [...(feed ? feed.rows : []), ...posts]) {
+      const twins = r.graph ? nativeByOp.get(r.graph.opId) : null;
+      if (!twins) { receipts.push(r); continue; }
+      if (r.kind !== 'conversation') continue;
+      const twin = twins.find((t) => t.kind === 'conversation' && t.id === r.id) ?? twins[0];
+      folded.add(twin);
+      receipts.push({ ...r, graph: { ...r.graph, part: twin.graph.part, nativeOp: twin.graph.nativeOp } });
+    }
+    const rows = [...receipts, ...native.filter((r) => !folded.has(r)), ...refusalRowsFromBindings(refusalB)]
+      .sort((a, b) => a.graph.commitSeq - b.graph.commitSeq || (a.graph.part ?? 0) - (b.graph.part ?? 0));
+    const graph = feed ? { ...feed, rows } : { rows, through, epoch: Number(fr.marker.epoch), epochBase: null, incarnation: incarnationTag(fr.marker.incarnation), incarnationFrom: null };
+    return { graph, history: { events: logPage.events, logHigh: logPage.logHigh, frontierLogSeq: F.logSeq, frontierCommitSeq: F.commitSeq } };
+  };
+  let page = await read(lf.fr);
+  if (!page) {
+    const fr = classifyFrontier(await lf.query(FRONTIER_QUERY));
+    if (fr.state === 'valid' && JSON.stringify(fr.frontier) === JSON.stringify(lf.fr.frontier)) page = await read(fr);
+  }
+  if (!page) throw Object.assign(new Error('the store moved while this lane page was being read, twice; nothing is served from mixed snapshots — pull again'), { code: 'HISTORY_SNAPSHOT_MOVED' });
+  return page;
+}
+
+const frontierRefused = (res, fr) => {
+  if (fr.state === 'invalid') { sendJSON(res, 503, { error: `the history frontier is invalid: ${fr.reason}`, code: 'HISTORY_FRONTIER_INVALID' }); return true; }
+  if (fr.state === 'mismatch') { sendJSON(res, 503, { error: `the history frontier belongs to another store: ${fr.reason}`, code: 'HISTORY_FRONTIER_STORE_MISMATCH' }); return true; }
+  return false;
+};
+
 async function handleCursorRegister(req, res) {
   try {
+    cursorsPath(EVENT_LOG_DIR);   // #1762 S4 — an unusable relocated state refuses BEFORE anything else is read or written
     const body = JSON.parse((await readBody(req)) || '{}');
     const id = deliveryIdentity(body || {});
     if (!id) {
@@ -12621,13 +13440,19 @@ async function handleCursorRegister(req, res) {
     // #1575 — read for a KNOWN lane too: its executor epoch is checked against the store's
     // (reported as epoch_mismatch; moved only when the body asks `resync: "epoch"`).
     const head = await graphHeadOrNull();
+    let lf = null;
+    try { lf = await laneFrontier(); } catch (e) { if (graphRefused(res, e)) return; throw e; }
+    if (lf && frontierRefused(res, lf.fr)) return;
     const out = registerFor(EVENT_LOG_DIR, id.key, {
+      logHead: lf?.fr.state === 'valid' ? lf.fr.frontier.logSeq : null,   // #1762 S4 — never the log's head past F
       graphHead: head?.through ?? null, graphEpoch: head?.epoch ?? null, graphEpochBase: head?.epochBase ?? null,
       graphIncarnation: head?.incarnation ?? null, graphIncarnationFrom: head?.incarnationFrom ?? null,   // #1577
       resync: body.resync === 'epoch' ? 'epoch' : body.resync === 'rollback' ? 'rollback' : null,   // #1561 rollback
+      history: laneHistoryOf(lf),   // #1762 S4 — the envelope reads no log past F
     });
     sendJSON(res, 200, { identity: id, ...out });
   } catch (e) {
+    if (e?.code === CURSOR_STATE_INVALID) return sendJSON(res, 503, { error: e.message, code: e.code, file: e.file });   // #1762 S4
     console.error('POST /api/cursors/register:', e.message);
     sendJSON(res, 500, { error: 'Failed to register cursor' });
   }
@@ -12654,6 +13479,7 @@ async function handleCursorPull(req, res) {
     return sendJSON(res, 400, { error: 'identity is required (e.g. registry:<seat>.<client>)' });
   }
   try {
+    cursorsPath(EVENT_LOG_DIR);   // #1762 S4 — an unusable relocated state refuses BEFORE anything else is read or written
     const limit = q.limit ? Math.min(Number(q.limit) || PULL_LIMIT, PULL_LIMIT) : PULL_LIMIT;
     // #1571 — with the log-born unit ON, memory / decision / seat-state writes are in
     // the executor, not the log: the lane is also owed the feed rows past its executor
@@ -12662,16 +13488,35 @@ async function handleCursorPull(req, res) {
     // a log-only answer would read as "nothing happened there", and nothing is
     // committed, so neither cursor moves.
     let graph = null;
-    const graphAcked = LOGBORN ? graphAckedOf(EVENT_LOG_DIR, q.identity) : null;
-    if (graphAcked != null) {
+    let history = null;
+    // #1762 S4 — a valid, certified history frontier moves the lane off the event log (S4 v1.6–v1.6.3)
+    let lf = null;
+    try { lf = await laneFrontier(); } catch (e) { if (graphRefused(res, e)) return; throw e; }
+    if (lf && frontierRefused(res, lf.fr)) return;
+    if (lf?.fr.state === 'valid') {
+      // posts live with the conversations unit; without it a lane page past F cannot include them, so it is refused, never partial
+      if (!lf.convQuery) return sendJSON(res, 503, { error: 'a history frontier is present but the conversations unit is off: posts cannot be served from the graph, and the log is not read past F', code: 'HISTORY_CONFIG_UNSUPPORTED' });
       try {
-        graph = feedRowsFromBindings(await LOGBORN.query(feedQuery(graphAcked)));
+        ({ graph, history } = await lanePastFrontier(q.identity, limit, lf));
       } catch (e) {
         if (graphRefused(res, e)) return;
+        if (e?.code === 'HISTORY_COVERAGE_CHANGED') return sendJSON(res, 503, { error: e.message, code: e.code });
+        if (e?.code === 'HISTORY_LEGACY_POST_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code, seq: e.seq, entity: e.entity });
+        if (e?.code === 'HISTORY_SNAPSHOT_MOVED') return sendJSON(res, 503, { error: e.message, code: 'HISTORY_FRONTIER_INVALID' });
         throw e;
       }
+    } else {
+      const graphAcked = LOGBORN ? graphAckedOf(EVENT_LOG_DIR, q.identity) : null;
+      if (graphAcked != null) {
+        try {
+          graph = feedRowsFromBindings(await LOGBORN.query(feedQuery(graphAcked)));
+        } catch (e) {
+          if (graphRefused(res, e)) return;
+          throw e;
+        }
+      }
     }
-    const pull = serveFor(EVENT_LOG_DIR, q.identity, { limit, via: q.via || null, graph });
+    const pull = serveFor(EVENT_LOG_DIR, q.identity, { limit, via: q.via || null, graph, history });
     if (pull.refused === 'CURSOR_TOO_OLD') {
       // Refuse, never answer partially — the same contract /api/changes has had
       // since #679. Serving "whatever survived" would let the lane ack past
@@ -12718,6 +13563,7 @@ async function handleCursorPull(req, res) {
     pull.commit();
     sendJSON(res, 200, { events: pull.events, envelope: pull.envelope, ack_token: pull.ack_token });
   } catch (e) {
+    if (e?.code === CURSOR_STATE_INVALID) return sendJSON(res, 503, { error: e.message, code: e.code, file: e.file });   // #1762 S4
     console.error('GET /api/cursors/pull:', e.message);
     sendJSON(res, 500, { error: 'Failed to serve replay' });
   }
@@ -12735,6 +13581,7 @@ async function handleCursorPull(req, res) {
  */
 async function handleCursorAck(req, res) {
   try {
+    cursorsPath(EVENT_LOG_DIR);   // #1762 S4 — an unusable relocated state refuses BEFORE anything else is read or written
     const body = JSON.parse((await readBody(req)) || '{}');
     const key = body.identity || deliveryIdentity(body)?.key;
     if (!key) return sendJSON(res, 400, { error: 'identity is required', code: 'NO_DELIVERY_IDENTITY' });
@@ -12747,13 +13594,16 @@ async function handleCursorAck(req, res) {
       }
       store = { epoch: head.epoch, incarnation: head.incarnation ?? null };
     }
-    const out = ackFor(EVENT_LOG_DIR, key, body.token, { store });
+    const lf = await lifecycleFrontier(res);   // #1762 S4 — past F the success envelope reads no log
+    if (lf === undefined) return;
+    const out = ackFor(EVENT_LOG_DIR, key, body.token, { store, history: laneHistoryOf(lf) });
     if (out.ok) return sendJSON(res, 200, out);
     if (out.code === ACK_FENCED) {
       console.warn(`[#1576] ${ACK_FENCED} identity=${key} — an ack for a range since served to another session; re-serving`);
     }
     sendJSON(res, out.code === ACK_TOKEN_INVALID ? 400 : out.code === ACK_UNKNOWN_LANE ? 404 : 409, out);
   } catch (e) {
+    if (e?.code === CURSOR_STATE_INVALID) return sendJSON(res, 503, { error: e.message, code: e.code, file: e.file });   // #1762 S4
     console.error('POST /api/cursors/ack:', e.message);
     sendJSON(res, 500, { error: 'Failed to record ack' });
   }
@@ -12769,10 +13619,15 @@ async function handleCursorInbound(req, res) {
     const key = body.identity || deliveryIdentity(body)?.key;
     if (!key) return sendJSON(res, 400, { error: 'identity is required', code: 'NO_DELIVERY_IDENTITY' });
     // #1571 — a lane adopted HERE (first inbound) starts at the executor head too.
+    cursorsPath(EVENT_LOG_DIR);   // #1762 S4 — an unusable relocated state refuses BEFORE anything else is read or written
+    // #1762 S4 — past a valid F, liveness and a fresh lane's ADOPTION take the log head as F.logSeq, and the log is not read
+    const lf = await lifecycleFrontier(res);
+    if (lf === undefined) return;
     const head = LOGBORN && graphAckedOf(EVENT_LOG_DIR, key) == null ? await graphHeadOrNull() : null;
-    const out = noteInbound(EVENT_LOG_DIR, key, { via: body.via ?? null, graphHead: head?.through ?? null, graphEpoch: head?.epoch ?? null, graphIncarnation: head?.incarnation ?? null });
+    const out = noteInbound(EVENT_LOG_DIR, key, { via: body.via ?? null, graphHead: head?.through ?? null, graphEpoch: head?.epoch ?? null, graphIncarnation: head?.incarnation ?? null, history: laneHistoryOf(lf) });
     sendJSON(res, 200, out);
   } catch (e) {
+    if (e?.code === CURSOR_STATE_INVALID) return sendJSON(res, 503, { error: e.message, code: e.code, file: e.file });   // #1762 S4
     console.error('POST /api/cursors/inbound:', e.message);
     sendJSON(res, 500, { error: 'Failed to record inbound' });
   }
@@ -12791,6 +13646,10 @@ async function handleCursorServed(req, res) {
     const key = body.identity || deliveryIdentity(body)?.key;
     if (!key) return sendJSON(res, 400, { error: 'identity is required', code: 'NO_DELIVERY_IDENTITY' });
     if (!body.conversationId) return sendJSON(res, 400, { error: 'conversationId is required', code: 'NO_CONVERSATION' });
+    // #1762 S4 — a push mark is a LOG seq; past a valid F the log is retired and not read, so the mark is answered, never resolved
+    const lf = await lifecycleFrontier(res);
+    if (lf === undefined) return;
+    if (lf?.fr.state === 'valid') return sendJSON(res, 200, { served: false, advanced: false, code: 'HISTORY_FRONTIER_PRESENT', identity: key, error: 'push marks name a log seq, and past the history frontier the event log is not read: nothing was recorded' });
     const seq = seqOfEntityEvent(EVENT_LOG_DIR, { kind: 'conversation', id: String(body.conversationId), op: 'post' });
     if (seq == null) return sendJSON(res, 200, { served: false, advanced: false, code: 'EVENT_NOT_FOUND', identity: key });
     // #1576 — a PUSH mark is reported (`push_served`), never an ack and never a pull serve:
@@ -12923,6 +13782,9 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/tending\/order$/,        fn: (req, res) => applyTendingOp(req, res, (e, b, at) => reorderPlaylist(e, { slugs: b.slugs, at })) },
   { method: 'POST',   re: /^\/api\/tending\/shuffle$/,      fn: (req, res) => applyTendingOp(req, res, (e, b, at) => setShuffle(e, { shuffle: b.shuffle === true, at })) },
   { method: 'POST',   re: /^\/api\/tending\/mints$/,        fn: (req, res) => handleCreateMint(req, res) },
+  { method: 'POST',   re: /^\/api\/tending\/windows$/,      fn: (req, res) => handleReserveWindow(req, res) },   // #1786
+  { method: 'POST',   re: /^\/api\/tending\/claims$/,       fn: (req, res) => handleClaimWhisper(req, res) },    // #1786
+  { method: 'GET',    re: /^\/api\/tending\/claims$/,       fn: (req, res) => handleGetClaims(req, res) },       // #1786
   { method: 'POST',   re: /^\/api\/tending-config$/,       fn: (req, res) => handleSetTendingConfig(req, res) },
   { method: 'POST',   re: /^\/api\/roster$/,               fn: (req, res) => handleSetRoster(req, res) },   // #506
   { method: 'GET',    re: /^\/api\/people$/,               fn: (req, res) => handleListPeople(req, res) },       // #619
@@ -13013,6 +13875,7 @@ if (process.env.SCRUM_GRAPH_UNIT_CONVERSATIONS === '1') {
   const raw = createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: gate.hardTimeoutMs, label: 'posts' });
   POSTS_READER = gate.reader(raw, POSTS_READ_TIMEOUT_MS);
   POSTS_BULK_READER = gate.reader(raw, POSTS_BULK_READ_TIMEOUT_MS);
+  POSTS_SNAPSHOT_READER = gate.reader(raw, POSTS_SNAPSHOT_READ_TIMEOUT_MS);   // #1779
   console.error(`${new Date().toISOString()} #1574 conversations unit ON: publisher-mode announcements go through the graph executor (lock released during the call)`);
   console.error(`${new Date().toISOString()} #1574 conversations unit ON: standing checks stale-claims and role-expiry are DISABLED (${DOC_POST_CHECK_DISABLED})`);
 }
@@ -13031,14 +13894,55 @@ if (CARDS_UNIT) {
   CARDS = createCardsUnit({
     client: createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 30000, label: 'cards' }),
     mintId: () => crypto.randomUUID(),
+    historyNative: process.env.SCRUM_HISTORY_NATIVE === '1',   // #1762 S1 — each card write commits its activity record; OFF until the S6 switch
   });
   try { await CARDS.load(); } catch (e) {
     console.error(`#1598 cards unit: the cards could not be read from the graph — refusing to serve: ${e.message}`);
     process.exit(1);
   }
+  // #1744 finding 6 — THE BOOT GATE. Where the index is required (executor-owned, or SCRUM_CARD_REF_INDEX=enforce), a board
+  // whose index is absent, unfinished or damaged would refuse every create and delete at runtime; boot is the cheapest place
+  // to say so, once, to the operator. A check that cannot run is a refusal too: an unproven index is not a healthy one.
+  if (CARD_REF_INDEX_ENFORCE) {
+    // the FULL JSON verification before every enforced start (contract amendment, rulings 46773/46781): the health query
+    // below proves the index internally consistent; this proves its name sets match the cards' stored JSON
+    const { verifyIndex } = await import('./core/card-ref-index-verify.mjs');
+    const vc = createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 60000, label: 'card-ref-index-verify' });
+    let full;
+    try {
+      full = await verifyIndex({ query: async (q) => { const r = await vc.query(q); if (!r.ok) throw new Error(r.reason); return r.rows; },
+        health: async () => (await fetch(`${process.env.SCRUM_GRAPH_EXECUTOR_URL}/health`, { signal: AbortSignal.timeout(60000) })).json(), dataset: process.env.SCRUM_GRAPH_DATASET_ID });   // bounded like the queries (#116 review, finding 7)
+    } catch (e) { full = { status: 'UNAVAILABLE', bad: [String(e?.message || e)] }; }
+    if (full.status !== 'EXACT' || full.marker.length !== 1 || full.marker[0] !== 'true') {
+      const why = full.status === 'EXACT' ? `the completion marker reads ${JSON.stringify(full.marker)}` : full.status === 'VIOLATED' ? `${full.bad.length} violation(s) of the full JSON check: ${full.bad.slice(0, 3).join('; ')}` : full.status === 'UNSTABLE' ? 'the store never held still for a consistent full check' : `the full check could not run: ${full.bad[0]}`;
+      console.error(`#1744 the card reference index failed its full verification (${why}) — refusing to start${ORIGIN_EXECUTOR ? ` in SCRUM_BOARD_DOCUMENT=${BOARD_DOCUMENT}` : ' with SCRUM_CARD_REF_INDEX=enforce'}. Run scripts/card-ref-index-1744.mjs --backfill with writers stopped, then --verify`);
+      process.exit(1);
+    }
+    const incomplete = await cardRefIndexIncomplete();
+    if (incomplete !== false) {
+      console.error(`#1744 the card reference index is ${incomplete === null ? 'not checkable (the executor did not answer the completion-marker read)' : 'not complete (the completion marker is absent, or does not read exactly one xsd:boolean true)'} — refusing to start${ORIGIN_EXECUTOR ? ` in SCRUM_BOARD_DOCUMENT=${BOARD_DOCUMENT}` : ' with SCRUM_CARD_REF_INDEX=enforce'}. Run scripts/card-ref-index-1744.mjs --backfill with writers stopped, then --verify`);
+      process.exit(1);
+    }
+  }
+  // #1629 s3 — executor-owned: the origin readers, and NO K4 block. Boot enumerates nothing into the document and drains
+  // nothing inline (contract v1 §5): a pending obligation waits for the supervised publisher (scripts/announce-publisher).
+  if (ORIGIN_EXECUTOR) {
+    ORIGIN_MOD = await import('./core/origin-commit.mjs');
+    COMPILER_MOD = await import('./core/graph-compiler.mjs');
+    POSTSEQ_MOD = await import('./core/postseq-reserve.mjs');
+    // G1(a) — ONE allocator serves ordinary posts and announcement slots. Boot refuses a missing, malformed or ambiguous
+    // allocator (slice 1's strict reader): it is never created here, never derived from MAX(postSeq), never read from a
+    // document. An isolated world seeds it explicitly, above every post and tombstone (G1(c)).
+    const A = await POSTSEQ_MOD.readPostSeqAllocator(ANNOUNCE_EXECUTOR);
+    if (!A.ok) {
+      console.error(`#1629 s3 SCRUM_BOARD_DOCUMENT=${BOARD_DOCUMENT} refuses to start: the post-sequence allocator is ${A.status} (${A.reason}); it is never created or repaired at runtime — seed exactly one, above every post and tombstone`);
+      process.exit(1);
+    }
+    console.error(`${new Date().toISOString()} #1629 s3 announcements are EXECUTOR-OWNED (SCRUM_BOARD_DOCUMENT=${BOARD_DOCUMENT}): ISOLATED AND INCOMPLETE — wiki-create and sibling-shifting done-moves refuse until #1629 slice 4; document outbox entries are not migrated`);
+  }
   // #1598 K4 — re-queue any announcement the graph recorded with a card write that the document never received (the
   // process died between the two writes). Skipped when the document's outbox holds the mutation, or its post exists.
-  try {
+  if (!ORIGIN_EXECUTOR) try {
     const recorded = await CARDS.pendingAnnouncements();
     const data = readBoard();
     const ob = outboxOf(data);
@@ -13079,6 +13983,7 @@ if (SMALLKINDS_UNIT) {
     COLLECTIONS = createCollectionsUnit({
       client: createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 30000, label: 'collections' }),
       families: COLLECTION_FAMILIES, mintId: () => crypto.randomUUID(),
+      historyNative: process.env.SCRUM_HISTORY_NATIVE === '1',   // #1762 S1
     });
     try { await COLLECTIONS.load(); } catch (e) {
       console.error(`#1624 small-kinds unit: the collections could not be read from the graph — refusing to serve: ${e.message}`);
@@ -13122,6 +14027,7 @@ if (COLUMNS_UNIT) {
   COLUMNS = createColumnsUnit({
     client: createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 30000, label: 'columns' }),
     mintId: () => crypto.randomUUID(),
+    historyNative: process.env.SCRUM_HISTORY_NATIVE === '1',   // #1762 S1
   });
   try { await COLUMNS.load(); } catch (e) {
     console.error(`#1639 columns unit: the columns could not be read from the graph — refusing to serve: ${e.message}`);
@@ -13785,7 +14691,92 @@ function migrateTendingIfNeeded() {
 }
 
 migrateBoardIfNeeded();
-migrateTendingIfNeeded();
+// #1786 — UNDER THE WRITE LOCK, awaited before listen(): with the collections unit on, a collection write outside the lock
+// throws (#1624), and an unmigrated graph with whisper-state.json or whisper-pool.json present refused to boot. The function's
+// own failure path (refuse to serve) is unchanged.
+await withWriteLock(async () => migrateTendingIfNeeded());
+// #1786 (#139 review) — the legacy file guard's LAST CONSUMED send window carries into the graph, once, as a reservation (no
+// TendingMint is invented: a burned window was never delivered). Before this guard, mintOnce consumed lastMintedWindow in
+// whisper-state.json BEFORE posting, so a window can be spent with no mint at all; without this the first boot of the new
+// MCP could send it again. Idempotent: the reservation's IRI is the window's. A malformed or absent file carries nothing.
+try {
+  await withWriteLock(async () => {
+    let st = null;
+    try { st = JSON.parse(fs.readFileSync(whisperStateFilePath(), 'utf8')); } catch { return; }
+    const w = typeof st?.lastMintedWindow === 'string' ? st.lastMintedWindow : null;
+    if (!w || windowReserved(tendingEntities(), w)) return;
+    writeTendingEntities([reservationEntity(w, typeof st.lastMintedAt === 'string' ? st.lastMintedAt : new Date().toISOString())], { actor: 'board', op: 'create' });
+    console.error(`${new Date().toISOString()} #1786 the legacy whisper-state.json's last consumed window ${w} is reserved in the graph`);
+  });
+} catch (e) {
+  console.error(`#1786 carrying the legacy send window FAILED — refusing to serve (the window could be sent twice): ${e.message}`);
+  process.exit(1);
+}
+
+// #1764 — the roster, at boot, under the write lock and before listen(): the ONE-TIME import of roster.json when the graph
+// holds no configured roster (a roster saved from Settings is never overwritten by a file), then, ALWAYS, the export
+// rewritten from the graph. That rewrite is the recovery: a crash mid-save leaves the export a SUPERSET (safe for the
+// history gate), and this narrows it. A failure refuses to serve: a stale or missing export could stop guarding a seat.
+if (rosterHeld()) {
+  try {
+    await withWriteLock(async () => {
+      const data = readBoard();
+      if (!rosterInGraph(data.rosterSeats ?? []) && fs.existsSync(rosterFilePath())) {
+        const parsed = JSON.parse(fs.readFileSync(rosterFilePath(), 'utf8'));
+        const seats = validateRoster(parsed);
+        const roles = validateRoles(parsed.roles ?? null, seats);
+        data.rosterSeats = rosterEntities(seats, roles);
+        writeBoard(data, [{ op: 'create', actor: 'board', entity: { kind: 'board-meta', id: 'roster' }, state: { seats: Object.keys(seats), roles, importedFrom: path.basename(rosterFilePath()) } }]);
+        console.error(`${new Date().toISOString()} #1764 roster imported into the graph from ${path.basename(rosterFilePath())}: ${Object.keys(seats).length} seat(s), in order`);
+      }
+    });
+    const ents = COLLECTIONS.snapshot().rosterSeats ?? [];
+    if (rosterInGraph(ents)) writeRosterExport(seatsFrom(ents), rolesFrom(ents));
+  } catch (e) {
+    console.error(`#1764 roster import/export FAILED — refusing to serve (the history gate's roster.json must not fall behind the graph): ${e.message}`);
+    process.exit(1);
+  }
+}
+
+// #1785 — ONE-TIME import of the file's switch and threshold onto TendingState, stamped (scrum:configImportedAt) so it never
+// runs twice and a later file edit can never override the graph. A malformed file imports OFF (readTendingConfig fails closed).
+// UNDER THE WRITE LOCK and awaited before listen(): with the collections unit on, a collection write outside the lock THROWS
+// (#1624), and an import that swallowed it would silently drop the file's values. So a failed import refuses to serve.
+try {
+  await withWriteLock(async () => {
+    // a fresh clone has no file and no state: it imports nothing and writes nothing (tending-boot-migration's fresh-clone row)
+    if (tendingConfigImported(tendingEntities()) || !fs.existsSync(tendingConfigFilePath())) return;
+    const fromFile = readTendingConfig();
+    const at = new Date().toISOString();
+    writeTendingEntities(setTendingConfig(tendingEntities(), { ...fromFile, at, importedFrom: 'tending-config.json' }), { actor: 'board', op: 'update' });
+    console.error(`${at} #1785 tending config imported onto TendingState from tending-config.json: enabled=${fromFile.enabled} quietAfterMinutes=${fromFile.quietAfterMinutes}`);
+  });
+} catch (e) {
+  console.error(`#1785 tending config import FAILED — refusing to serve (the file's values would be silently lost): ${e.message}`);
+  process.exit(1);
+}
+
+// #1784 — ONE-TIME import of channel-config.json onto the `channelConfig` node, stamped (scrum:configImportedFrom/At). Only when
+// NO node exists: a node saved from Settings is never overwritten by a file, and after the import the file is never read or
+// written again. Under the write lock and awaited before listen() (a collection write outside the lock cannot commit, #1624);
+// a failed import refuses to serve rather than run the scheduler on a mode nobody chose.
+if (channelConfigHeld()) {
+  try {
+    await withWriteLock(async () => {
+      const data = readBoard();
+      if (channelConfigInGraph(data.channelConfig) || !fs.existsSync(configFilePath())) return;
+      const fromFile = validateConfig(JSON.parse(fs.readFileSync(configFilePath(), 'utf8')));
+      const at = new Date().toISOString();
+      const entity = channelConfigEntity(fromFile, { imported: { from: path.basename(configFilePath()), at } });
+      data.channelConfig = [entity];
+      writeBoard(data, [{ op: 'create', actor: 'board', entity: { kind: 'board-meta', id: CHANNEL_CONFIG_IRI }, state: entity }]);
+      console.error(`${at} #1784 channel config imported onto ${CHANNEL_CONFIG_IRI} from ${path.basename(configFilePath())}: mode=${fromFile.mode}`);
+    });
+  } catch (e) {
+    console.error(`#1784 channel config import FAILED — refusing to serve (the scheduler would run on a mode nobody chose): ${e.message}`);
+    process.exit(1);
+  }
+}
 
 // ── Start Server ──
 const server = http.createServer(handleRequest);

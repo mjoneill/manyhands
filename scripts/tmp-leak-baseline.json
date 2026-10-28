@@ -28,8 +28,6 @@
   "tests/card-write-1598.test.mjs",
   "tests/card-write-phases-1659.test.mjs",
   "tests/card-write-rows-1666.test.mjs",
-  "tests/cardless-declare-1284.test.mjs",
-  "tests/cardless-declare-wiring-1284.test.mjs",
   "tests/cards-graph-c1.test.mjs",
   "tests/cards-graph-c2.test.mjs",
   "tests/cards-graph-c3.test.mjs",
@@ -111,7 +109,6 @@
   "tests/graph-store-backup-watch-1590-addendum3.test.mjs",
   "tests/graph-store-backup-watch-1590.test.mjs",
   "tests/graph-store-backup-watch-plist-1590.test.mjs",
-  "tests/graph-work-ledger.test.mjs",
   "tests/groom-head-served-1391.test.mjs",
   "tests/groom-served-1368.test.mjs",
   "tests/guest-changes-unreadable-1561.test.mjs",
@@ -228,9 +225,5 @@
   "tests/whisper-enable-flag.test.mjs",
   "tests/whisper-store.test.mjs",
   "tests/withheld-content-aware-1428.test.mjs",
-  "tests/work-gate-enforced-op.test.mjs",
-  "tests/work-store.test.mjs",
-  "tests/work-tools-wiring.test.mjs",
-  "tests/work-tools.test.mjs",
   "tests/worktree-helper.test.mjs"
 ]
