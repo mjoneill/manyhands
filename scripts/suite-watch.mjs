@@ -168,7 +168,11 @@ const timedOut = full.timedOut;
  */
 const guardLine = !timedOut && full.code === HOST_GUARD_EXIT
   ? (out.split('\n').find((l) => /^# (self-aborted:|host guard: REFUSED)/.test(l)) ?? null) : null;
-const aborted = guardLine !== null;
+// the numbers ARE the point (the next morning reads "13.52 vs 10", not "aborted"): parsed from the guard's own line; rowsRun is 0 for a launch refusal (nothing ran)
+const num = (re) => { const m = guardLine?.match(re); return m ? Number(m[1]) : null; };
+const aborted = guardLine === null ? null : {
+  load: num(/\bload (?:crossed )?(\d+(?:\.\d+)?)/), ceiling: num(/\bceiling (\d+(?:\.\d+)?)/), rowsRun: /REFUSED/.test(guardLine) ? 0 : num(/\brows run (\d+)/),
+};
 red = timedOut || (full.code !== 0 && !aborted);
 
 /**
@@ -201,7 +205,7 @@ if (verdict.documented) console.log(`${now} documented exclusions applied: ${ver
 for (const p of verdict.problems) console.log(`${now} PROBLEM: ${p}`);
 if (verdict.unclassified) console.log(`${now} unclassified skips (INCOMPLETE until documented in ${path.relative(suiteDir, exclPath)}): ${verdict.unclassified}`);
 const files = verdict.failingFiles;
-const incomplete = verdict.incomplete || aborted;   // #1799: an abort is INCOMPLETE even when the rows it did run are clean
+const incomplete = Boolean(verdict.incomplete || aborted);   // #1799: an abort is INCOMPLETE even when the rows it did run are clean
 if (!red && verdict.failed > 0) red = true;          // the exit code said success but the TAP holds a leaf failure: believe the rows
 const completedFiles = timedOut
   ? new Set([...out.matchAll(/^# file: (.+) complete$/gm)].map((m) => path.basename(m[1])))
@@ -370,7 +374,8 @@ if (incomplete) {
   const news = fresh('inc', incMembers);
   console.log(`${now} suite INCOMPLETE members=${incMembers.length} ${news.length ? 'FIRING' : 'muted'} unavailable=${verdict.unavailable} unclassified=${verdict.unclassified}`);
   if (news.length && aborted) {
-    bodies.push(`🟠 suite watch: the run is INCOMPLETE in ${treeIdentity(REPO)} — host unfit, no verdict. The host-preservation guard (#1588) stopped it: `
+    bodies.push(`🟠 suite watch: the run is INCOMPLETE in ${treeIdentity(REPO)} — host unfit, no verdict `
+      + `(host guard: load ${aborted.load ?? '?'} > ceiling ${aborted.ceiling ?? '?'}, rows run ${aborted.rowsRun ?? '?'}). The host-preservation guard (#1588) stopped it: `
       + `"${guardLine.replace(/^# /, '').slice(0, 400)}" `
       + `Nothing about the code was judged. Failures in the rows that did run: ${verdict.failed}, reported separately. `
       + `(An abort mutes for ${Math.round(COOLDOWN_MS / 3600000)}h; a real failure still fires, and a completed run clears it.)`);
