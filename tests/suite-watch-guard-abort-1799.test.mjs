@@ -19,7 +19,7 @@
  * The watch runs against FIXTURE universes (SUITE_WATCH_REPO=<scratch>, NO_CLONE, DRYRUN, scratch state/artifacts/ledger): never the live state file, ledger or artifacts.
  * NOT COVERED: that the guard itself aborts at a given load (tests/host-guard-1588.test.mjs owns that); the launchd plist.
  */
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -34,7 +34,9 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const REPO = () => path.resolve(process.env.WATCH_REPO || ROOT);
 const WATCH = () => path.join(REPO(), 'scripts', 'suite-watch.mjs');
 const REAL_TAP = path.join(ROOT, 'tests', 'fixtures', 'suite-watch-20261008-reduced.tap');
-const SCRATCH = fs.mkdtempSync(path.join(os.tmpdir(), 'sw1637-'));
+const SCRATCH = fs.mkdtempSync(path.join(os.tmpdir(), 'sw1799-'));
+// every fixture universe lives under SCRATCH, so one removal after the file's last row leaves nothing behind (CI fails a NEW tmp leak)
+after(() => fs.rmSync(SCRATCH, { recursive: true, force: true }));
 const LEDGER = path.join(SCRATCH, 'ledger.jsonl'); const ARTIFACTS = path.join(SCRATCH, 'artifacts');
 
 // ---------- TAP synthesis (the shape of the real 10-08 artifact: `# file:` markers, `# Subtest:` lines, yaml blocks) -----------------------------------------
