@@ -251,17 +251,16 @@ export async function scan(call, batch, state, nowMs) {
   return counts;
 }
 
-/** The audit and the counts, from ONE read of the whole outbox. */
+/** The audit and the counts only it can see (blocked, integrity failures), from ONE read of the whole outbox. */
 async function survey(call) {
   const ob = await readOutbox(call);
   const doc = { announcementOutbox: {
     origins: Object.fromEntries(ob.origins.map((o) => [o.mutationId, o])),
     entries: Object.fromEntries(ob.entries.map((e) => [e.obligationId, e])),
   } };
-  const pending = oldestFirst(ob.entries.filter((e) => e.status === 'pending'));
+  // #1775: no pending counts here. Those are the scan's alone (its observed remainder), so the audit has nothing that
+  // could overwrite them (review post 49004: an Object.assign of this result used to replace the scan's numbers).
   return {
-    pendingCount: pending.length,
-    oldestPendingAt: pending.length ? (pending[0].payload?.occurredAt ?? null) : null,
     blockedCount: ob.entries.filter((e) => e.status === 'blocked').length,
     auditIntegrityFailures: auditOutbox(doc).failures.length,
   };
