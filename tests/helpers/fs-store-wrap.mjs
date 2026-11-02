@@ -17,6 +17,7 @@ export const appendFileSync = wrap(real.appendFileSync);
 export const readdirSync = wrap(real.readdirSync);
 export const existsSync = wrap(real.existsSync);
 export const statSync = wrap(real.statSync);
+export const chmodSync = wrap(real.chmodSync);
 export const openSync = wrap(real.openSync);
 export const mkdirSync = wrap(real.mkdirSync);
 export const renameSync = wrap(real.renameSync);
@@ -28,7 +29,7 @@ export const realpathSync = wrap(real.realpathSync);
 export const promises = real.promises;
 
 const patched = {
-  readFileSync, writeFileSync, appendFileSync, readdirSync, existsSync, statSync,
+  readFileSync, writeFileSync, appendFileSync, readdirSync, existsSync, statSync, chmodSync,
   openSync, mkdirSync, renameSync, unlinkSync, rmSync, createReadStream,
   createWriteStream, realpathSync,
 };
