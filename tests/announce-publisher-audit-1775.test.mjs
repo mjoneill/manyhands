@@ -77,7 +77,7 @@ function runPublisher(base, dir, extra = []) {
 /** A pass-through proxy that COUNTS outbox reads by kind and can fail the unfiltered one. */
 async function startProxy(targetBase) {
   const target = new URL(targetBase);
-  const p = { unfiltered: 0, pending: 0, publishes: [], failUnfiltered: false, failPending: false };
+  const p = { unfiltered: 0, pending: 0, publishes: [], failUnfiltered: false, failPending: false, failPublish: new Set() };
   p.server = http.createServer((req, res) => {
     const chunks = []; req.on('data', (c) => chunks.push(c));
     req.on('end', () => {
@@ -93,6 +93,7 @@ async function startProxy(targetBase) {
       }
       const m = /^\/api\/outbox\/([^/?]+)\/publish$/.exec(route);
       if (req.method === 'POST' && m) p.publishes.push(decodeURIComponent(m[1]));
+      if (req.method === 'POST' && m && p.failPublish.has(decodeURIComponent(m[1]))) { res.writeHead(503, { 'Content-Type': 'application/json' }); res.end('{"error":"proxy-injected publish failure"}'); return; }
       const up = http.request({ hostname: target.hostname, port: target.port, method: req.method, path: req.url, headers: { ...req.headers, host: target.host } }, (ur) => { res.writeHead(ur.statusCode, ur.headers); ur.pipe(res); });
       up.on('error', (e) => { res.writeHead(502); res.end(String(e.message)); });
       up.end(Buffer.concat(chunks));
@@ -226,7 +227,7 @@ test('A5 (review of 439adb3) a MALFORMED pending entry, one with no string oblig
 // counts; a malformed entry that is never attempted still counts (A5). It is stamped pendingObservedAt, and it is NOT
 // "the board's pending count": other writers can add or settle entries concurrently. A failed scan reports
 // pendingCount null (UNKNOWN); the last known value is kept apart, with its own time, as lastKnownPendingCount/At.
-// A6 and A7 are RED at ca3196b. A8-A10 pin behaviour ca3196b already has, and are sabotage-checked, not red-checked.
+// A6, A6b and A7 are RED at ca3196b. A8-A10 pin behaviour ca3196b already has, and are sabotage-checked, not red-checked.
 
 test('A6 pendingCount is the scan\'s OBSERVED REMAINDER: an entry this scan settles leaves the count, one that stays pending stays in it, and the count is stamped pendingObservedAt', async () => {
   // legacy entry: with no proof post the board settles it (blocked) when attempted. OLDER than m-stuck on purpose, so
@@ -246,6 +247,24 @@ test('A6 pendingCount is the scan\'s OBSERVED REMAINDER: an entry this scan sett
     assert.equal(r.status.oldestPendingAt, at(T0, -5 * MIN), 'oldestPendingAt is the oldest of the REMAINDER (m-stuck), not of the listing');
     const obs = Date.parse(r.status.pendingObservedAt);
     assert.ok(Number.isFinite(obs) && obs >= t0 - 1000 && obs <= t1 + 1000, `pendingObservedAt is the wall-clock time of this scan (${r.status.pendingObservedAt})`);
+  }));
+});
+
+test('A6b a publish that answers 5xx is NOT settled: the entry stays in pendingCount, and its twin that the board settles leaves it', async () => {
+  // two legacy entries the board would settle (blocked) when attempted; the proxy answers 503 for one before the board sees it
+  const okA = item('m-okA', null, { at: at(T0, -20 * MIN) });
+  const okB = item('m-okB', null, { at: at(T0, -10 * MIN) });
+  const board = seeded([okA, okB]);
+  await withBoard(board, (s) => withProxy(s.baseUrl, async (proxy) => {
+    proxy.failUnfiltered = true;   // no successful audit, so nothing but the scan can write pendingCount
+    proxy.failPublish.add('m-okA:claim');
+    const r = await runPublisher(proxy.base, tmp(), ['--audit-every-ms', HOUR_MS]);
+    assert.ok(proxy.publishes.includes('m-okA:claim') && proxy.publishes.includes('m-okB:claim'), `PRECONDITION: the scan attempted both (${JSON.stringify(proxy.publishes)})`);
+    assert.equal(await statusOf(s.baseUrl, 'm-okA:claim'), 'pending', 'PRECONDITION: the 5xx never reached the board, so m-okA is still pending there');
+    assert.notEqual(await statusOf(s.baseUrl, 'm-okB:claim'), 'pending', 'PRECONDITION: the board settled m-okB');
+    assert.equal(r.status.publishErrors, 1, `PRECONDITION: the 5xx counted as a publish error (${JSON.stringify(r.status)})`);
+    assert.equal(r.status.pendingCount, 1, `the 5xx entry remains, the settled one does not (${JSON.stringify(r.status)})`);
+    assert.equal(r.status.oldestPendingAt, at(T0, -20 * MIN), 'and the remainder\'s oldest is the 5xx entry');
   }));
 });
 
