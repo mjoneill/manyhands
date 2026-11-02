@@ -77,7 +77,7 @@ function runPublisher(base, dir, extra = []) {
 /** A pass-through proxy that COUNTS outbox reads by kind and can fail the unfiltered one. */
 async function startProxy(targetBase) {
   const target = new URL(targetBase);
-  const p = { unfiltered: 0, pending: 0, publishes: [], failUnfiltered: false };
+  const p = { unfiltered: 0, pending: 0, publishes: [], failUnfiltered: false, failPending: false };
   p.server = http.createServer((req, res) => {
     const chunks = []; req.on('data', (c) => chunks.push(c));
     req.on('end', () => {
@@ -86,7 +86,10 @@ async function startProxy(targetBase) {
         if (qs === '') {
           p.unfiltered += 1;
           if (p.failUnfiltered) { res.writeHead(503, { 'Content-Type': 'application/json' }); res.end('{"error":"proxy-injected survey failure"}'); return; }
-        } else if (/(^|&)status=pending(&|$)/.test(qs)) p.pending += 1;
+        } else if (/(^|&)status=pending(&|$)/.test(qs)) {
+          p.pending += 1;
+          if (p.failPending) { res.writeHead(503, { 'Content-Type': 'application/json' }); res.end('{"error":"proxy-injected scan failure"}'); return; }
+        }
       }
       const m = /^\/api\/outbox\/([^/?]+)\/publish$/.exec(route);
       if (req.method === 'POST' && m) p.publishes.push(decodeURIComponent(m[1]));
@@ -214,5 +217,97 @@ test('A5 (review of 439adb3) a MALFORMED pending entry, one with no string oblig
     assert.equal(proxy.unfiltered, before, 'PRECONDITION: the asserted run did not audit, so the count is the scan\'s');
     assert.ok(!proxy.publishes.includes('m-bad:claim'), 'the malformed entry is never attempted');
     assert.equal(r.status.pendingCount, listed.length, `pendingCount counts every listed pending entry, the malformed one included (${r.status.pendingCount} of ${listed.length})`);
+  }));
+});
+
+// ---------- the truthful-status contract (#1775 v12; review posts 48336, 48340, 48342) --------------------------------
+// pendingCount is THIS SCAN'S OBSERVED REMAINDER: the entries its pending listing returned, minus the ones this scan
+// settled (published, blocked or retired by the board, or 404 gone). An attempt that errors or stays pending still
+// counts; a malformed entry that is never attempted still counts (A5). It is stamped pendingObservedAt, and it is NOT
+// "the board's pending count": other writers can add or settle entries concurrently. A failed scan reports
+// pendingCount null (UNKNOWN); the last known value is kept apart, with its own time, as lastKnownPendingCount/At.
+// A6 and A7 are RED at ca3196b. A8-A10 pin behaviour ca3196b already has, and are sabotage-checked, not red-checked.
+
+test('A6 pendingCount is the scan\'s OBSERVED REMAINDER: an entry this scan settles leaves the count, one that stays pending stays in it, and the count is stamped pendingObservedAt', async () => {
+  // legacy entry: with no proof post the board settles it (blocked) when attempted. OLDER than m-stuck on purpose, so
+  // the oldest of the LISTING (m-ok) and the oldest of the REMAINDER (m-stuck) differ and the assertion can tell them apart
+  const ok = item('m-ok', null, { at: at(T0, -20 * MIN) });
+  const board = seeded([stuck, ok]);
+  await withBoard(board, (s) => withProxy(s.baseUrl, async (proxy) => {
+    proxy.failUnfiltered = true;   // no successful audit, so nothing but the scan can write pendingCount
+    const dir = tmp();
+    const t0 = Date.now();
+    const r = await runPublisher(proxy.base, dir, ['--audit-every-ms', HOUR_MS]);
+    const t1 = Date.now();
+    assert.ok(proxy.publishes.includes('m-ok:claim') && proxy.publishes.includes('m-stuck:claim'), `PRECONDITION: the scan attempted both (${JSON.stringify(proxy.publishes)})`);
+    assert.notEqual(await statusOf(s.baseUrl, 'm-ok:claim'), 'pending', 'PRECONDITION: this scan settled m-ok');
+    assert.equal(await statusOf(s.baseUrl, 'm-stuck:claim'), 'pending', 'PRECONDITION: m-stuck stayed pending after its attempt');
+    assert.equal(r.status.pendingCount, 1, `the remainder: listed 2, settled 1 (${JSON.stringify(r.status)})`);
+    assert.equal(r.status.oldestPendingAt, at(T0, -5 * MIN), 'oldestPendingAt is the oldest of the REMAINDER (m-stuck), not of the listing');
+    const obs = Date.parse(r.status.pendingObservedAt);
+    assert.ok(Number.isFinite(obs) && obs >= t0 - 1000 && obs <= t1 + 1000, `pendingObservedAt is the wall-clock time of this scan (${r.status.pendingObservedAt})`);
+  }));
+});
+
+test('A7 a FAILED scan reports pendingCount null (UNKNOWN), never the carried number; the last known value is kept apart with its own time', async () => {
+  const board = seeded([stuck]);
+  await withBoard(board, (s) => withProxy(s.baseUrl, async (proxy) => {
+    const dir = tmp();
+    const r1 = await runPublisher(proxy.base, dir, ['--audit-every-ms', HOUR_MS]);
+    assert.equal(r1.code, 0, `PRECONDITION: run 1 succeeds: ${r1.err}`);
+    assert.equal(r1.status.pendingCount, 1, 'PRECONDITION: run 1 observed one pending');
+    proxy.failPending = true;
+    const r2 = await runPublisher(proxy.base, dir, ['--audit-every-ms', HOUR_MS]);
+    assert.equal(r2.code, 1, 'a failed scan is exit 1');
+    assert.equal(r2.status.pendingCount, null, `pendingCount is UNKNOWN after a failed scan, not run 1's number (${JSON.stringify(r2.status)})`);
+    assert.equal(r2.status.oldestPendingAt, null, 'and so is oldestPendingAt');
+    assert.equal(r2.status.pendingObservedAt, null, 'and there is no current observation');
+    assert.equal(r2.status.lastKnownPendingCount, 1, 'the last known value survives, apart');
+    assert.equal(r2.status.lastKnownPendingAt, r1.status.pendingObservedAt, 'stamped with the time it was observed, not this run\'s');
+    proxy.failPending = false;
+    const r3 = await runPublisher(proxy.base, dir, ['--audit-every-ms', HOUR_MS]);
+    assert.equal(r3.status.pendingCount, 1, 'a later good scan reports a current count again');
+    assert.equal(r3.status.lastKnownPendingAt, r3.status.pendingObservedAt, 'and last-known moves with it');
+  }));
+});
+
+test('A8 with NO --audit-every-ms, --once audits on EVERY run (production\'s invocation until the plist carries the flag)', async () => {
+  const board = seeded([stuck, blocked]);
+  await withBoard(board, (s) => withProxy(s.baseUrl, async (proxy) => {
+    const dir = tmp();
+    for (let i = 1; i <= 3; i++) {
+      const r = await runPublisher(proxy.base, dir);
+      assert.equal(r.code, 0, `run ${i}: ${r.err}`);
+      assert.equal(proxy.unfiltered, i, `run ${i} audits without the flag: one more unfiltered read`);
+    }
+  }));
+});
+
+test('A9 an invalid --audit-every-ms is rejected with exit 2 and makes no board call', async () => {
+  const board = seeded([stuck]);
+  await withBoard(board, (s) => withProxy(s.baseUrl, async (proxy) => {
+    for (const bad of ['-1', 'abc', '1.5']) {
+      const r = await runPublisher(proxy.base, tmp(), ['--audit-every-ms', bad]);
+      assert.equal(r.code, 2, `--audit-every-ms ${bad}: exit 2 (${r.err})`);
+      assert.match(r.err, /--audit-every-ms must be a non-negative integer/, `and says why (${bad})`);
+    }
+    assert.equal(proxy.pending + proxy.unfiltered + proxy.publishes.length, 0, 'no board call on rejected arguments');
+  }));
+});
+
+test('A10 a SUCCESSFUL audit after a failed one clears lastError and records lastAuditAt', async () => {
+  const board = seeded([stuck, blocked]);
+  await withBoard(board, (s) => withProxy(s.baseUrl, async (proxy) => {
+    const dir = tmp();
+    proxy.failUnfiltered = true;
+    const r1 = await runPublisher(proxy.base, dir, ['--audit-every-ms', '0']);
+    assert.match(String(r1.status.lastError), /^audit: /, `PRECONDITION: run 1's audit failed (${r1.status.lastError})`);
+    assert.equal(r1.code, 1, 'PRECONDITION: and exited 1');
+    proxy.failUnfiltered = false;
+    const r2 = await runPublisher(proxy.base, dir, ['--audit-every-ms', '0']);
+    assert.equal(r2.code, 0, `run 2 exits 0: ${r2.err}`);
+    assert.equal(r2.status.lastError, null, `lastError is cleared by the successful audit (${r2.status.lastError})`);
+    assert.ok(r2.status.lastAuditAt, 'and the audit is recorded as done');
+    assert.equal(r2.status.blockedCount, 1, 'with its count');
   }));
 });

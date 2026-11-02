@@ -29,9 +29,13 @@
  * default  loop forever on the nextActions() schedule (scan every 5 s, audit every 60 s).
  *
  * The status file is rewritten on every run/tick:
- *   {checkedAt, lastScanCompletedAt, pendingCount, oldestPendingAt, blockedCount, lastError, auditIntegrityFailures,
- *    lastAuditAt, lastAuditAttemptAt, attempted, deferred, publishErrors, backoff, firstSeenScan, scanCount}
- * pendingCount and oldestPendingAt come from every scan; blockedCount and auditIntegrityFailures from the last
+ *   {checkedAt, lastScanCompletedAt, pendingCount, oldestPendingAt, pendingObservedAt, lastKnownPendingCount,
+ *    lastKnownPendingAt, blockedCount, lastError, auditIntegrityFailures, lastAuditAt, lastAuditAttemptAt, attempted,
+ *    deferred, publishErrors, backoff, firstSeenScan, scanCount}
+ * pendingCount and oldestPendingAt are THIS RUN'S SCAN'S OBSERVED REMAINDER: the entries its pending listing returned
+ * minus the ones that scan settled, stamped pendingObservedAt (wall clock). They are an observation, not the board's
+ * pending count, since other writers act concurrently. A run whose scan fails sets all three to null (UNKNOWN); the
+ * last observed value is kept apart as lastKnownPendingCount/lastKnownPendingAt. blockedCount and auditIntegrityFailures come from the last
  * SUCCESSFUL audit (lastAuditAt), carried between runs. ⚠️ null means UNKNOWN, never zero: measured 2026-10-27, the
  * unfiltered survey (and even ?status=blocked, 36 s) outlasts the client's 15 s timeout on the live board until #1751
  * makes origin reads cheap, so those two stay null and lastError names the audit.
@@ -114,9 +118,13 @@ export function auditFromStatus(prev) {
   const ms = (v) => { const t = Date.parse(v); return typeof v === 'string' && Number.isFinite(t) ? t : null; };
   const num = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : null);
   const p = isPlainObject(prev) ? prev : {};
+  const str = (v) => (typeof v === 'string' && Number.isFinite(Date.parse(v)) ? v : null);
   return {
     lastAuditAt: ms(p.lastAuditAt), lastAuditAttemptAt: ms(p.lastAuditAttemptAt),
+    // carried only as LAST KNOWN: a run whose scan fails must never present these as current (see tick)
+    lastKnownPendingCount: num(p.lastKnownPendingCount), lastKnownPendingAt: str(p.lastKnownPendingAt),
     counts: { pendingCount: num(p.pendingCount), oldestPendingAt: typeof p.oldestPendingAt === 'string' ? p.oldestPendingAt : null,
+      pendingObservedAt: str(p.pendingObservedAt),
       blockedCount: num(p.blockedCount), auditIntegrityFailures: num(p.auditIntegrityFailures) },
   };
 }
@@ -182,6 +190,7 @@ async function readOutbox(call, query = '') {
  */
 export async function scan(call, batch, state, nowMs) {
   const { entries } = await readOutbox(call, '?status=pending');
+  const observedAt = new Date().toISOString();   // wall clock, never --now: this stamps an observation, not a backoff decision
   const listedPending = entries.filter((e) => e && e.status === 'pending');
   const pending = entries.filter((e) => e && typeof e.obligationId === 'string');
   const pendingIds = new Set(pending.map((e) => e.obligationId));
@@ -197,11 +206,9 @@ export async function scan(call, batch, state, nowMs) {
     || (rank.get(a.obligationId) - rank.get(b.obligationId)));
 
   // #1775 — the pending counts come from THIS filtered read; the unfiltered survey is the audit's alone
-  const counts = { attempted: 0, deferred: 0, publishErrors: 0, lastError: null,
-    // counted over EVERY pending entry the listing returned, as the survey counted them: a malformed entry (no string
-    // obligationId) is never published, but it must stay visible in the count. `byAge` is re-sorted in place above.
-    pendingCount: listedPending.length, oldestPendingAt: listedPending.length ? (oldestFirst(listedPending)[0].payload?.occurredAt ?? null) : null };
-  const settle = (id) => { delete state.backoff[id]; delete state.firstSeenScan[id]; };
+  const counts = { attempted: 0, deferred: 0, publishErrors: 0, lastError: null };
+  const settled = new Set();
+  const settle = (id) => { delete state.backoff[id]; delete state.firstSeenScan[id]; settled.add(id); };
   const fail = (id, reason, isError) => {
     const failures = (state.backoff[id]?.failures ?? 0) + 1;
     state.backoff[id] = {
@@ -234,6 +241,13 @@ export async function scan(call, batch, state, nowMs) {
     if (outcome === 'pending') { fail(id, `pending${r.body.reason ? `: ${r.body.reason}` : ''}`, r.body.integrity === true); continue; }
     fail(id, `HTTP ${r.status}: unparseable answer`, true);
   }
+  // #1775 — THIS SCAN'S OBSERVED REMAINDER: every pending entry the listing returned, minus the ones this scan settled.
+  // A malformed entry (no string obligationId) is never attempted and so always remains, visible in the count (A5).
+  // It is an observation stamped observedAt, not the board's pending count: other writers act concurrently.
+  const remainder = listedPending.filter((e) => !(typeof e.obligationId === 'string' && settled.has(e.obligationId)));
+  counts.pendingCount = remainder.length;
+  counts.oldestPendingAt = remainder.length ? (oldestFirst(remainder)[0].payload?.occurredAt ?? null) : null;
+  counts.pendingObservedAt = observedAt;
   return counts;
 }
 
@@ -274,15 +288,22 @@ async function tick(opts, call, mem, { doScan, doAudit }) {
       mem.lastScanCompletedAt = new Date().toISOString(); mem.lastScanAt = Date.now();
       mem.counts.pendingCount = scanCounts.pendingCount;
       mem.counts.oldestPendingAt = scanCounts.oldestPendingAt;
+      mem.counts.pendingObservedAt = scanCounts.pendingObservedAt;
+      mem.lastKnownPendingCount = scanCounts.pendingCount;
+      mem.lastKnownPendingAt = scanCounts.pendingObservedAt;
     } catch (e) {
       scanFatal = String(e?.message || e);
+      // UNKNOWN, never the carried number beside a fresh checkedAt; the last known value stays in its own fields
+      mem.counts.pendingCount = null; mem.counts.oldestPendingAt = null; mem.counts.pendingObservedAt = null;
     }
   }
   if (doAudit) {
     mem.lastAuditAttemptAt = Date.now();   // an audit that fails is not retried on every loop tick
     try {
       const s = await survey(call);
-      Object.assign(mem.counts, s);
+      // the survey reads AFTER the scan; it owns only the counts the scan cannot see (review finding 1, post 48336)
+      mem.counts.blockedCount = s.blockedCount;
+      mem.counts.auditIntegrityFailures = s.auditIntegrityFailures;
       mem.lastAuditAt = mem.lastAuditAttemptAt;
     } catch (e) {
       auditFatal = `audit: ${String(e?.message || e)}`;
@@ -297,6 +318,9 @@ async function tick(opts, call, mem, { doScan, doAudit }) {
     lastScanCompletedAt: mem.lastScanCompletedAt,
     pendingCount: mem.counts.pendingCount,
     oldestPendingAt: mem.counts.oldestPendingAt,
+    pendingObservedAt: mem.counts.pendingObservedAt,
+    lastKnownPendingCount: mem.lastKnownPendingCount,
+    lastKnownPendingAt: mem.lastKnownPendingAt,
     blockedCount: mem.counts.blockedCount,
     lastError,
     auditIntegrityFailures: mem.counts.auditIntegrityFailures,
@@ -320,7 +344,8 @@ async function main(argv) {
   let key;
   try { key = fs.readFileSync(opts.keyFile, 'utf8').trim(); } catch (e) {
     const msg = `key file unreadable: ${e.code || e.message}`;
-    try { writeStatus(opts.status, { checkedAt: new Date().toISOString(), lastScanCompletedAt: null, pendingCount: null, oldestPendingAt: null, blockedCount: null, lastError: msg, auditIntegrityFailures: null,
+    try { writeStatus(opts.status, { checkedAt: new Date().toISOString(), lastScanCompletedAt: null, pendingCount: null, oldestPendingAt: null, pendingObservedAt: null,
+      lastKnownPendingCount: mem.lastKnownPendingCount, lastKnownPendingAt: mem.lastKnownPendingAt, blockedCount: null, lastError: msg, auditIntegrityFailures: null,
       attempted: null, deferred: null, publishErrors: null, backoff: mem.state.backoff, firstSeenScan: mem.state.firstSeenScan, scanCount: mem.state.scanCount }); } catch { /* nowhere to say it */ }
     console.error(`announce-publisher: ${msg}`);
     return 2;
