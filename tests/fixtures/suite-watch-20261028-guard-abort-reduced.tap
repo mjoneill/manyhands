@@ -1,0 +1,40 @@
+TAP version 13
+# host guard: on, load 2.43, ceiling 10 (provisional: the core count, until #1487 measures it), sampled every 5000 ms
+# file: tests/agent-constraints-1350.test.mjs complete
+# Subtest: \#1350 ACCEPTANCE 1 — one value at two layers: the agent record wins over the model spec and the layer is NAMED; drop the override and the model spec wins, named
+ok 1 - \#1350 ACCEPTANCE 1 — one value at two layers: the agent record wins over the model spec and the layer is NAMED; drop the override and the model spec wins, named
+  ---
+  duration_ms: 2.292375
+  type: 'test'
+  ...
+# Subtest: \#1350 ACCEPTANCE 2 — the hop-cap specimen is answerable from the surface: a record with maxHops 8 says 8 / agent record; a record without says the loop default / code default
+ok 2 - \#1350 ACCEPTANCE 2 — the hop-cap specimen is answerable from the surface: a record with maxHops 8 says 8 / agent record; a record without says the loop default / code default
+  ---
+  duration_ms: 0.134417
+  type: 'test'
+  ...
+# Subtest: \#1350 ACCEPTANCE 3 NEGATIVE CONTROL — set nowhere reads `unset`; a code-applied default reads `code default`, never blank
+ok 3 - \#1350 ACCEPTANCE 3 NEGATIVE CONTROL — set nowhere reads `unset`; a code-applied default reads `code default`, never blank
+  ---
+  duration_ms: 0.221917
+  type: 'test'
+  ...
+# Subtest: \#1350 everyMinutes becomes a live code default the moment schedule is in wakeOn — the value the loop would actually use
+ok 4 - \#1350 everyMinutes becomes a live code default the moment schedule is in wakeOn — the value the loop would actually use
+  ---
+  duration_ms: 0.059042
+  type: 'test'
+  ...
+# Subtest: \#1350 spent today comes from the ledger and is stated against the budget; holds come from the board
+ok 5 - \#1350 spent today comes from the ledger and is stated against the budget; holds come from the board
+  ---
+  duration_ms: 0.079125
+  type: 'test'
+  ...
+# Subtest: \#1350 ACCEPTANCE 4 — the layers the board cannot read are LISTED with a reason; delivery mode LEFT the list when \#1346 made it a field
+ok 6 - \#1350 ACCEPTANCE 4 — the layers the board cannot read are LISTED with a reason; delivery mode LEFT the list when \#1346 made it a field
+  ---
+  duration_ms: 0.095834
+  type: 'test'
+  ...
+# self-aborted: load crossed 13.52 at 2026-10-28T09:47:12.758Z (ceiling 10 (provisional: the core count, until #1487 measures it)), rows run 1454, host-preservation guard (#1588). This run is INCOMPLETE: no verdict, and its rows are not full-suite evidence.

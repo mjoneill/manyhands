@@ -35,6 +35,7 @@ import { runBoundedProcessTree } from './run-process-tree.mjs';
 import { newRunId } from './verdict-ledger.mjs';
 import { rmTreeForce, withSystemBins } from './watch-env.mjs';   // #1417
 import { parseTap, classify, loadExclusions, loadRequired, verdictLine } from './suite-watch-verdict.mjs';   // #1637
+import { HOST_GUARD_EXIT } from './host-guard.mjs';   // #1799
 
 const REPO = process.env.SUITE_WATCH_REPO
   || path.join(path.dirname(new URL(import.meta.url).pathname), '..');
@@ -159,7 +160,20 @@ const full = await runBoundedProcessTree({
 });
 const out = full.stdout + full.stderr;
 const timedOut = full.timedOut;
-red = timedOut || full.code !== 0;
+/**
+ * #1799 — a HOST-GUARD ABORT is "host unfit, no verdict", not a red. The #1588 guard exits 75 and says why on a TAP line of its own (`# self-aborted:` mid-run,
+ * `# host guard: REFUSED` at launch); on 2026-10-28 this line read that exit as red, so one designed abort posted "RED ... unparsed" AND a 12 KB INCOMPLETE.
+ * Both halves are required: an exit 75 the guard did not explain stays red, and the phrase inside a test title is not the guard's line.
+ * A real failing leaf in the rows that did run is still red (the `verdict.failed` rule below).
+ */
+const guardLine = !timedOut && full.code === HOST_GUARD_EXIT
+  ? (out.split('\n').find((l) => /^# (self-aborted:|host guard: REFUSED)/.test(l)) ?? null) : null;
+// the numbers ARE the point (the next morning reads "13.52 vs 10", not "aborted"): parsed from the guard's own line; rowsRun is 0 for a launch refusal (nothing ran)
+const num = (re) => { const m = guardLine?.match(re); return m ? Number(m[1]) : null; };
+const aborted = guardLine === null ? null : {
+  load: num(/\bload (?:crossed )?(\d+(?:\.\d+)?)/), ceiling: num(/\bceiling (\d+(?:\.\d+)?)/), rowsRun: /REFUSED/.test(guardLine) ? 0 : num(/\brows run (\d+)/),
+};
+red = timedOut || (full.code !== 0 && !aborted);
 
 /**
  * #746 — a ledger write that failed must be observable HERE, not merely
@@ -191,6 +205,7 @@ if (verdict.documented) console.log(`${now} documented exclusions applied: ${ver
 for (const p of verdict.problems) console.log(`${now} PROBLEM: ${p}`);
 if (verdict.unclassified) console.log(`${now} unclassified skips (INCOMPLETE until documented in ${path.relative(suiteDir, exclPath)}): ${verdict.unclassified}`);
 const files = verdict.failingFiles;
+const incomplete = Boolean(verdict.incomplete || aborted);   // #1799: an abort is INCOMPLETE even when the rows it did run are clean
 if (!red && verdict.failed > 0) red = true;          // the exit code said success but the TAP holds a leaf failure: believe the rows
 const completedFiles = timedOut
   ? new Set([...out.matchAll(/^# file: (.+) complete$/gm)].map((m) => path.basename(m[1])))
@@ -272,13 +287,13 @@ if (red && !timedOut && files.length) {
 // ARTIFACT_KEEP window (#746: "a green run writes no artifacts"). A run that fails or is incomplete ALSO keeps coverage.json in its own run directory, next to the TAP it explains.
 const coverageDoc = {
   runId, at: now, required: verdict.coverage.map(({ file, executed, passed, failed, skipped }) => ({ file, executed, passed, failed, skipped })),
-  ran: verdict.required, truncated: verdict.truncated, failed: verdict.failed, incomplete: verdict.incomplete,
+  ran: verdict.required, truncated: verdict.truncated, failed: verdict.failed, incomplete, aborted,
 };
 try {
   fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
   fs.writeFileSync(COVERAGE_FILE, `${JSON.stringify(coverageDoc, null, 2)}\n`);
 } catch (e) { console.log(`${now} WARNING: could not write ${COVERAGE_FILE}: ${e.message}`); }
-if (ARTIFACT_DIR && (fullRunRed || verdict.incomplete)) {
+if (ARTIFACT_DIR && (fullRunRed || incomplete)) {
   try {
     const runDir = path.join(ARTIFACT_DIR, runId);
     fs.mkdirSync(runDir, { recursive: true });
@@ -287,7 +302,7 @@ if (ARTIFACT_DIR && (fullRunRed || verdict.incomplete)) {
     if (isolationOut !== null) fs.writeFileSync(path.join(runDir, 'isolation.tap'), isolationOut);
     fs.writeFileSync(path.join(runDir, 'meta.json'), `${JSON.stringify({
       runId, at: now, files, timedOut, flake, survivedIsolation: !flake && isolationOut !== null,
-      incomplete: verdict.incomplete, unavailable: verdict.unavailable, unclassified: verdict.unclassified, documented: verdict.documented,
+      incomplete, aborted, unavailable: verdict.unavailable, unclassified: verdict.unclassified, documented: verdict.documented,
       todo: verdict.todo, failed: verdict.failed, required: verdict.required, truncated: verdict.truncated, problems: verdict.problems,
     }, null, 2)}\n`);
     // Bounded: newest-first by name, since run ids sort chronologically.
@@ -314,7 +329,8 @@ if (flake) console.log(`${now} full-run red did NOT survive isolation — flake,
  * skips in a file already known is the same gap. Recovery of one state clears only that state's members.
  */
 const redMembers = red ? (timedOut ? ['timeout'] : (files.length ? files : ['unparsed'])) : [];
-const incMembers = verdict.incomplete ? [
+// #1799: an abort's missing coverage IS the abort (no verdict was attempted), so it is one member, not one per file the guard stopped
+const incMembers = aborted ? ['host-guard'] : verdict.incomplete ? [
   ...verdict.incompleteFiles.map((f) => `skips:${f}`),
   ...verdict.requiredMissing.map((c) => `required:${c.file}`),
   ...verdict.problems.map((p) => `problem:${p.slice(0, 80)}`),
@@ -328,7 +344,7 @@ for (const [k, at] of Object.entries(st.sigTimes)) {
   if (Date.now() - at >= COOLDOWN_MS || !/^(red|inc):/.test(k)) delete st.sigTimes[k];
 }
 if (!red) for (const k of Object.keys(st.sigTimes)) if (k.startsWith('red:')) delete st.sigTimes[k];
-if (!verdict.incomplete) for (const k of Object.keys(st.sigTimes)) if (k.startsWith('inc:')) delete st.sigTimes[k];
+if (!incomplete) for (const k of Object.keys(st.sigTimes)) if (k.startsWith('inc:')) delete st.sigTimes[k];
 
 const summary = (out.match(/# (tests|pass|fail) \d+/g) || []).join(' · ');
 const fresh = (prefix, members) => members.filter((m) => st.sigTimes[`${prefix}:${m}`] == null);
@@ -354,10 +370,17 @@ if (red) {
     for (const m of redMembers) if (st.sigTimes[`red:${m}`] == null) st.sigTimes[`red:${m}`] = Date.now();
   }
 }
-if (verdict.incomplete) {
+if (incomplete) {
   const news = fresh('inc', incMembers);
   console.log(`${now} suite INCOMPLETE members=${incMembers.length} ${news.length ? 'FIRING' : 'muted'} unavailable=${verdict.unavailable} unclassified=${verdict.unclassified}`);
-  if (news.length) {
+  if (news.length && aborted) {
+    bodies.push(`🟠 suite watch: the run is INCOMPLETE in ${treeIdentity(REPO)} — host unfit, no verdict `
+      + `(host guard: load ${aborted.load ?? '?'} > ceiling ${aborted.ceiling ?? '?'}, rows run ${aborted.rowsRun ?? '?'}). The host-preservation guard (#1588) stopped it: `
+      + `"${guardLine.replace(/^# /, '').slice(0, 400)}" `
+      + `Nothing about the code was judged. Failures in the rows that did run: ${verdict.failed}, reported separately. `
+      + `(An abort mutes for ${Math.round(COOLDOWN_MS / 3600000)}h; a real failure still fires, and a completed run clears it.)`);
+    for (const m of incMembers) if (st.sigTimes[`inc:${m}`] == null) st.sigTimes[`inc:${m}`] = Date.now();
+  } else if (news.length) {
     const reqLine = verdict.requiredMissing.length ? `Required test file(s) that did NOT run: ${verdict.requiredMissing.map((c) => `${c.file} (${c.why})`).join('; ')}. ` : '';
     const probLine = verdict.problems.length ? `Problem(s): ${verdict.problems.join('; ')}. ` : '';
     bodies.push(`🟠 suite watch: the run is INCOMPLETE in ${treeIdentity(REPO)} — required coverage is missing, so this is NOT a pass even with zero failures. `
@@ -369,7 +392,7 @@ if (verdict.incomplete) {
     for (const m of incMembers) if (st.sigTimes[`inc:${m}`] == null) st.sigTimes[`inc:${m}`] = Date.now();
   }
 }
-if (!red && !verdict.incomplete) console.log(`${now} suite green — silent`);
+if (!red && !incomplete) console.log(`${now} suite green — silent`);
 
 for (const body of bodies) {
   if (DRYRUN) {
