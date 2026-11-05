@@ -121,6 +121,21 @@ test('G0 CONTROL: a genuine failing leaf with exit 1 is RED, names its file, and
   assert.ok(members(u)?.some((k) => k.startsWith('red:')), `and its member is red:...; got ${JSON.stringify(members(u))}`);
 });
 
+/**
+ * G1b, #1799 note 1. The watcher joins stdout and stderr into one text. With no separator, a stdout that
+ * ends WITHOUT a newline swallows a guard line written to stderr into its last line. That line then fails the `^#` anchor,
+ * so the abort is not recognised and the run stays RED. Must be RED before the separator fix and pass after it.
+ */
+test('G1b the guard line on STDERR after an UNTERMINATED stdout is still a guard abort, not a RED', { timeout: 120000 }, async () => {
+  N = 0; const u = universe();
+  fs.writeFileSync(path.join(u.dir, 'scripts', 'run-tests.sh'), '#!/bin/sh\ncat "$FAKE_TAP"\ncat "$(dirname "$0")/../guard.err" >&2\nexit "${FAKE_CODE:-0}"\n', { mode: 0o755 });
+  fs.writeFileSync(path.join(u.dir, 'guard.err'), ABORT());
+  const body = `TAP version 13\n${BANNER}${file('tests/a.test.mjs')}${tOk('a')}${tOk('b')}`.replace(/\n$/, '');
+  assert.ok(!body.endsWith('\n'), 'CONTROL: the fixture stdout really is unterminated');
+  const t = await tick(u, body, 75);
+  guardAbortAsserts(t, u, 'G1b', { load: 13.52, ceiling: 10, rowsRun: 12 });
+});
+
 test('G1 MID-RUN ABORT (synthetic): exit 75 + the `# self-aborted:` line, zero failing rows, no summary -> ONE INCOMPLETE "host unfit, no verdict" post, member inc:host-guard, meta aborted:{load,ceiling,rowsRun}', { timeout: 120000 }, async () => {
   N = 0; const u = universe();
   const t = await tick(u, cut(file('tests/a.test.mjs'), tOk('a'), tOk('b')), 75);

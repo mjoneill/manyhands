@@ -158,7 +158,7 @@ let red = false;
 const full = await runBoundedProcessTree({
   file: 'sh', args: [path.join(suiteDir, 'scripts', 'run-tests.sh')], cwd: suiteDir, timeout: RUN_TIMEOUT_MS,
 });
-const out = full.stdout + full.stderr;
+const out = full.stdout + '\n' + full.stderr; // #1799: a separator, so an unterminated stdout cannot swallow stderr's first line
 const timedOut = full.timedOut;
 /**
  * #1799 — a HOST-GUARD ABORT is "host unfit, no verdict", not a red. The #1588 guard exits 75 and says why on a TAP line of its own (`# self-aborted:` mid-run,
@@ -249,7 +249,7 @@ if (red && !timedOut && files.length) {
     file: 'node', args: ['scripts/run-test-files.mjs', ...files.filter((f) => /\.test\.mjs$/.test(f))],   // #1637: checkout-relative paths already
     cwd: suiteDir, timeout: ISOLATION_TIMEOUT_MS,
   });
-  isolationOut = isolated.stdout + isolated.stderr;
+  isolationOut = isolated.stdout + '\n' + isolated.stderr; // #1799
   if (!isolated.timedOut && isolated.code === 0) {
     flake = true; // isolated re-run green: parallel-load flake, not a regression
     red = false;

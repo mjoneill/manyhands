@@ -158,6 +158,30 @@ test('#746 ANTI-VACUITY: a healthy ledger produces no watch-log warning', async 
     'a warning that always fires cannot distinguish a failed write from a good one');
 });
 
+/**
+ * #1799 note 1 — the watcher joins the run's stdout and stderr into ONE text
+ * and then reads it line by line. With no separator, a stdout that ends
+ * without a newline swallows the first stderr line into its last line, and a
+ * line-anchored read (startsWith / ^) misses it. The runner writes the ledger
+ * warning to stderr, so this is the case where the warning is lost.
+ */
+test('#1799 a stderr warning after an UNTERMINATED stdout is still re-emitted', async () => {
+  const u = makeUniverse();
+  fs.writeFileSync(path.join(u.dir, 'scripts', 'run-tests.sh'),
+    "#!/bin/sh\nprintf 'TAP version 13 (no trailing newline)'\n" +
+    "printf '# WARNING: verdict ledger write FAILED (fixture)\\n' >&2\nexit 0\n");
+  fs.chmodSync(path.join(u.dir, 'scripts', 'run-tests.sh'), 0o755);
+
+  const out = await tick(u);
+
+  // The stub is not a full TAP run, so the verdict is INCOMPLETE. That path
+  // does not echo the run's output, so a match below can only come from the
+  // re-emit loop, not from a stray print.
+  assert.doesNotMatch(out, /TAP version 13 \(no trailing newline\)/, 'control: the run output itself is not echoed');
+  assert.match(out, /WARNING: verdict ledger write FAILED \(fixture\)/,
+    'the stderr line must survive the join as its own line');
+});
+
 test('red posts once, repeat red is muted, recovery clears, next red is news again', async () => {
   const u = makeUniverse();
   goRed(u.dir);
