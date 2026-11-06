@@ -168,6 +168,7 @@ function openerBody(entry, slotMs, { opener, openerSource }) {
   const head = `🔔 ${hhmm(slotMs)}Z: ${entry.kind}.`;
   if (openerSource === 'role') return `${head} @${opener} opens${pre}.`;
   if (openerSource === 'po-fallback') return `${head} The scrum master role is unheld, so the PO opens: @${opener}${pre}.`;
+  if (openerSource === 'seat-state-unreadable') return `${head} The role holders could not be read, so nobody is named to open. Whoever is here, please start${pre}.`;
   return `${head} No scrum master or PO is declared, so nobody is named to open. Whoever is here, please start${pre}.`;
 }
 
@@ -220,14 +221,23 @@ export async function ceremonyBellTick({ now, schedule, seatState, store, post, 
         record({ ...base, outcome: 'suppressed-duplicate', opener: p.opener ?? null, openerSource: p.openerSource ?? null });
         continue;
       }
-      const who = resolveOpener(await seatState(), nowMs);
-      const outcome = who.openerSource === 'no-holder' ? 'fired-no-holder' : 'fired';
+      // The bell is already taken, so a seat-state read that throws must not cost the ceremony; and "I could not ask"
+      // is not "nobody holds the role", so it gets its own source and its own words. The error rides the event only.
+      let who, seatStateError;
+      try {
+        who = resolveOpener(await seatState(), nowMs);
+      } catch (err) {
+        who = { opener: null, openerSource: 'seat-state-unreadable' };
+        seatStateError = String(err && err.message || err);
+      }
+      const outcome = who.opener === null ? 'fired-no-holder' : 'fired';
+      const extra = seatStateError ? { seatStateError } : {};
       await store.put(key, { state: 'attempted', at: tickAt, ...who });
       let res;
       try {
         res = await post({ kind: 'opener', key, body: openerBody(entry, slotMs, who) });
       } catch (err) {
-        record({ ...base, outcome: 'post-failed', ...who, error: String(err && err.message || err) });
+        record({ ...base, outcome: 'post-failed', ...who, ...extra, error: String(err && err.message || err) });
         continue;
       }
       summary.posted++;
@@ -237,10 +247,10 @@ export async function ceremonyBellTick({ now, schedule, seatState, store, post, 
       try {
         await store.put(key, { state: 'posted', at: tickAt, ...who, postId, createdAt: res && res.createdAt });
       } catch (err) {
-        record({ ...base, outcome: 'fired-state-not-saved', ...who, postId, error: String(err && err.message || err) });
+        record({ ...base, outcome: 'fired-state-not-saved', ...who, ...extra, postId, error: String(err && err.message || err) });
         continue;
       }
-      record({ ...base, outcome, ...who });
+      record({ ...base, outcome, ...who, ...extra });
       continue;
     }
 

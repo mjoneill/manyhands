@@ -98,6 +98,7 @@ const quietAfterMinutes = () => _tendingConfig.quietAfterMinutes;
 // #1216 — the daily digest: a whisper whose body is rendered from /api/checks
 // standing[] at fire time. Same quiet rule, same window discipline, same mint.
 import { digestTick } from './core/digest.mjs';
+import { ceremonyBellTick, scheduleSource, restBellStore, restRecorder } from './core/ceremony-bell.mjs';   // #1815
 import { makeChecksTick } from './core/checks-tick.mjs';   // #1388
 import { staleClaimAskTick } from './core/stale-claim-ask.mjs';   // #455
 import { createDirectSegment } from './core/token-ring-direct.mjs';   // #1362
@@ -2679,6 +2680,46 @@ const checksTick = makeChecksTick({
   log: (line) => console.error(line),
 });
 setInterval(() => { if (tendingEnabled()) checksTick(); }, WHISPER_TICK_MS).unref();
+
+// ── #1815 — THE CEREMONY BELL. At a ceremony's slot the board posts one opener naming the seat that opens it, so a
+// post-driven seat is woken by the post. NOT on the tending switch and NOT gated on room silence: a busy room still has
+// its ceremony, and the schedule file carries the bell's own `enabled`. Every process arms it; REST decides the bell
+// (POST /api/ceremony-bells, 201/409), so any number of processes post one opener. Single-flight, like checksTick
+// (#1388): a tick that would start while one runs is skipped, never queued.
+// SCRUM_CEREMONY_BELL=off disarms it in this process (the test harness default).
+const BELL_ON = process.env.SCRUM_CEREMONY_BELL !== 'off';
+const BELL_TICK_MS = Number(process.env.MCP_BELL_TICK_MS ?? 60_000);
+const BELL_SCHEDULE_FILE = process.env.SCRUM_CEREMONY_SCHEDULE_FILE || path.join(PROJECT_DIR, 'ceremony-schedule.json');
+if (BELL_ON) {
+  // One boot per process: coverage of the bell's diary starts at bootAt, and a gap between boots reads as unknown.
+  const bellBoot = { bootId: randomUUID(), bootAt: new Date().toISOString() };
+  const bellSchedule = scheduleSource(BELL_SCHEDULE_FILE);
+  const bellStore = restBellStore({ base: REST_API_BASE });
+  const bellRecord = restRecorder({ base: REST_API_BASE, ...bellBoot });
+  let bellRunning = false;
+  const bellTick = async () => {
+    if (bellRunning) return;
+    bellRunning = true;
+    try {
+      await ceremonyBellTick({
+        now: new Date().toISOString(),
+        schedule: bellSchedule,
+        seatState: () => apiCall('GET', '/api/seats/state'),
+        store: bellStore,
+        post: ({ body }) => apiCall('POST', '/api/conversations', { author: 'board', body }),
+        record: bellRecord,
+      });
+    } catch (e) {
+      console.error(`[#1815] ceremony bell tick failed: ${e?.message ?? e}`);
+    } finally {
+      bellRunning = false;
+    }
+  };
+  setInterval(bellTick, BELL_TICK_MS).unref();
+  console.log(`[#1815] ceremony bell: on, every ${BELL_TICK_MS} ms, schedule ${BELL_SCHEDULE_FILE}, boot ${bellBoot.bootId}`);
+} else {
+  console.log('[#1815] ceremony bell: off (SCRUM_CEREMONY_BELL=off)');
+}
 
 const REAP_IDLE_MS = Number(process.env.MCP_REAP_IDLE_MS ?? 300000); // 5 min default
 // #1129 — how recently a stream's client must have spoken for the stream to

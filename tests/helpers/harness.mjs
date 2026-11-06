@@ -348,6 +348,7 @@ export async function startMcpServer({ restApiBase, port, env: extraEnv, allocat
           ...process.env,
           MCP_PORT: String(p),
           SCRUM_CHANNEL_STAGGER: 'off', // #256/#265 — keep channel tests instant; scheduling logic is unit-tested in channel-scheduler.test.mjs
+          SCRUM_CEREMONY_BELL: 'off', // #1815 — no MCP test rings a ceremony bell into its fixture; the bell's own rows turn it on
           SCRUM_BOARD_API: boardApi,
           ...(extraEnv || {}),
           SCRUM_INSTANCE_ID: nonce, // #1259 — LAST: an isolation var a caller's env cannot override
