@@ -33,6 +33,8 @@ const TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
  * Fails closed: one bad entry refuses the whole schedule, because a wrong
  * ceremony is worse than a missing one (and a missing one is flagged).
  */
+const ENTRY_FIELDS = new Set(['kind', 'weekday', 'time', 'preRead', 'note']);
+
 export function validateSchedule(doc) {
   if (!doc || typeof doc !== 'object' || !Array.isArray(doc.ceremonies)) {
     return { ok: false, error: 'schedule must be an object with a "ceremonies" array', entries: [] };
@@ -46,6 +48,10 @@ export function validateSchedule(doc) {
     if (!Number.isInteger(c.weekday) || c.weekday < 0 || c.weekday > 6) p.push(`weekday ${JSON.stringify(c.weekday)} is not an integer 0–6 (0 = Sunday, UTC)`);
     if (typeof c.time !== 'string' || !TIME_RE.test(c.time)) p.push(`time ${JSON.stringify(c.time)} is not HH:MM UTC`);
     if (c.preRead !== undefined && typeof c.preRead !== 'string') p.push('preRead must be a card number as a string');
+    if (c.note !== undefined && (typeof c.note !== 'string' || !c.note.trim())) p.push('note must be a non-empty string');
+    // A field nothing reads is refused, not carried: a misspelt `notes` would validate, never render, and look configured.
+    const unknown = Object.keys(c).filter((k) => !ENTRY_FIELDS.has(k));
+    if (unknown.length) p.push(`unknown field${unknown.length > 1 ? 's' : ''} ${unknown.map((k) => JSON.stringify(k)).join(', ')} (known: ${[...ENTRY_FIELDS].join(', ')})`);
     if (p.length) problems.push(`${label}: ${p.join('; ')}`);
   });
   if (problems.length) return { ok: false, error: problems.join(' | '), entries: [] };
@@ -163,7 +169,12 @@ function hhmm(ms) {
   return new Date(ms).toISOString().slice(11, 16);
 }
 
-function openerBody(entry, slotMs, { opener, openerSource }) {
+function openerBody(entry, slotMs, who) {
+  const note = entry.note ? ` ${entry.note.trim()}` : '';
+  return `${openerLine(entry, slotMs, who)}${note}`;
+}
+
+function openerLine(entry, slotMs, { opener, openerSource }) {
   const pre = entry.preRead ? `; pre-read: #${entry.preRead}` : '';
   const head = `🔔 ${hhmm(slotMs)}Z: ${entry.kind}.`;
   if (openerSource === 'role') return `${head} @${opener} opens${pre}.`;

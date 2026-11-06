@@ -357,6 +357,65 @@ test('R9: schedule-loaded is recorded on first read and on change only, with pat
   assert.notEqual(loaded[0].sha256, loaded[1].sha256);
 });
 
+// R12 ───────────────────────────────────────────────────────────────────────
+// A step a ceremony must not close without (e.g. Planning's "file the next sprint card") rides the opener as `note`,
+// on the path of the action rather than in one seat's memory. And a field the schedule does not know is REFUSED, not
+// carried silently: a misspelt `notes` that validates and never renders looks configured while doing nothing.
+const NOTE = 'Before Planning closes: file the new sprint card.';
+
+test('R12: an entry\'s note is carried in the opener, whoever opens', async () => {
+  const withNote = { ...REVIEW, note: NOTE };
+  const held = harness({ schedule: [withNote] });
+  await held.tick(W(16, 0, 30));
+  assert.equal(openers(held).length, 1);
+  assert.ok(openers(held)[0].body.includes(NOTE), `role opener carries the note: ${openers(held)[0].body}`);
+  const nobody = harness({ schedule: [withNote], seatState: seats({ sm: null, po: null }) });
+  await nobody.tick(W(16, 0, 30));
+  assert.ok(openers(nobody)[0].body.includes(NOTE), `no-holder opener carries the note: ${openers(nobody)[0].body}`);
+});
+
+test('R12 control: an entry with no note posts no note text', async () => {
+  const h = harness();
+  await h.tick(W(16, 0, 30));
+  assert.ok(!openers(h)[0].body.includes(NOTE));
+});
+
+test('R12: validateSchedule rejects a note that is not a non-empty string, and an unknown field, naming it', () => {
+  assert.equal(validateSchedule({ ceremonies: [{ ...REVIEW, note: NOTE }] }).ok, true);
+  assert.equal(validateSchedule({ ceremonies: [{ ...REVIEW, note: 5 }] }).ok, false);
+  assert.equal(validateSchedule({ ceremonies: [{ ...REVIEW, note: '  ' }] }).ok, false);
+  const unknown = validateSchedule({ ceremonies: [{ ...REVIEW, notes: NOTE }] });
+  assert.equal(unknown.ok, false);
+  assert.match(unknown.error, /notes/);
+});
+
+test('R12: a schedule FILE with an unknown field refuses — nothing posts, the field is named', async () => {
+  const d = dir();
+  const file = path.join(d, 'ceremony-schedule.json');
+  writeSched(file, [{ ...REVIEW, notes: NOTE }]);
+  const events = [];
+  const posts = [];
+  await ceremonyBellTick({
+    now: W(16, 0, 30), schedule: scheduleSource(file), seatState: () => seats(),
+    store: fileBellStore(path.join(d, 's.json')),
+    post: async (b) => { posts.push(b); return { id: 'x', createdAt: W(16) }; },
+    record: (e) => events.push(e),
+  });
+  assert.equal(posts.length, 0);
+  const r = events.find((e) => e.type === 'schedule-refused');
+  assert.ok(r, 'a schedule-refused event');
+  assert.match(r.error, /notes/);
+});
+
+test('R12: the shipped schedule validates, and Planning carries the sprint-card note', () => {
+  const shipped = JSON.parse(fs.readFileSync(new URL('../ceremony-schedule.json', import.meta.url), 'utf8'));
+  const v = validateSchedule(shipped);
+  assert.equal(v.ok, true, v.error);
+  const planning = v.entries.find((e) => e.kind === 'planning');
+  assert.ok(planning, 'planning is scheduled');
+  assert.match(planning.note || '', /sprint card/i);
+});
+
 test('the tolerance is five minutes', () => {
   assert.equal(BELL_TOLERANCE_MS, 5 * 60 * 1000);
 });
