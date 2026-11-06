@@ -30,8 +30,10 @@
  * copy's name (the tick's clock at the checkpoint).
  *
  * Verdicts / exit: OK 0 · UNAVAILABLE 3 (DEST unreadable/missing — never healthy) ·
- * STALE 4 · NO-COPY 5 · UNVERIFIED-NEWEST 6 · usage 2. Every alert is ONE line starting
- * "ALERT <VERDICT>" on stdout. Delivery to a human is NOT built: under launchd the line
+ * STALE 4 · NO-COPY 5 · UNVERIFIED-NEWEST 6 · OVER-BUDGET 9 · usage 2. Every alert is ONE line starting
+ * "ALERT <VERDICT>" on stdout. #1634 K15: with --budget-bytes, MEASURED unique bytes above the budget also alert
+ * (budgetAlert, an "ALERT OVER-BUDGET" line). It does not change the freshness verdict, and a freshness alert's exit code
+ * wins over 9. With the unique read UNAVAILABLE there is no budget alarm; the capacity line says "verdict UNKNOWN". Delivery to a human is NOT built: under launchd the line
  * lands in the job's log only.
  */
 import fs from 'node:fs';
@@ -146,7 +148,10 @@ export function monitor({ dest, nowMs = Date.now(), intervalMs = DEFAULT_INTERVA
   const lastTick = Array.isArray(state.ticks) ? state.ticks[state.ticks.length - 1] : null;
   let cap = null, capLine;
   try { cap = capacity({ dest, copies, intervalMs, budgetBytes }); capLine = capacityLine(cap); } catch (e) { capLine = `CAPACITY UNAVAILABLE: ${e.message}`; }
-  return { ...r, capacity: cap, capacityLine: capLine, destinationLine: destinationLine(dest, store || lastTick?.checkpointDir || null),
+  // #1634 K15: the alarm fires only on a MEASURED over-budget (overBudget === true); null (unique unreadable) is not an alarm here.
+  const budgetAlert = cap?.overBudget === true;
+  const budgetLine = budgetAlert ? `ALERT OVER-BUDGET unique (physical) ${mb(cap.uniqueBytes)} > budget ${mb(cap.budgetBytes)}${cap.uniqueExact ? '' : ' (CONSERVATIVE: partly shared clones counted in full)'}; logical ${mb(cap.logicalBytes)}; the set's allocation, not volume free space` : null;
+  return { ...r, alert: r.alert || budgetAlert, budgetAlert, budgetLine, capacity: cap, capacityLine: capLine, destinationLine: destinationLine(dest, store || lastTick?.checkpointDir || null),
     unverifiedCount: copies.filter((c) => c.state !== 'verified').length };
 }
 
@@ -180,8 +185,9 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   const r = monitor(a);
   console.log(r.line);
   if (r.destinationLine) console.log(r.destinationLine);
+  if (r.budgetLine) console.log(r.budgetLine);
   if (r.capacityLine) console.log(r.capacityLine);
   if (r.unverifiedCount) console.log(`NOTE ${r.unverifiedCount} non-verified entr${r.unverifiedCount === 1 ? 'y' : 'ies'} in DEST (never pruned, never counted)`);
-  if (a.json) console.log(JSON.stringify({ verdict: r.verdict, alert: r.alert, ageMs: r.ageMs, limitMs: r.limitMs, newest: r.newest, capacity: r.capacity ?? null }));
-  process.exit(EXIT[r.verdict]);
+  if (a.json) console.log(JSON.stringify({ verdict: r.verdict, alert: r.alert, budgetAlert: r.budgetAlert, ageMs: r.ageMs, limitMs: r.limitMs, newest: r.newest, capacity: r.capacity ?? null }));
+  process.exit(EXIT[r.verdict] || (r.budgetAlert ? 9 : 0));
 }
