@@ -10,8 +10,8 @@
  * it is not gated on room silence. A busy room still has its ceremony.
  *
  * Bell key = `${kind}@${slotISO}`. A bell is due while slot <= now < slot + tolerance.
- * The key is committed to the store BEFORE the post (as whisper-store's mintOnce
- * does), so a crash between the two can never post twice; the cost is that
+ * The key is reserved atomically (store.reserve) BEFORE the post and before any
+ * await, so neither a race nor a crash between the two can post twice; the cost is that
  * a post that throws is not retried, and the after-window check flags it as missing.
  */
 
@@ -113,6 +113,22 @@ export function fileBellStore(file) {
   };
   return {
     get(key) { return load()[key]; },
+    /**
+     * Take the bell, atomically: true for exactly one caller per key, across
+     * processes too, because the marker is created with O_EXCL ('wx'). A REST
+     * store implements the same call as a 201/409 reservation.
+     */
+    reserve(key, value) {
+      const marks = `${file}.reserved`;
+      fs.mkdirSync(marks, { recursive: true });
+      const mark = path.join(marks, crypto.createHash('sha256').update(key).digest('hex'));
+      try { fs.writeFileSync(mark, key, { flag: 'wx' }); } catch (err) {
+        if (err.code === 'EEXIST') return false;
+        throw err;
+      }
+      this.put(key, value);
+      return true;
+    },
     put(key, value) {
       const all = load();
       all[key] = value;
@@ -193,13 +209,16 @@ export async function ceremonyBellTick({ now, schedule, seatState, store, post, 
     const prior = store.get(key);
 
     if (inWindow) {
-      if (prior) {
-        record({ ...base, outcome: 'suppressed-duplicate', opener: prior.opener ?? null, openerSource: prior.openerSource ?? null });
+      // Take the bell BEFORE any await: the check and the take are one call, so
+      // two ticks racing (in one process or two) cannot both pass. A crash after
+      // this line can never post twice; the after-window check flags it missing.
+      if (prior || !(await store.reserve(key, { state: 'attempted', at: tickAt }))) {
+        const p = prior || store.get(key) || {};
+        record({ ...base, outcome: 'suppressed-duplicate', opener: p.opener ?? null, openerSource: p.openerSource ?? null });
         continue;
       }
       const who = resolveOpener(await seatState(), nowMs);
       const outcome = who.openerSource === 'no-holder' ? 'fired-no-holder' : 'fired';
-      // Commit before post: a crash after this line can never post twice.
       store.put(key, { state: 'attempted', at: tickAt, ...who });
       try {
         const res = await post({ kind: 'opener', key, body: openerBody(entry, slotMs, who) });
