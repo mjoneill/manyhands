@@ -261,8 +261,10 @@ test('R11: seat state unreadable → it still posts, says the role holders could
   assert.match(body, /could not be read/i, body);
   assert.doesNotMatch(body, /No scrum master or PO is declared/, 'it does not claim nobody is declared');
   assert.doesNotMatch(body, /@/, 'and names nobody');
+  // "could not be read" and "nobody declared" must not collapse into one outcome: a reader queries outcomes
   const e = h.events.find((x) => x.key && x.outcome && x.outcome.startsWith('fired'));
-  assert.equal(e?.openerSource, 'seat-state-unreadable', JSON.stringify(h.events));
+  assert.equal(e?.outcome, 'fired-holders-unreadable', `its own outcome, not fired-no-holder (${JSON.stringify(h.events)})`);
+  assert.equal(e?.openerSource, 'seat-state-unreadable');
   assert.match(e?.seatStateError || '', /injected/);
 });
 

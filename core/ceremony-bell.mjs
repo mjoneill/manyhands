@@ -230,7 +230,8 @@ export async function ceremonyBellTick({ now, schedule, seatState, store, post, 
         who = { opener: null, openerSource: 'seat-state-unreadable' };
         seatStateError = String(err && err.message || err);
       }
-      const outcome = who.opener === null ? 'fired-no-holder' : 'fired';
+      // Three outcomes, never collapsed: a named opener, nobody declared, and nobody readable.
+      const outcome = seatStateError ? 'fired-holders-unreadable' : who.opener === null ? 'fired-no-holder' : 'fired';
       const extra = seatStateError ? { seatStateError } : {};
       await store.put(key, { state: 'attempted', at: tickAt, ...who });
       let res;
