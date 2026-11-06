@@ -220,13 +220,17 @@ export function pruneDest({ dest, nowMs, policy = DEFAULT_POLICY, dryRun = false
   const copies = scanDest(dest);
   const plan = planPrune({ copies, nowMs, policy });
   for (const k of plan.keep) log(`PLAN keep copy ${k.name} — ${k.reasons.join(', ')}`);
-  const held = () => uniqueBytesSync(scanDest(dest).map((c) => path.join(dest, c.name))).bytes;
+  // Both measurements cover only the copies present BEFORE the prune, so a copy a concurrent tick publishes meanwhile
+  // (a hand-run prune racing launchd) is never counted as negative freeing. Residual, stated: if that new copy CLONES a
+  // copy deleted here, the shared bytes are counted freed although the new copy still holds them.
+  const names = copies.map((c) => c.name);
+  const held = (ns) => uniqueBytesSync(ns.map((n) => path.join(dest, n))).bytes;
   let before = null, freedNote = dryRun ? 'dry run: nothing freed' : null;
-  if (!dryRun && plan.delete.length) { try { before = held(); } catch (e) { freedNote = `accounting UNAVAILABLE: ${e.message}`; } }
+  if (!dryRun && plan.delete.length) { try { before = held(names); } catch (e) { freedNote = `accounting UNAVAILABLE: ${e.message}`; } }
   const done = execute(dest, plan.delete, { dryRun, log, what: 'copy' });
   let freedBytes = null;
   if (!dryRun && !plan.delete.length) freedBytes = 0;
-  else if (before != null) { try { freedBytes = before - held(); } catch (e) { freedNote = `accounting UNAVAILABLE: ${e.message}`; } }
+  else if (before != null) { try { freedBytes = before - held(names.filter((n) => fs.existsSync(path.join(dest, n)))); } catch (e) { freedNote = `accounting UNAVAILABLE: ${e.message}`; } }
   if (freedBytes != null) log(`FREED ${(freedBytes / 1e6).toFixed(1)} MB of the retained set's allocation (unique bytes; not volume free space)`);
   else if (freedNote) log(`FREED unknown: ${freedNote}`);
   return { ...plan, ...done, freedBytes, freedNote };

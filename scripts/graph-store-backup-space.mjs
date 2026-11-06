@@ -55,8 +55,8 @@ export function uniqueBytesSync(paths, { python = process.env.GRAPH_STORE_SPACE_
     seen.add(key); files.push(f);
   }
   if (!files.length) return { bytes: 0, exact: true };
-  const r = spawnSync(python, ['-I', '-c', PY_ATTRS], { input: JSON.stringify(files.map((f) => f.p)), encoding: 'utf8', timeout: 120_000 });
-  if (r.status !== 0) throw new Error(`uniqueBytes: APFS attributes unreadable (rc ${r.status}): ${(r.stderr || '').trim().split('\n').pop()}`);
+  const r = spawnSync(python, ['-I', '-c', PY_ATTRS], { input: JSON.stringify(files.map((f) => f.p)), encoding: 'utf8', timeout: 120_000, maxBuffer: 256 * 1024 * 1024 });
+  if (r.error || r.status !== 0) throw new Error(`uniqueBytes: APFS attributes unreadable (rc ${r.status}${r.error ? `, ${r.error.code || r.error.message}` : ''}): ${(r.stderr || '').trim().split('\n').pop()}`);
   const attrs = JSON.parse(r.stdout);
   let bytes = 0;
   let exact = true;
