@@ -15,8 +15,16 @@
  *                  INSIDE its write lock and reports, from the same instant, the quad
  *                  count and the commit marker (<urn:ex:dataset> <urn:ex:commitSeq>, read from the bookkeeping graph, #1638).
  *   2. COPY        every file of the checkpoint is copied BYTE BY BYTE (read + write +
- *                  fsync, never link or clone) into DEST/graph-store-<stamp>.partial,
+ *                  fsync, never a link) into DEST/graph-store-<stamp>.partial,
  *                  with a sha256 per file recorded in backup-manifest.json.
+ *                  #1634: EXCEPT a file whose name and sha256 match the most recent
+ *                  published copy from the SAME UTC DAY, which is an APFS CLONE of that
+ *                  copy's file (a separate inode sharing its blocks; `clonedFrom` in the
+ *                  manifest). The source is re-read against its own manifest first; one
+ *                  bad file rejects it (`suspectSources`) and the tick byte-copies. The
+ *                  first copy of each UTC day clones nothing, so every chain has a full
+ *                  byte copy at its root. Never cloned from the checkpoint (hard links to
+ *                  the live store) or from an -UNVERIFIED / .partial copy.
  *   3. RELEASE     the checkpoint directory (hard links) is removed.
  *   4. VERIFY      (a) every file matches its recorded size + sha256; (b) every file has
  *                  ONE link (shares no inode with the live store); (c) a SEPARATE python
@@ -88,6 +96,49 @@ function sha256File(f) {
   return crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
 }
 
+const PUBLISHED = /^graph-store-(\d{8})T\d{6}Z$/;
+
+/**
+ * #1634 C1/C2/C3: the clone source for a copy stamped `stamp`, or none.
+ * Only the most recent PUBLISHED copy (graph-store-<stamp>, never -UNVERIFIED / .partial) from the
+ * SAME UTC DAY qualifies; the first copy of a day therefore has no source and is a full byte copy
+ * (the chain reset). The candidate is re-read against its own manifest (every listed file present,
+ * size and sha256 equal) BEFORE anything is cloned from it. One bad file rejects the whole copy:
+ * it is returned as `suspect` and nothing is cloned from it.
+ */
+function cloneSource(dest, stamp) {
+  const day = stamp.slice(0, 8);
+  const candidates = fs.readdirSync(dest).filter((n) => { const m = PUBLISHED.exec(n); return m && m[1] === day && n < `graph-store-${stamp}`; }).sort();
+  const name = candidates.at(-1);
+  if (!name) return { source: null, suspect: null };
+  const dir = path.join(dest, name);
+  let m;
+  try { m = JSON.parse(fs.readFileSync(path.join(dir, MANIFEST), 'utf8')); } catch { return { source: null, suspect: name }; }
+  const byName = new Map();
+  for (const f of m.files ?? []) {
+    const p = path.join(dir, f.name);
+    let st;
+    try { st = fs.statSync(p); } catch { return { source: null, suspect: name }; }
+    if (!st.isFile() || st.size !== f.size || sha256File(p) !== f.sha256) return { source: null, suspect: name };
+    byName.set(f.name, f);
+  }
+  return { source: { name, dir, byName }, suspect: null };
+}
+
+/**
+ * An APFS clone of `src` at `dst` (a separate inode sharing blocks), or false when the volume cannot clone.
+ * `cp -c` (clonefile(2)), because Node's COPYFILE_FICLONE_FORCE is ENOSYS on macOS (measured on v24.22.1,
+ * 2026-11-06) and plain COPYFILE_FICLONE may silently fall back to a byte copy, which would make
+ * `clonedFrom` a false label.
+ */
+function cloneFile(src, dst) {
+  if (fs.existsSync(dst)) return false;
+  const r = spawnSync('/bin/cp', ['-c', src, dst], { stdio: 'ignore' });
+  if (r.status === 0) return true;
+  try { fs.rmSync(dst, { force: true }); } catch { /* nothing written */ }
+  return false;
+}
+
 function fsyncDir(d) {
   try { const fd = fs.openSync(d, 'r'); try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); } } catch { /* best effort: not every fs allows it */ }
 }
@@ -149,10 +200,23 @@ export async function backupStore({ url, dest, python = DEFAULT_PYTHON, fetchImp
   const partial = `${final}.partial`;
   fs.mkdirSync(partial);
   const files = [];
+  const { source, suspect } = cloneSource(path.resolve(dest), stamp);
+  let clones = 0;
   try {
     for (const name of fs.readdirSync(cp.path).sort()) {
       const st = fs.lstatSync(path.join(cp.path, name));
       if (!st.isFile()) throw new Error(`unexpected non-file in checkpoint: ${name}`);
+      // #1634 C1: clone only when the verified same-day source holds this NAME with this checkpoint file's SHA256.
+      // The clone is taken from the SOURCE COPY, never from the checkpoint (its SSTs are hard links to the live store).
+      const prev = source?.byName.get(name);
+      if (prev && prev.size === st.size) {
+        const want = sha256File(path.join(cp.path, name));
+        if (want === prev.sha256 && cloneFile(path.join(source.dir, name), path.join(partial, name))) {
+          files.push({ name, size: prev.size, sha256: prev.sha256, clonedFrom: source.name });
+          clones++;
+          continue;
+        }
+      }
       files.push({ name, ...copyFileBytes(path.join(cp.path, name), path.join(partial, name)) });
     }
     const manifest = { takenAt: now().toISOString(), source: url, checkpoint: cp.path,
@@ -170,7 +234,7 @@ export async function backupStore({ url, dest, python = DEFAULT_PYTHON, fetchImp
   const target = v.ok ? final : `${final}-UNVERIFIED`;
   fs.renameSync(partial, target);
   fsyncDir(path.dirname(target));
-  return { ok: v.ok, path: target, checkpoint: { quads: cp.quads, commitSeq: cp.commitSeq, datasetId: cp.datasetId, path: cp.path, kept: keepCheckpoint },
+  return { ok: v.ok, path: target, clones, suspectSources: suspect ? [suspect] : [], checkpoint: { quads: cp.quads, commitSeq: cp.commitSeq, datasetId: cp.datasetId, path: cp.path, kept: keepCheckpoint },
     checks: v.checks,
     timings: { checkpointMs: tCheckpoint - t0, copyMs: tCopy - tCheckpoint, verifyMs: tVerify - tCopy } };
 }
