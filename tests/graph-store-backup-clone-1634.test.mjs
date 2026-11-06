@@ -396,6 +396,39 @@ test('K13m THE ALARM, THROUGH ITS ENTRY POINTS: monitor({dest, budgetBytes}) and
   }
 });
 
+// K13u (review 50318): when the unique read FAILS (a non-APFS DEST, no python), the budget verdict is UNKNOWN, never "within" and never a du-based "over". Not APFS-gated, so it
+// runs in CI: the reader is made to fail through GRAPH_STORE_SPACE_PYTHON, which uniqueBytesSync reads per call. Both entry points, because the operator reads monitor().
+test('K13u THE UNIQUE READ FAILS -> verdict UNKNOWN: overBudget null, uniqueBytes null with a reason, the retained figures stay, and the line never says "(within)" or "OVER BUDGET", through capacity() and monitor()', async () => {
+  const dest = fresh('k13u');
+  synthCopy(dest, '2026-10-28T00:00:00Z', [{ name: '0.sst', bytes: rnd(2 * MiB) }]);
+  synthCopy(dest, '2026-10-28T01:00:00Z', [{ name: '0.sst', bytes: rnd(2 * MiB) }]);
+  const copies = scanDest(dest); assert.equal(copies.filter((c) => c.state === 'verified').length, 2, 'CONTROL: both synthetic copies scan as verified');
+  const saved = process.env.GRAPH_STORE_SPACE_PYTHON;
+  process.env.GRAPH_STORE_SPACE_PYTHON = path.join(TMP, 'no-such-python');
+  try {
+    // budget BELOW the logical size (a du fallback would say OVER BUDGET) and ABOVE it (a default would say "(within)")
+    for (const budgetBytes of [1 * MiB, 64 * MiB]) {
+      let c; assert.doesNotThrow(() => { c = MON.capacity({ dest, copies, budgetBytes }); }, `capacity() reports, rather than throws, when the unique read fails (budget ${budgetBytes})`);
+      assert.equal(c.overBudget, null, `capacity(): overBudget is null when the unique read failed (budget ${budgetBytes}; got ${c.overBudget})`);
+      assert.equal(c.uniqueBytes, null, `capacity(): uniqueBytes is null (got ${c.uniqueBytes})`);
+      assert.ok(typeof c.uniqueNote === 'string' && c.uniqueNote.length > 0, `capacity(): the failure carries a reason (got ${c.uniqueNote})`);
+      assert.equal(typeof c.retainedBytes, 'number', 'capacity(): the retained figure is still reported');
+      assert.ok(c.logicalBytes >= 4 * MiB, `CONTROL: the logical size is real (got ${c.logicalBytes})`);
+      const line = MON.capacityLine(c);
+      assert.match(line, /UNAVAILABLE/, `the line says the unique figure is UNAVAILABLE: ${line}`);
+      assert.match(line, /verdict UNKNOWN/, `the line says the verdict is UNKNOWN: ${line}`);
+      assert.doesNotMatch(line, /\(within\)|OVER BUDGET/, `the line claims no verdict: ${line}`);
+      const m = MON.monitor({ dest, budgetBytes });
+      assert.ok(m.capacity, `monitor(): capacity is still reported, not nulled whole (line: ${m.capacityLine})`);
+      assert.equal(m.capacity.overBudget, null, `monitor(): overBudget is null (budget ${budgetBytes})`);
+      assert.match(m.capacityLine, /verdict UNKNOWN/, `monitor(): the operator's line says UNKNOWN: ${m.capacityLine}`);
+      assert.doesNotMatch(m.capacityLine, /\(within\)|OVER BUDGET/, `monitor(): the operator's line claims no verdict: ${m.capacityLine}`);
+    }
+  } finally {
+    if (saved === undefined) delete process.env.GRAPH_STORE_SPACE_PYTHON; else process.env.GRAPH_STORE_SPACE_PYTHON = saved;
+  }
+});
+
 test('K14 PRUNE FREES ONLY LAST-REFERENCE BYTES: deleting a copy whose files another retained copy clones frees its PRIVATE bytes (1 MiB), not its allocated size (13); deleting every holder frees all', { skip: !APFS && NO_APFS }, async () => {
   const H = 3600e3, D = 24 * H;
   const build = (label) => {
