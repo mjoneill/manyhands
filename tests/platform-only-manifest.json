@@ -33,5 +33,95 @@
     "file": "tests/roster-graph-1764.test.mjs",
     "name": "#1764 B3 — the real severance gate still REFUSES the old name after a refused same-key rename and a refused person→system change",
     "reason": "UNAVAILABLE: SEVERANCE_CHECK is not set to a severance-check script (the gate is private; a skip is not a pass)"
+  },
+  {
+    "file": "tests/graph-store-backup-clone-1634.test.mjs",
+    "name": "K1o ORACLE CONTROL (green today): the physical oracle says a cp -c clone has its source's blocks, and a byte copy and a rewritten clone do not",
+    "reason": "UNAVAILABLE: cp -c (APFS clone) does not work under the suite tmpdir (Linux CI has no APFS; a skip is not a pass; these rows are evidenced by macOS runs)"
+  },
+  {
+    "file": "tests/graph-store-backup-clone-1634.test.mjs",
+    "name": "K1 CLONE: a second tick the SAME UTC day clones the unchanged files from the first copy (clonedFrom = that copy, and PHYSICALLY its blocks), each a separate inode, nlink 1, bytes equal to the recorded sha",
+    "reason": "UNAVAILABLE: cp -c (APFS clone) does not work under the suite tmpdir (Linux CI has no APFS; a skip is not a pass; these rows are evidenced by macOS runs)"
+  },
+  {
+    "file": "tests/graph-store-backup-clone-1634.test.mjs",
+    "name": "K2 SOURCE RULE: every clonedFrom names a PUBLISHED VERIFIED copy in dest, never the checkpoint; nothing in the new copy shares an inode OR A BLOCK with the live store or the checkpoint",
+    "reason": "UNAVAILABLE: cp -c (APFS clone) does not work under the suite tmpdir (Linux CI has no APFS; a skip is not a pass; these rows are evidenced by macOS runs)"
+  },
+  {
+    "file": "tests/graph-store-backup-clone-1634.test.mjs",
+    "name": "K3 SHA GATE: a checkpoint file with the SAME NAME but DIFFERENT bytes than the previous copy is byte-copied, never cloned",
+    "reason": "UNAVAILABLE: cp -c (APFS clone) does not work under the suite tmpdir (Linux CI has no APFS; a skip is not a pass; these rows are evidenced by macOS runs)"
+  },
+  {
+    "file": "tests/graph-store-backup-clone-1634.test.mjs",
+    "name": "K4 NOT A SOURCE: a previous copy that is -UNVERIFIED, .partial or incomplete is never cloned from (the second tick clones nothing)",
+    "reason": "UNAVAILABLE: cp -c (APFS clone) does not work under the suite tmpdir (Linux CI has no APFS; a skip is not a pass; these rows are evidenced by macOS runs)"
+  },
+  {
+    "file": "tests/graph-store-backup-clone-1634.test.mjs",
+    "name": "K5 CHAIN RESET: the first copy of a UTC day clones NOTHING even with a verified copy from the day before; later copies clone from THAT day's chain only",
+    "reason": "UNAVAILABLE: cp -c (APFS clone) does not work under the suite tmpdir (Linux CI has no APFS; a skip is not a pass; these rows are evidenced by macOS runs)"
+  },
+  {
+    "file": "tests/graph-store-backup-clone-1634.test.mjs",
+    "name": "K6 CORRUPTION DOES NOT PROPAGATE: a previous copy with one rotted byte is never a clone source; the tick still publishes a VERIFIED copy, byte-identical to the original content, and names the bad source",
+    "reason": "UNAVAILABLE: cp -c (APFS clone) does not work under the suite tmpdir (Linux CI has no APFS; a skip is not a pass; these rows are evidenced by macOS runs)"
+  },
+  {
+    "file": "tests/graph-store-backup-clone-1634.test.mjs",
+    "name": "K7 SCRUB: scrubBackups re-reads every retained verified copy against its manifest, names the bad one, changes nothing; the CLI exits 1 on a bad copy and 0 on a clean dest",
+    "reason": "UNAVAILABLE: cp -c (APFS clone) does not work under the suite tmpdir (Linux CI has no APFS; a skip is not a pass; these rows are evidenced by macOS runs)"
+  },
+  {
+    "file": "tests/graph-store-backup-clone-1634.test.mjs",
+    "name": "K8 #1559 INVARIANTS ON A CLONED COPY: it verifies (bytes, one link per file, read-only open); and a file replaced by a HARD LINK to another copy FAILS the independence check",
+    "reason": "UNAVAILABLE: cp -c (APFS clone) does not work under the suite tmpdir (Linux CI has no APFS; a skip is not a pass; these rows are evidenced by macOS runs)"
+  },
+  {
+    "file": "tests/graph-store-backup-clone-1634.test.mjs",
+    "name": "K9 LAST REFERENCE: deleting the clone SOURCE copy leaves the cloned copy verifying (APFS keeps the shared blocks while any clone holds them)",
+    "reason": "UNAVAILABLE: cp -c (APFS clone) does not work under the suite tmpdir (Linux CI has no APFS; a skip is not a pass; these rows are evidenced by macOS runs)"
+  },
+  {
+    "file": "tests/graph-store-backup-clone-1634.test.mjs",
+    "name": "K10 PHYSICAL BYTES through creation AND deletion: A (8 MiB), B = clone of A, C = independent byte copy of A. {A,B} = 8; {A,B,C} = 16; delete A -> 16; delete B -> 8; delete C -> 0. Every set exact.",
+    "reason": "UNAVAILABLE: cp -c (APFS clone) does not work under the suite tmpdir (Linux CI has no APFS; a skip is not a pass; these rows are evidenced by macOS runs)"
+  },
+  {
+    "file": "tests/graph-store-backup-clone-1634.test.mjs",
+    "name": "K11 THE COUNTEREXAMPLE (reviewer, 14:37Z): two INDEPENDENT byte copies of the SAME content, each with a clone, are 16 MiB physically; one sha256 group would say 8",
+    "reason": "UNAVAILABLE: cp -c (APFS clone) does not work under the suite tmpdir (Linux CI has no APFS; a skip is not a pass; these rows are evidenced by macOS runs)"
+  },
+  {
+    "file": "tests/graph-store-backup-clone-1634.test.mjs",
+    "name": "K12 THE STATED LIMIT: a clone partly REWRITTEN after cloning is labelled CONSERVATIVE (exact:false) and never counted below the truth (8 + 2 MiB), never above the unshared sum (16)",
+    "reason": "UNAVAILABLE: cp -c (APFS clone) does not work under the suite tmpdir (Linux CI has no APFS; a skip is not a pass; these rows are evidenced by macOS runs)"
+  },
+  {
+    "file": "tests/graph-store-backup-clone-1634.test.mjs",
+    "name": "K13 THE ALARM USES PHYSICAL BYTES: copy 2 clones copy 1's three 4 MiB files plus 1 MiB new. unique = 13, logical = 25. Budget 20 -> NOT over (a `du` alarm would fire); budget 12 -> over. The line says \"unique\".",
+    "reason": "UNAVAILABLE: cp -c (APFS clone) does not work under the suite tmpdir (Linux CI has no APFS; a skip is not a pass; these rows are evidenced by macOS runs)"
+  },
+  {
+    "file": "tests/graph-store-backup-clone-1634.test.mjs",
+    "name": "K13m THE ALARM, THROUGH ITS ENTRY POINTS: monitor({dest, budgetBytes}) and `graph-store-backup-monitor.mjs --budget-bytes N` report the same unique figure and say OVER BUDGET only when unique bytes exceed it",
+    "reason": "UNAVAILABLE: cp -c (APFS clone) does not work under the suite tmpdir (Linux CI has no APFS; a skip is not a pass; these rows are evidenced by macOS runs)"
+  },
+  {
+    "file": "tests/graph-store-backup-clone-1634.test.mjs",
+    "name": "K14 PRUNE FREES ONLY LAST-REFERENCE BYTES: deleting a copy whose files another retained copy clones frees its PRIVATE bytes (1 MiB), not its allocated size (13); deleting every holder frees all",
+    "reason": "UNAVAILABLE: cp -c (APFS clone) does not work under the suite tmpdir (Linux CI has no APFS; a skip is not a pass; these rows are evidenced by macOS runs)"
+  },
+  {
+    "file": "tests/graph-store-backup-clone-1634.test.mjs",
+    "name": "K14p A PARTLY SHARED PRUNE REPORTS NO EXACT FREED FIGURE: A (64 MiB) pruned, B (A's clone, 4 MiB rewritten) kept -> freedBytes null, freedExact false, an estimate and a note, never a bare FREED line",
+    "reason": "UNAVAILABLE: cp -c (APFS clone) does not work under the suite tmpdir (Linux CI has no APFS; a skip is not a pass; these rows are evidenced by macOS runs)"
+  },
+  {
+    "file": "tests/graph-store-backup-clone-1634.test.mjs",
+    "name": "K14q BOTH READS EXACT -> freedExact true and freedBytes === freedEstimateBytes (the K14 world, with the new fields)",
+    "reason": "UNAVAILABLE: cp -c (APFS clone) does not work under the suite tmpdir (Linux CI has no APFS; a skip is not a pass; these rows are evidenced by macOS runs)"
   }
 ]

@@ -105,16 +105,22 @@ export function capacity({ dest, copies, intervalMs = DEFAULT_INTERVAL_MS, budge
   const newestBytes = verified.length ? dirBytes(path.join(dest, verified[verified.length - 1].name)) : 0;
   const retentionCount = steadyStateCount({ intervalMs, policy: DEFAULT_POLICY });
   const projectedBytes = retentionCount * newestBytes;
-  const u = uniqueBytesSync(copies.map((c) => path.join(dest, c.name)));
-  return { uniqueBytes: u.bytes, uniqueExact: u.exact, logicalBytes: retainedBytes, budgetBytes,
-    overBudget: budgetBytes != null && u.bytes > budgetBytes,
+  // The unique read needs APFS attributes. If it fails (a non-APFS DEST, no python), the unique figure and the budget
+  // verdict are UNKNOWN (null, with the reason) and every other figure is still reported: fail visible, not fail whole.
+  let u = null, uniqueNote = null;
+  try { u = uniqueBytesSync(copies.map((c) => path.join(dest, c.name))); } catch (e) { uniqueNote = e.message; }
+  return { uniqueBytes: u ? u.bytes : null, uniqueExact: u ? u.exact : null, uniqueNote, logicalBytes: retainedBytes, budgetBytes,
+    overBudget: budgetBytes == null ? false : (u ? u.bytes > budgetBytes : null),
     retainedBytes, retainedCopies: copies.length, newestBytes, retentionCount, projectedBytes, projected2xBytes: 2 * projectedBytes, freeBytes: freeBytes(dest) };
 }
 const mb = (n) => `${(n / 1e6).toFixed(1)} MB`;
 export function capacityLine(c) {
-  const unique = `CAPACITY unique (physical) ${mb(c.uniqueBytes)}${c.uniqueExact ? '' : ' (CONSERVATIVE: a partly rewritten clone is counted in full)'}, `
-    + `logical ${mb(c.logicalBytes)} (what du says); `
-    + (c.budgetBytes == null ? 'no budget set; ' : `budget ${mb(c.budgetBytes)}${c.overBudget ? ' -> OVER BUDGET' : ' (within)'}; `)
+  const uniq = c.uniqueBytes == null ? `CAPACITY unique (physical) UNAVAILABLE (${c.uniqueNote}), `
+    : `CAPACITY unique (physical) ${mb(c.uniqueBytes)}${c.uniqueExact ? '' : ' (CONSERVATIVE: a partly rewritten clone is counted in full)'}, `;
+  const verdict = c.budgetBytes == null ? 'no budget set; '
+    : c.overBudget == null ? `budget ${mb(c.budgetBytes)}: verdict UNKNOWN (unique bytes unavailable; logical bytes are not the measure); `
+    : `budget ${mb(c.budgetBytes)}${c.overBudget ? ' -> OVER BUDGET' : ' (within)'}; `;
+  const unique = uniq + `logical ${mb(c.logicalBytes)} (what du says); ` + verdict
     + 'the set\'s allocation, not volume free space. ';
   return unique + `retained ${mb(c.retainedBytes)} in ${c.retainedCopies} copies; newest verified copy ${mb(c.newestBytes)} (measured); `
     + `full retention ${c.retentionCount} copies (steady state of the rule, simulated) → ${mb(c.projectedBytes)} at the measured size, `
