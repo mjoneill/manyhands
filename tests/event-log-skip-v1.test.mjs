@@ -19,9 +19,10 @@
  *       segment) the old function returned the minimum seq and the new one returns the first valid line of the earliest-named segment. That is the documented behaviour; the row pins it so it cannot change silently.
  *   V4  oldestEvent's cache is invalidated: the first segment is pruned; an EARLIER segment appears (a backfill); the only segment goes from empty to one line; the first segment is rewritten (the
  *       oldest event redacted in place) at a different size, and at the same size with a different mtime. Each answer equals the old function's.
- *   V5  POSITIVE CONTROLS, so a skip that never fires cannot pass: on a 16-segment, ~48 MB log, a second `readEvents` at sinceSeq = the highest seq is more than 5x faster than the first full read
- *       and returns what the oracle returns; a cold `oldestEvent` is more than 10x faster than the old `readEvents(dir, {limit: 1})[0]` and returns what it returns.
- *   V5c/V5d DETERMINISTIC COST PROOFS (no clock): the later segments are made UNREADABLE (mode 000; stat still works, read does not). The old reader throws EACCES on such a log, so the control
+ *   V5a/V5b SCALE EQUIVALENCE on a 16-segment, ~48 MB log: a second `readEvents` at sinceSeq near the highest seq returns what the oracle returns, and a cold `oldestEvent` returns what the old
+ *       `readEvents(dir, {limit: 1})[0]` returns. Each prints its wall-clock ratio as a DIAGNOSTIC and asserts no ratio: a ratio on a shared runner is a flake (#1742: 4.9x against a 5x bar, outside
+ *       the diff). The skip is proved by V5c/V5d instead. Disabling the readEvents skip turns V5d red, and making oldestEvent parse the whole log turns V5c red.
+ *   V5c/V5d DETERMINISTIC COST PROOFS (no clock), THE POSITIVE CONTROLS, so a skip that never fires cannot pass: the later segments are made UNREADABLE (mode 000; stat still works, read does not). The old reader throws EACCES on such a log, so the control
  *       proves the files are unreadable; the new `oldestEvent` still answers from the first segment (it reads nothing past it), and a cached `readEvents` still answers when the unreadable segment
  *       cannot hold anything newer than sinceSeq (it is skipped, not read).
  *   V7  #684, folded in at the builder's question, and SEPARATE from the equivalence rows: one day-segment above the engine's spread-argument limit (150,000 events; the limit on this node is between 110k
@@ -294,22 +295,22 @@ const BIG = (() => {
 })();
 const timed = (f) => { const t = process.hrtime.bigint(); const r = f(); return { r, ms: Number(process.hrtime.bigint() - t) / 1e6 }; };
 
-test('V5a POSITIVE CONTROL, the skip fires: on a 16-segment, ~48 MB log a second readEvents at sinceSeq = the highest seq is more than 5x faster than the first full read and returns what the oracle returns', () => {
+test('V5a SCALE EQUIVALENCE: on a 16-segment, ~48 MB log a second readEvents at sinceSeq near the highest seq returns what the oracle returns (the ratio is a diagnostic; V5d proves the skip)', (t) => {
   const d = BIG(); const hi = 16 * 3300;
   const first = timed(() => NEW.readEvents(d, { sinceSeq: 0, limit: 5 }));
   const again = timed(() => NEW.readEvents(d, { sinceSeq: hi - 3 }));
   eq(again.r, OLD.readEvents(d, { sinceSeq: hi - 3 }), 'the skipping read returns exactly what the oracle returns');
   assert.equal(again.r.length, 3);
-  assert.ok(again.ms * 5 < first.ms, `the second read (${again.ms.toFixed(1)} ms) is >5x faster than the first (${first.ms.toFixed(1)} ms): the skip fires`);
+  t.diagnostic(`DIAGNOSTIC, not asserted: the first read took ${first.ms.toFixed(1)} ms and the second ${again.ms.toFixed(1)} ms (${(first.ms / again.ms).toFixed(1)}x)`);
 });
 
-test('V5b POSITIVE CONTROL, oldestEvent does not parse the log: a cold oldestEvent is more than 10x faster than the old readEvents(dir, {limit: 1})[0] and returns the same event', () => {
+test('V5b SCALE EQUIVALENCE: on the same log a cold oldestEvent returns what the old readEvents(dir, {limit: 1})[0] returns (the ratio is a diagnostic; V5c proves it reads only the first segment)', (t) => {
   assert.equal(typeof NEW.oldestEvent, 'function', 'the new module exports oldestEvent');
   const d = BIG();
   const oldWay = timed(() => OLD.readEvents(d, { limit: 1 })[0]);
   const newWay = timed(() => NEW.oldestEvent(d));
   eq(newWay.r, oldWay.r, 'the same event');
-  assert.ok(newWay.ms * 10 < oldWay.ms, `oldestEvent (${newWay.ms.toFixed(1)} ms) is >10x faster than the old way (${oldWay.ms.toFixed(1)} ms)`);
+  t.diagnostic(`DIAGNOSTIC, not asserted: the old way took ${oldWay.ms.toFixed(1)} ms and oldestEvent ${newWay.ms.toFixed(1)} ms (${(oldWay.ms / newWay.ms).toFixed(1)}x)`);
 });
 
 const unreadable = (files, body) => { for (const f of files) fs.chmodSync(f, 0o000); try { return body(); } finally { for (const f of files) fs.chmodSync(f, 0o644); } };
