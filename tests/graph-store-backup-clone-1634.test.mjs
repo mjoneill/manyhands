@@ -492,6 +492,53 @@ test('K15n CONTROL (green today, must stay green): THE ALARM STAYS QUIET when on
   });
 });
 
+// K15u / K15s pin the two rulings on C9 (commons 50407). (1) The unique read UNAVAILABLE with a budget set ALERTS, on its own line and code, never as "within"
+// and never as over: "ALERT BUDGET-UNKNOWN", exit 10, budgetUnknown true, budgetAlert NOT true (that stays "measured over"), alert true; no budget -> no alert.
+// (2) A freshness alert's exit code wins over 9/10, and every ALERT line prints, freshness first.
+const cliAt = (dest, budget, reader, nowIso, limitMin) => spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'graph-store-backup-monitor.mjs'), '--dest', dest, '--now', nowIso,
+  '--limit-min', String(limitMin), ...(budget == null ? [] : ['--budget-bytes', String(budget)])], { encoding: 'utf8', env: { ...process.env, GRAPH_STORE_SPACE_PYTHON: reader } });
+
+test('K15u RULING 1: the unique read UNAVAILABLE with a budget set ALERTS as BUDGET-UNKNOWN (own line, exit 10), never as within and never as over; no budget, no alert', () => {
+  const dest = twoCopies('k15u', 'p-');
+  const missing = path.join(TMP, 'no-such-python');
+  const saved = process.env.GRAPH_STORE_SPACE_PYTHON; process.env.GRAPH_STORE_SPACE_PYTHON = missing;
+  try {
+    const base = MON.monitor({ dest, ...FRESH });
+    assert.equal(base.verdict, 'OK', `CONTROL: freshness is OK, so any alert is the budget's (got ${base.verdict})`);
+    assert.equal(base.alert, false, 'no budget set: no alert, even with the unique read unavailable');
+    assert.notEqual(base.budgetUnknown, true, 'no budget set: budgetUnknown is not raised');
+    const m = MON.monitor({ dest, ...FRESH, budgetBytes: 64 * MiB });
+    assert.equal(m.capacity?.uniqueBytes, null, `CONTROL: the unique read really is unavailable (got ${m.capacity?.uniqueBytes})`);
+    assert.equal(m.budgetUnknown, true, `budgetUnknown is true when a budget is set and unique bytes are unavailable (got ${m.budgetUnknown})`);
+    assert.notEqual(m.budgetAlert, true, 'budgetAlert stays "measured over" only: an unmeasured set is not over');
+    assert.equal(m.alert, true, 'monitor().alert is true: an unknown budget must not look within');
+    assert.match(String(m.budgetLine), /^ALERT BUDGET-UNKNOWN\b/, `the budget line is "ALERT BUDGET-UNKNOWN …" (got ${m.budgetLine})`);
+    assert.doesNotMatch(String(m.budgetLine), /OVER-BUDGET/, 'never worded as over budget');
+    const r = cliAt(dest, 64 * MiB, missing, new Date(FRESH.nowMs).toISOString(), FRESH.limitMs / 60e3);
+    assert.equal(r.status, 10, `the CLI exits 10 for BUDGET-UNKNOWN (got ${r.status}; stdout ${r.stdout})`);
+    assert.ok(r.stdout.split('\n').some((l) => /^ALERT BUDGET-UNKNOWN\b/.test(l)), `the CLI prints the BUDGET-UNKNOWN line (stdout: ${r.stdout})`);
+    assert.ok(!r.stdout.split('\n').some((l) => /^ALERT OVER-BUDGET\b/.test(l)), 'and no OVER-BUDGET line');
+  } finally {
+    if (saved === undefined) delete process.env.GRAPH_STORE_SPACE_PYTHON; else process.env.GRAPH_STORE_SPACE_PYTHON = saved;
+  }
+});
+
+test('K15s RULING 2: a STALE copy and an over budget -> the freshness exit code (4) wins, and both ALERT lines print, freshness first', async () => {
+  await withFakeReader(async (reader) => {
+    const dest = twoCopies('k15s', 'p-');
+    const nowIso = '2026-10-29T12:00:00Z';   // a day and a half after the newest copy, against a 60-minute limit
+    const m = MON.monitor({ dest, nowMs: Date.parse(nowIso), limitMs: 60 * 60e3, budgetBytes: 1 * MiB });
+    assert.equal(m.verdict, 'STALE', `CONTROL: the newest copy is stale (got ${m.verdict})`);
+    assert.equal(m.budgetAlert, true, 'CONTROL: and the set is measured over budget');
+    const r = cliAt(dest, 1 * MiB, reader, nowIso, 60);
+    assert.equal(r.status, 4, `the freshness exit code wins (STALE 4; got ${r.status})`);
+    const alerts = r.stdout.split('\n').filter((l) => /^ALERT\b/.test(l));
+    assert.ok(alerts.length >= 2, `both ALERT lines print (got ${JSON.stringify(alerts)})`);
+    assert.match(alerts[0], /^ALERT STALE\b/, `freshness first (got ${alerts[0]})`);
+    assert.ok(alerts.some((l) => /^ALERT OVER-BUDGET\b/.test(l)), 'the OVER-BUDGET line prints too');
+  });
+});
+
 test('K14 PRUNE FREES ONLY LAST-REFERENCE BYTES: deleting a copy whose files another retained copy clones frees its PRIVATE bytes (1 MiB), not its allocated size (13); deleting every holder frees all', { skip: !APFS && NO_APFS }, async () => {
   const H = 3600e3, D = 24 * H;
   const build = (label) => {
