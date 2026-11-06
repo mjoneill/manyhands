@@ -44,8 +44,9 @@ function filesUnder(p, acc) {
   return acc;
 }
 
-/** Physical bytes held by every regular file under `paths`, each shared extent counted once. */
-export async function uniqueBytes(paths, { python = process.env.GRAPH_STORE_SPACE_PYTHON || '/usr/bin/python3' } = {}) {
+/** Physical bytes held by every regular file under `paths`, each shared extent counted once. Synchronous, so a
+ *  synchronous caller (the monitor) carries a number, never a Promise. */
+export function uniqueBytesSync(paths, { python = process.env.GRAPH_STORE_SPACE_PYTHON || '/usr/bin/python3' } = {}) {
   const seen = new Set();
   const files = [];
   for (const root of paths) for (const f of filesUnder(root, [])) {
@@ -71,3 +72,6 @@ export async function uniqueBytes(paths, { python = process.env.GRAPH_STORE_SPAC
   }
   return { bytes, exact };
 }
+
+/** The same figure for async callers. */
+export async function uniqueBytes(paths, opts = {}) { return uniqueBytesSync(paths, opts); }

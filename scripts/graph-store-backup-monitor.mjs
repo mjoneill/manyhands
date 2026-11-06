@@ -3,7 +3,7 @@
  * #1566 T4 — FRESHNESS MONITOR for the graph-store backups in DEST.
  *
  *   node scripts/graph-store-backup-monitor.mjs --dest DIR [--now ISO] [--interval-min 15]
- *        [--time-scale K] [--limit-min M] [--state FILE] [--store DIR] [--rehash] [--python PY] [--json]
+ *        [--time-scale K] [--limit-min M] [--state FILE] [--store DIR] [--rehash] [--python PY] [--budget-bytes N] [--json]
  *
  * It reports the AGE of the NEWEST VERIFIED copy and ALERTS when that age is beyond the
  * NOMINAL limit:
@@ -37,6 +37,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { uniqueBytesSync } from './graph-store-backup-space.mjs';
 import { scanDest, readState, STATE_FILE, steadyStateCount, destinationLine, DEFAULT_POLICY } from './graph-store-backup-schedule.mjs';
 import { verifyBackup, DEFAULT_PYTHON } from './graph-store-backup.mjs';
 
@@ -94,18 +95,28 @@ function dirBytes(p) {
   return n;
 }
 
-export function capacity({ dest, copies, intervalMs = DEFAULT_INTERVAL_MS }) {
+/** #1634 C7: the budget is judged on UNIQUE (physical) bytes, each clone extent counted once; `logicalBytes` is what `du`
+ *  would say. A set over budget only logically is NOT over budget. `exact:false` means a partly rewritten clone made
+ *  the unique figure conservative (never below the truth). budgetBytes null = no budget, never "over". */
+export function capacity({ dest, copies, intervalMs = DEFAULT_INTERVAL_MS, budgetBytes = null }) {
   let retainedBytes = 0;
   for (const c of copies) { try { retainedBytes += dirBytes(path.join(dest, c.name)); } catch { /* vanished */ } }
   const verified = copies.filter((c) => c.state === 'verified').sort((a, b) => a.atMs - b.atMs);
   const newestBytes = verified.length ? dirBytes(path.join(dest, verified[verified.length - 1].name)) : 0;
   const retentionCount = steadyStateCount({ intervalMs, policy: DEFAULT_POLICY });
   const projectedBytes = retentionCount * newestBytes;
-  return { retainedBytes, retainedCopies: copies.length, newestBytes, retentionCount, projectedBytes, projected2xBytes: 2 * projectedBytes, freeBytes: freeBytes(dest) };
+  const u = uniqueBytesSync(copies.map((c) => path.join(dest, c.name)));
+  return { uniqueBytes: u.bytes, uniqueExact: u.exact, logicalBytes: retainedBytes, budgetBytes,
+    overBudget: budgetBytes != null && u.bytes > budgetBytes,
+    retainedBytes, retainedCopies: copies.length, newestBytes, retentionCount, projectedBytes, projected2xBytes: 2 * projectedBytes, freeBytes: freeBytes(dest) };
 }
 const mb = (n) => `${(n / 1e6).toFixed(1)} MB`;
 export function capacityLine(c) {
-  return `CAPACITY retained ${mb(c.retainedBytes)} in ${c.retainedCopies} copies; newest verified copy ${mb(c.newestBytes)} (measured); `
+  const unique = `CAPACITY unique (physical) ${mb(c.uniqueBytes)}${c.uniqueExact ? '' : ' (CONSERVATIVE: a partly rewritten clone is counted in full)'}, `
+    + `logical ${mb(c.logicalBytes)} (what du says); `
+    + (c.budgetBytes == null ? 'no budget set; ' : `budget ${mb(c.budgetBytes)}${c.overBudget ? ' -> OVER BUDGET' : ' (within)'}; `)
+    + 'the set\'s allocation, not volume free space. ';
+  return unique + `retained ${mb(c.retainedBytes)} in ${c.retainedCopies} copies; newest verified copy ${mb(c.newestBytes)} (measured); `
     + `full retention ${c.retentionCount} copies (steady state of the rule, simulated) → ${mb(c.projectedBytes)} at the measured size, `
     + `${mb(c.projected2xBytes)} at 2x (ASSUMPTION: 2x growth, not measured); free on DEST's volume ${mb(c.freeBytes)} (measured). `
     + 'A projection at today\'s size, not a bound on growth; local hard-link checkpoints are not counted.';
@@ -113,7 +124,7 @@ export function capacityLine(c) {
 
 /** Side effects: reads DEST (and optionally re-verifies). Never throws for an unreadable DEST. */
 export function monitor({ dest, nowMs = Date.now(), intervalMs = DEFAULT_INTERVAL_MS, timeScale = 1, limitMs = null,
-  stateFile = null, store = null, rehash = false, python = DEFAULT_PYTHON }) {
+  stateFile = null, store = null, rehash = false, python = DEFAULT_PYTHON, budgetBytes = null }) {
   let copies;
   try { copies = scanDest(dest); }
   catch (e) {
@@ -128,7 +139,7 @@ export function monitor({ dest, nowMs = Date.now(), intervalMs = DEFAULT_INTERVA
   }
   const lastTick = Array.isArray(state.ticks) ? state.ticks[state.ticks.length - 1] : null;
   let cap = null, capLine;
-  try { cap = capacity({ dest, copies, intervalMs }); capLine = capacityLine(cap); } catch (e) { capLine = `CAPACITY UNAVAILABLE: ${e.message}`; }
+  try { cap = capacity({ dest, copies, intervalMs, budgetBytes }); capLine = capacityLine(cap); } catch (e) { capLine = `CAPACITY UNAVAILABLE: ${e.message}`; }
   return { ...r, capacity: cap, capacityLine: capLine, destinationLine: destinationLine(dest, store || lastTick?.checkpointDir || null),
     unverifiedCount: copies.filter((c) => c.state !== 'verified').length };
 }
@@ -150,6 +161,7 @@ function parseArgs(argv) {
     else if (k === '--rehash') a.rehash = true;
     else if (k === '--python') a.python = argv[++i];
     else if (k === '--json') a.json = true;
+    else if (k === '--budget-bytes') a.budgetBytes = num(k, argv[++i]);
     else throw new Error(`unknown arg: ${k}`);
   }
   if (!a.dest) throw new Error('--dest is required');
