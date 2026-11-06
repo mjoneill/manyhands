@@ -62,6 +62,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { backupStore, DEFAULT_PYTHON, MANIFEST } from './graph-store-backup.mjs';
+import { uniqueBytesSync } from './graph-store-backup-space.mjs';
 
 const MIN = 60_000, H = 60 * MIN, D = 24 * H;
 export const DEFAULT_POLICY = Object.freeze({ recentMs: 4 * H, hourlyMaxMs: 24 * H, dailyMaxMs: 14 * D, weeklyMaxMs: 56 * D });
@@ -210,10 +211,25 @@ function execute(root, victims, { dryRun, log, what }) {
   return { deleted, refused };
 }
 
+/** #1634 C8: freedBytes = uniqueBytes(dest's copies) before minus after, so deleting a copy whose files a retained copy
+ *  clones counts only its private bytes. It is the RETAINED SET's allocation, NOT volume free space: a Time Machine local
+ *  snapshot or any reference outside dest keeps blocks allocated after this counts them freed. Never report it as disk
+ *  reclaimed. The accounting never gates the prune: if it cannot be read, freedBytes is null and freedNote says why.
+ *  A dry run frees nothing, so freedBytes is null there too. */
 export function pruneDest({ dest, nowMs, policy = DEFAULT_POLICY, dryRun = false, log = () => {} }) {
-  const plan = planPrune({ copies: scanDest(dest), nowMs, policy });
+  const copies = scanDest(dest);
+  const plan = planPrune({ copies, nowMs, policy });
   for (const k of plan.keep) log(`PLAN keep copy ${k.name} — ${k.reasons.join(', ')}`);
-  return { ...plan, ...execute(dest, plan.delete, { dryRun, log, what: 'copy' }) };
+  const held = () => uniqueBytesSync(scanDest(dest).map((c) => path.join(dest, c.name))).bytes;
+  let before = null, freedNote = dryRun ? 'dry run: nothing freed' : null;
+  if (!dryRun && plan.delete.length) { try { before = held(); } catch (e) { freedNote = `accounting UNAVAILABLE: ${e.message}`; } }
+  const done = execute(dest, plan.delete, { dryRun, log, what: 'copy' });
+  let freedBytes = null;
+  if (!dryRun && !plan.delete.length) freedBytes = 0;
+  else if (before != null) { try { freedBytes = before - held(); } catch (e) { freedNote = `accounting UNAVAILABLE: ${e.message}`; } }
+  if (freedBytes != null) log(`FREED ${(freedBytes / 1e6).toFixed(1)} MB of the retained set's allocation (unique bytes; not volume free space)`);
+  else if (freedNote) log(`FREED unknown: ${freedNote}`);
+  return { ...plan, ...done, freedBytes, freedNote };
 }
 
 export function pruneCheckpoints({ dir, keep = DEFAULT_KEEP_CHECKPOINTS, dryRun = false, log = () => {} }) {
