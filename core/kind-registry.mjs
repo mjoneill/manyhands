@@ -484,6 +484,19 @@ export const KIND_DECLARATIONS = Object.freeze([
       + 'how every process knows the window is taken. Not a firing: a reservation whose send failed leaves no TendingMint.',
   },
   {
+    name: 'scrum:CeremonyBell', eventKind: null, collection: null,
+    createdBy: 'POST /api/ceremony-bells, by the ceremony bell tick before it posts an opener (#1815)',
+    definition: 'One ceremony slot (kind@slot) the board has taken responsibility for opening. Reserved before the post, '
+      + 'so every process knows the slot is taken; its state then says whether the opener posted, who was named, and '
+      + 'whether it landed inside the tolerance.',
+  },
+  {
+    name: 'scrum:CeremonyBellEvent', eventKind: null, collection: null,
+    createdBy: 'POST /api/ceremony-bells/events, by the ceremony bell tick (#1815)',
+    definition: 'One decision the bell tick made (fired, suppressed, missed, flagged, schedule loaded or refused), linked '
+      + 'to its bell. Carries the boot it belongs to: coverage starts at bootAt, and a gap means unknown, not quiet.',
+  },
+  {
     name: 'scrum:TendingMint', eventKind: null, collection: null,
     createdBy: 'the tending scheduler, on each firing',
     definition: 'One firing of a tending prompt, recorded with who was reachable at that moment. '

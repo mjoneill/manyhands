@@ -10,9 +10,10 @@
  * it is not gated on room silence. A busy room still has its ceremony.
  *
  * Bell key = `${kind}@${slotISO}`. A bell is due while slot <= now < slot + tolerance.
- * The key is reserved atomically (store.reserve) BEFORE the post and before any
- * await, so neither a race nor a crash between the two can post twice; the cost is that
- * a post that throws is not retried, and the after-window check flags it as missing.
+ * The key is reserved atomically (store.reserve) BEFORE the post: the check and the take
+ * are one call (an O_EXCL marker for a file, 201/409 under REST's write lock), so neither a
+ * race nor a crash between the two can post twice. The cost is that a post that throws is
+ * not retried, and the after-window check flags it as missing.
  */
 
 import crypto from 'node:crypto';
@@ -206,34 +207,46 @@ export async function ceremonyBellTick({ now, schedule, seatState, store, post, 
     const key = `${entry.kind}@${slot}`;
     const base = { type: 'bell', key, kind: entry.kind, slot, tickAt };
     const inWindow = nowMs < slotMs + BELL_TOLERANCE_MS;
-    const prior = store.get(key);
+    const prior = await store.get(key);
 
     if (inWindow) {
-      // Take the bell BEFORE any await: the check and the take are one call, so
-      // two ticks racing (in one process or two) cannot both pass. A crash after
-      // this line can never post twice; the after-window check flags it missing.
+      // `prior` is only a fast path. The decision is store.reserve, where the
+      // check and the take are one atomic call, so two ticks racing (in one
+      // process or two) cannot both pass, however long anything before it
+      // awaited. A crash after it can never post twice; the after-window
+      // check flags it missing.
       if (prior || !(await store.reserve(key, { state: 'attempted', at: tickAt }))) {
-        const p = prior || store.get(key) || {};
+        const p = prior || (await store.get(key)) || {};
         record({ ...base, outcome: 'suppressed-duplicate', opener: p.opener ?? null, openerSource: p.openerSource ?? null });
         continue;
       }
       const who = resolveOpener(await seatState(), nowMs);
       const outcome = who.openerSource === 'no-holder' ? 'fired-no-holder' : 'fired';
-      store.put(key, { state: 'attempted', at: tickAt, ...who });
+      await store.put(key, { state: 'attempted', at: tickAt, ...who });
+      let res;
       try {
-        const res = await post({ kind: 'opener', key, body: openerBody(entry, slotMs, who) });
-        store.put(key, { state: 'posted', at: tickAt, ...who, postId: res && res.id, createdAt: res && res.createdAt });
-        summary.posted++;
-        record({ ...base, outcome, ...who });
+        res = await post({ kind: 'opener', key, body: openerBody(entry, slotMs, who) });
       } catch (err) {
         record({ ...base, outcome: 'post-failed', ...who, error: String(err && err.message || err) });
+        continue;
       }
+      summary.posted++;
+      // The opener has landed. A failure to save that fact is its own outcome, never a failed post; the after-window
+      // check will then find no posted state, and its flag says only what the store knows.
+      const postId = res && res.id;
+      try {
+        await store.put(key, { state: 'posted', at: tickAt, ...who, postId, createdAt: res && res.createdAt });
+      } catch (err) {
+        record({ ...base, outcome: 'fired-state-not-saved', ...who, postId, error: String(err && err.message || err) });
+        continue;
+      }
+      record({ ...base, outcome, ...who });
       continue;
     }
 
     // After the window: check once whether the opener landed, and on time.
     if (!prior) {
-      store.put(key, { state: 'missed', at: tickAt, checked: true });
+      await store.put(key, { state: 'missed', at: tickAt, checked: true });
       record({ ...base, outcome: 'missed-past-window', opener: null, openerSource: null });
       continue;
     }
@@ -245,7 +258,7 @@ export async function ceremonyBellTick({ now, schedule, seatState, store, post, 
     let outcome;
     if (Number.isNaN(createdMs)) {
       outcome = 'flag-missing';
-      flag = `⚠️ The ${entry.kind} opener for ${hhmm(slotMs)}Z is missing: no opener post landed by ${hhmm(slotMs + BELL_TOLERANCE_MS)}Z.`;
+      flag = `⚠️ The ${entry.kind} opener for ${hhmm(slotMs)}Z is missing: no posted opener was recorded by ${hhmm(slotMs + BELL_TOLERANCE_MS)}Z.`;
     } else {
       const lagS = Math.round((createdMs - slotMs) / 1000);
       if (createdMs - slotMs <= BELL_TOLERANCE_MS) {
@@ -257,7 +270,7 @@ export async function ceremonyBellTick({ now, schedule, seatState, store, post, 
       who.lagSeconds = lagS;
     }
     // Commit the check before posting the flag, for the same reason as above.
-    store.put(key, { ...prior, checked: true, checkedAt: tickAt, checkOutcome: outcome });
+    await store.put(key, { ...prior, checked: true, checkedAt: tickAt, checkOutcome: outcome });
     if (flag) {
       try {
         await post({ kind: 'flag', key, body: flag });
@@ -270,4 +283,68 @@ export async function ceremonyBellTick({ now, schedule, seatState, store, post, 
     record({ ...base, outcome, ...who });
   }
   return summary;
+}
+
+// ── REST store and recorder (#1815 wiring step A) ─────────────────────────────
+
+/**
+ * The bell store over REST (POST/PATCH/GET /api/ceremony-bells), for production: REST decides the reservation under its
+ * write lock, so two processes' stores racing one key get one true and one false. Any answer other than the expected ones
+ * throws, so a refused write is never mistaken for a taken bell.
+ */
+export function restBellStore({ base, fetch: f = globalThis.fetch, by = 'board', timeoutMs = 30000 }) {
+  const call = async (method, route, body) => {
+    const r = await f(`${base}${route}`, { method, signal: AbortSignal.timeout(timeoutMs),
+      ...(body ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}) });
+    const text = await r.text();
+    let json = null; try { json = JSON.parse(text); } catch { /* not JSON */ }
+    return { status: r.status, json, text };
+  };
+  const refused = (what, r) => new Error(`ceremony bell ${what}: ${r.status} ${r.text.slice(0, 200)}`);
+  return {
+    async get(key) {
+      const r = await call('GET', `/api/ceremony-bells?key=${encodeURIComponent(key)}`);
+      if (r.status === 404) return undefined;
+      if (r.status !== 200) throw refused('read', r);
+      return r.json.value;
+    },
+    async reserve(key, value) {
+      const r = await call('POST', '/api/ceremony-bells', { key, value, by });
+      if (r.status === 201) return true;
+      if (r.status === 409) return false;
+      throw refused('reserve', r);
+    },
+    async put(key, value) {
+      const r = await call('PATCH', '/api/ceremony-bells', { key, value, by });
+      if (r.status !== 200) throw refused('write', r);
+    },
+  };
+}
+
+/**
+ * The tick's `record`, over REST (POST /api/ceremony-bells/events). Writes go one at a time, in order. A failed write is
+ * logged and counted, never thrown: the bell posts whether or not its diary does. The next write that lands carries
+ * `droppedSince` (the count since this boot's last landed write) and `firstDropAt`. Every event carries bootId and bootAt.
+ * Limit: the count lives in memory, so a restart before the next landed write loses it; the new boot's bootAt bounds that.
+ * `record.flush()` resolves when every write queued so far has settled.
+ */
+export function restRecorder({ base, bootId, bootAt, fetch: f = globalThis.fetch, by = 'board', log = (m) => console.error(m), timeoutMs = 30000 }) {
+  let chain = Promise.resolve();
+  let dropped = 0, firstDropAt = null;
+  const send = async (event) => {
+    const { key = null } = event;
+    const body = { key, by, event: { ...event, bootId, bootAt, ...(dropped ? { droppedSince: dropped, firstDropAt } : {}) } };
+    try {
+      const r = await f(`${base}/api/ceremony-bells/events`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
+      if (r.status !== 201) throw new Error(`${r.status} ${(await r.text()).slice(0, 200)}`);
+      dropped = 0; firstDropAt = null;
+    } catch (err) {
+      if (!dropped) firstDropAt = new Date().toISOString();
+      dropped++;
+      log(`[#1815] ceremony bell event not recorded (${dropped} since the last that landed): ${event.type}${event.outcome ? ` ${event.outcome}` : ''}${key ? ` ${key}` : ''}: ${err && err.message || err}`);
+    }
+  };
+  const record = (event) => { chain = chain.then(() => send(event)); return chain; };
+  record.flush = () => chain;
+  return record;
 }

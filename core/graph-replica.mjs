@@ -121,6 +121,11 @@ export const GRAPH_VOCABULARY = new Set([
   // window; `legacyClockWindow` above is #805's import and stays distinct.
   'scrum:shuffle', 'scrum:clockWindow',
   'scrum:tendingCycle',   // #1384 — the shuffle-bag cycle a firing was dealt in
+  // #1815 — the ceremony bell (core/ceremony-bell-graph.mjs)
+  'scrum:bellKey', 'scrum:ceremonyKind', 'scrum:slotAt', 'scrum:bellState', 'scrum:stateAt', 'scrum:opener',
+  'scrum:openerSource', 'scrum:openerPost', 'scrum:postCreatedAt', 'scrum:checked', 'scrum:checkedAt',
+  'scrum:checkOutcome', 'scrum:lagSeconds', 'scrum:ofBell', 'scrum:eventType', 'scrum:tickAt', 'scrum:bootId',
+  'scrum:bootAt', 'scrum:droppedSince', 'scrum:firstDropAt', 'scrum:detail',
   'scrum:ofPlaylist', 'scrum:evidencedBy', 'scrum:ofPrompt', 'scrum:order',
   'scrum:resolved', 'scrum:mentionsName', 'scrum:relatedTo', 'scrum:note',
   'scrum:status', 'scrum:blockedByPerson', 'scrum:blocks', 'scrum:mentionsCard',
@@ -153,6 +158,7 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:Card',
   'scrum:ReleaseCondition', 'scrum:Decision', 'scrum:MemoryVersion',
   'scrum:Memory', 'scrum:TendingClaimAttempt', 'scrum:TendingMint', 'scrum:TendingWindowReservation',
+  'scrum:CeremonyBell', 'scrum:CeremonyBellEvent',   // #1815
   'scrum:TendingState', 'scrum:TendingPlaylistVersion', 'scrum:TendingPlaylist',
   'scrum:TendingPromptVersion', 'scrum:TendingPrompt', 'scrum:Column',
   'scrum:Blocker', 'scrum:Commit', 'scrum:UnresolvedReference', 'scrum:Check',
@@ -730,6 +736,14 @@ export const TENDING_PREDICATES = Object.freeze({
   'scrum:declaredSeatRaw': 'literal',
   'scrum:heldByAttempt': 'iri',
   'scrum:reason': 'literal',
+  // #1815 — the ceremony bell. `opener` is the seat (an edge to its person node), `openerPost` the post it made (an edge
+  // to that Comment), `ofBell` an event's bell. Kind and slot are literals: no node exists for an edge to reach.
+  'scrum:bellKey': 'literal', 'scrum:ceremonyKind': 'literal', 'scrum:slotAt': 'literal', 'scrum:bellState': 'literal',
+  'scrum:stateAt': 'literal', 'scrum:opener': 'person', 'scrum:openerSource': 'literal', 'scrum:openerPost': 'iri',
+  'scrum:postCreatedAt': 'literal', 'scrum:checked': 'literal', 'scrum:checkedAt': 'literal', 'scrum:checkOutcome': 'literal',
+  'scrum:lagSeconds': 'literal', 'scrum:ofBell': 'iri', 'scrum:eventType': 'literal', 'scrum:tickAt': 'literal',
+  'scrum:bootId': 'literal', 'scrum:bootAt': 'literal', 'scrum:droppedSince': 'literal', 'scrum:firstDropAt': 'literal',
+  'scrum:detail': 'literal',
 });
 
 /**
@@ -2012,7 +2026,8 @@ export function projectEntity(store, e) {
       if (e.identifier) add(s, nn(SC + 'identifier'), lit(e.identifier));
       if (e.name) add(s, nn(SC + 'name'), lit(e.name));
       if (e['scrum:order'] != null) add(s, nn(S + 'order'), intLit(e['scrum:order']));
-    } else if (typeof t === 'string' && t.startsWith('scrum:Tending')) {
+    } else if (typeof t === 'string' && (t.startsWith('scrum:Tending') || t === 'scrum:CeremonyBell' || t === 'scrum:CeremonyBellEvent')) {
+      // #1815 — the ceremony bell rides the tending family's store and projection (TENDING_PREDICATES), under its own types.
       projectTending(store, e);
     } else if (t === 'scrum:Memory' || t === 'scrum:MemoryVersion') {
       projectMemory(store, e);

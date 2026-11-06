@@ -301,6 +301,8 @@ export const TENDING_TYPES = Object.freeze([
   'scrum:TendingSilence',        // the causal key a mint answers
   'scrum:TendingMint',           // one offer, attached to its silence
   'scrum:TendingWindowReservation',   // #1786 — the board may send ONE prompt per window (reserved before the send)
+  'scrum:CeremonyBell',          // #1815 — one per ceremony slot, reserved before the opener posts
+  'scrum:CeremonyBellEvent',     // #1815 — every decision the bell tick records, linked to its bell
   'scrum:TendingClaimAttempt',   // EVERY attempt — grants and refusals alike
   // Pause/resume as EVENTS, not only as current state. A mutable
   // `paused:false` erases the interval it was true, and archaeology then
