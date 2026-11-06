@@ -390,17 +390,29 @@ test('#1690 (G5) FAILS CLOSED: a receipt missing its sha or manifest hash, or un
 
 // ------------------------------------------------------------------- the real manifest and the real workflow
 
-test('#1690 (W1) the checked-in manifest lists exactly the seven platform-only tests, each with a reason, in a file that exists and names it', () => {
+test('#1690 (W1) the checked-in manifest lists exactly the 25 platform-only tests (seven before #1634, plus its 18 APFS clone rows), each with a reason, in a file that exists and names it', () => {
   assert.ok(fs.existsSync(REAL_MANIFEST), 'tests/platform-only-manifest.json must exist');
   const m = JSON.parse(fs.readFileSync(REAL_MANIFEST, 'utf8'));
-  assert.equal(m.length, 7, 'seven entries today: I1 to I5, RL and #1764 B3');
+  // The census is EXACT on purpose: a new platform skip must change this row, in review, not slip into CI. #1634 added 18 clone rows that need APFS
+  // (Linux CI has none). They are evidenced by macOS runs at named shas, NOT by CI. K0, K13b and K13u run in CI and must NOT appear here.
+  const BEFORE_1634 = ['#1764', 'I1', 'I2', 'I3', 'I4', 'I5', 'RL'];
+  const CLONE_1634 = ['K1o', 'K1', 'K2', 'K3', 'K4', 'K5', 'K6', 'K7', 'K8', 'K9', 'K10', 'K11', 'K12', 'K13', 'K13m', 'K14', 'K14p', 'K14q'];
+  assert.equal(m.length, BEFORE_1634.length + CLONE_1634.length, `25 entries today: I1 to I5, RL, #1764 B3, and #1634's 18 clone rows (got ${m.length})`);
   const ids = m.map((e) => e.name.split(' ')[0]).sort();
-  assert.deepEqual(ids, ['#1764', 'I1', 'I2', 'I3', 'I4', 'I5', 'RL']);
+  assert.deepEqual(ids, [...BEFORE_1634, ...CLONE_1634].sort());
+  assert.equal(new Set(m.map((e) => e.name)).size, m.length, 'no test is listed twice');
+  for (const e of m.filter((x) => CLONE_1634.includes(x.name.split(' ')[0]))) {
+    assert.equal(e.file, 'tests/graph-store-backup-clone-1634.test.mjs', `${e.name.slice(0, 20)}: a #1634 clone row lives in the clone file`);
+    assert.match(e.reason, /APFS/, `${e.name.slice(0, 20)}: its reason names the platform it needs`);
+  }
+  for (const runs of ['K0', 'K13b', 'K13u']) assert.ok(!ids.includes(runs), `${runs} runs in CI, so it must not be listed as platform-only`);
   for (const e of m) {
     assert.ok(e.reason && /\S/.test(e.reason), `${e.name}: a reason`);
     const file = path.join(REPO, e.file);
     assert.ok(fs.existsSync(file), `${e.file} exists`);
-    assert.ok(fs.readFileSync(file, 'utf8').includes(e.name), `${e.file} contains the test name "${e.name.slice(0, 40)}…"`);
+    // the manifest carries the RUNTIME name (copied from CI's receipt); a title written in single quotes holds an apostrophe as \' in the source text
+    const src = fs.readFileSync(file, 'utf8').replace(/\\'/g, "'");
+    assert.ok(src.includes(e.name), `${e.file} contains the test name "${e.name.slice(0, 40)}…"`);
   }
 });
 
