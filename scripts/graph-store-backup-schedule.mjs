@@ -224,16 +224,28 @@ export function pruneDest({ dest, nowMs, policy = DEFAULT_POLICY, dryRun = false
   // (a hand-run prune racing launchd) is never counted as negative freeing. Residual, stated: if that new copy CLONES a
   // copy deleted here, the shared bytes are counted freed although the new copy still holds them.
   const names = copies.map((c) => c.name);
-  const held = (ns) => uniqueBytesSync(ns.map((n) => path.join(dest, n))).bytes;
+  const held = (ns) => uniqueBytesSync(ns.map((n) => path.join(dest, n)));
+  // Review 50286: before - after of two CONSERVATIVE figures is not a bound on what was freed, in either direction.
+  // So when either read is inexact the freed figure is UNKNOWN: freedBytes null, the difference kept only as
+  // freedEstimateBytes with freedExact:false, and the log never states a bare FREED figure.
   let before = null, freedNote = dryRun ? 'dry run: nothing freed' : null;
   if (!dryRun && plan.delete.length) { try { before = held(names); } catch (e) { freedNote = `accounting UNAVAILABLE: ${e.message}`; } }
   const done = execute(dest, plan.delete, { dryRun, log, what: 'copy' });
-  let freedBytes = null;
-  if (!dryRun && !plan.delete.length) freedBytes = 0;
-  else if (before != null) { try { freedBytes = before - held(names.filter((n) => fs.existsSync(path.join(dest, n)))); } catch (e) { freedNote = `accounting UNAVAILABLE: ${e.message}`; } }
+  let freedBytes = null, freedEstimateBytes = null, freedExact = false;
+  if (!dryRun && !plan.delete.length) { freedBytes = 0; freedEstimateBytes = 0; freedExact = true; }
+  else if (before != null) {
+    try {
+      const after = held(names.filter((n) => fs.existsSync(path.join(dest, n))));
+      freedEstimateBytes = before.bytes - after.bytes;
+      freedExact = before.exact && after.exact;
+      if (freedExact) freedBytes = freedEstimateBytes;
+      else freedNote = 'partial sharing: a partly rewritten clone makes the before/after figures conservative, so their difference is not the bytes freed';
+    } catch (e) { freedNote = `accounting UNAVAILABLE: ${e.message}`; }
+  }
   if (freedBytes != null) log(`FREED ${(freedBytes / 1e6).toFixed(1)} MB of the retained set's allocation (unique bytes; not volume free space)`);
+  else if (freedEstimateBytes != null) log(`FREED unknown: estimate ${(freedEstimateBytes / 1e6).toFixed(1)} MB, not exact (${freedNote})`);
   else if (freedNote) log(`FREED unknown: ${freedNote}`);
-  return { ...plan, ...done, freedBytes, freedNote };
+  return { ...plan, ...done, freedBytes, freedEstimateBytes, freedExact, freedNote };
 }
 
 export function pruneCheckpoints({ dir, keep = DEFAULT_KEEP_CHECKPOINTS, dryRun = false, log = () => {} }) {
