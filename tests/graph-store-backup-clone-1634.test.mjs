@@ -429,6 +429,69 @@ test('K13u THE UNIQUE READ FAILS -> verdict UNKNOWN: overBudget null, uniqueByte
   }
 });
 
+// K15 THE BUDGET ALARM (the design block: "Budget ... with an ALARM when the measured unique bytes exceed it"; its row: "the budget alarm fires on unique bytes").
+// K13/K13m pinned only the capacity LINE; nothing alerted. These rows pin the ALARM. Proposed names (the builder may rename, the behaviour is the contract):
+//   monitor() returns budgetAlert (true only when unique bytes are MEASURED and exceed budgetBytes) and budgetLine, ONE line starting "ALERT OVER-BUDGET";
+//   when budgetAlert is true, monitor().alert is true; the CLI prints that line and exits NON-ZERO even when freshness is OK.
+// The budget is a PARAMETER (its value is still a proposal). NOT APFS-gated: the unique read goes through a stand-in attribute reader set by
+// GRAPH_STORE_SPACE_PYTHON (restored after), so these rows run in CI. OPEN, deliberately not pinned: what the alarm does when the unique read is UNAVAILABLE
+// with a budget set (K13u pins only that the line says UNKNOWN), and the exit code's precedence when a copy is also STALE.
+const FAKE_ATTRS = `#!/usr/bin/env python3
+# stand-in for the APFS attribute reader: files whose basename starts "shared-" form ONE whole-file clone family (private 0); every other file is wholly private
+import json, os, sys, zlib
+out = {}
+for p in json.load(sys.stdin):
+    st = os.stat(p); name = os.path.basename(p)
+    out[p] = {'cloneId': zlib.crc32(name.encode()), 'privateBytes': 0} if name.startswith('shared-') else {'cloneId': st.st_ino, 'privateBytes': st.st_blocks * 512}
+print(json.dumps(out))
+`;
+const withFakeReader = async (fn) => {
+  const f = path.join(TMP, 'fake-attrs.py'); fs.writeFileSync(f, FAKE_ATTRS); fs.chmodSync(f, 0o755);
+  const saved = process.env.GRAPH_STORE_SPACE_PYTHON; process.env.GRAPH_STORE_SPACE_PYTHON = f;
+  try { return await fn(f); } finally { if (saved === undefined) delete process.env.GRAPH_STORE_SPACE_PYTHON; else process.env.GRAPH_STORE_SPACE_PYTHON = saved; }
+};
+const FRESH = { nowMs: Date.parse('2026-10-28T01:01:00Z'), limitMs: 24 * 3600e3 };   // copies a minute old against a day's limit: freshness is OK, so only the budget can alert
+const twoCopies = (label, prefix) => {
+  const dest = fresh(label);
+  synthCopy(dest, '2026-10-28T00:00:00Z', [{ name: `${prefix}0.sst`, bytes: rnd(2 * MiB) }]);
+  synthCopy(dest, '2026-10-28T01:00:00Z', [{ name: `${prefix}0.sst`, bytes: rnd(2 * MiB) }]);
+  return dest;
+};
+const cli = (dest, budget, reader) => spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'graph-store-backup-monitor.mjs'), '--dest', dest, '--now', new Date(FRESH.nowMs).toISOString(),
+  '--limit-min', String(FRESH.limitMs / 60e3), ...(budget == null ? [] : ['--budget-bytes', String(budget)])], { encoding: 'utf8', env: { ...process.env, GRAPH_STORE_SPACE_PYTHON: reader } });
+
+test('K15 THE BUDGET ALARM FIRES on measured unique bytes above the budget: budgetAlert, an "ALERT OVER-BUDGET" line, alert true, and the CLI exits non-zero while freshness is OK', async () => {
+  await withFakeReader(async (reader) => {
+    const dest = twoCopies('k15', 'p-');   // two wholly private 2 MiB copies: unique ~4 MiB
+    const base = MON.monitor({ dest, ...FRESH });
+    assert.equal(base.verdict, 'OK', `CONTROL: freshness is OK, so any alert below is the budget's (got ${base.verdict}: ${base.line})`);
+    const m = MON.monitor({ dest, ...FRESH, budgetBytes: 1 * MiB });
+    assert.ok(m.capacity && m.capacity.uniqueBytes >= 4 * MiB, `CONTROL: the stand-in reader measured unique bytes (got ${m.capacity?.uniqueBytes}; ${m.capacityLine})`);
+    assert.equal(m.budgetAlert, true, `budgetAlert is true when unique bytes exceed the budget (got ${m.budgetAlert})`);
+    assert.match(String(m.budgetLine), /^ALERT OVER-BUDGET\b/, `budgetLine is one line starting "ALERT OVER-BUDGET" (got ${m.budgetLine})`);
+    assert.equal(m.alert, true, 'monitor().alert is true when the budget alarm fires, even with freshness OK');
+    const r = cli(dest, 1 * MiB, reader);
+    assert.ok(r.stdout.split('\n').some((l) => /^ALERT OVER-BUDGET\b/.test(l)), `the CLI prints the ALERT OVER-BUDGET line (stdout: ${r.stdout})`);
+    assert.notEqual(r.status, 0, `the CLI exits non-zero on the budget alarm (got ${r.status})`);
+  });
+});
+
+test('K15n CONTROL (green today, must stay green): THE ALARM STAYS QUIET when only LOGICAL bytes exceed the budget, and when no budget is set', async () => {
+  await withFakeReader(async (reader) => {
+    const dest = twoCopies('k15n', 'shared-');   // one clone family: unique ~2 MiB, logical ~4 MiB
+    const m = MON.monitor({ dest, ...FRESH, budgetBytes: 3 * MiB });
+    assert.ok(m.capacity && m.capacity.logicalBytes > 3 * MiB && m.capacity.uniqueBytes < 3 * MiB, `CONTROL: over the budget logically, under it physically (${m.capacityLine})`);
+    assert.notEqual(m.budgetAlert, true, 'no budget alarm on logical bytes');
+    assert.equal(m.alert, false, 'alert stays false');
+    const r = cli(dest, 3 * MiB, reader);
+    assert.equal(r.status, 0, `the CLI exits 0 (got ${r.status}; stdout ${r.stdout})`);
+    assert.ok(!/^ALERT\b/m.test(r.stdout), `no ALERT line (stdout: ${r.stdout})`);
+    const none = MON.monitor({ dest: twoCopies('k15n0', 'p-'), ...FRESH });
+    assert.notEqual(none.budgetAlert, true, 'no budget set: no budget alarm');
+    assert.equal(none.alert, false, 'no budget set: alert stays false');
+  });
+});
+
 test('K14 PRUNE FREES ONLY LAST-REFERENCE BYTES: deleting a copy whose files another retained copy clones frees its PRIVATE bytes (1 MiB), not its allocated size (13); deleting every holder frees all', { skip: !APFS && NO_APFS }, async () => {
   const H = 3600e3, D = 24 * H;
   const build = (label) => {
