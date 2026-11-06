@@ -82,6 +82,8 @@ export const PERSISTENT_STORES = [
     why: 'Who the seats are. Operator-supplied, gitignored on purpose (#1149); holds no board entities.' },
   { match: /^tending-config\.json$/, kind: 'CONFIG', env: null,
     why: 'Operator configuration for the tending loop. Inputs, not content.' },
+  { match: 'ceremony-schedule.json', kind: 'CONFIG', env: 'SCRUM_CEREMONY_SCHEDULE_FILE',
+    why: 'The ceremony bell\'s schedule (#1815): which ceremonies open themselves, at what weekday and UTC time, with the bell\'s own enabled flag. Read by the MCP on every tick, so an edit applies with no restart; an invalid entry refuses the whole schedule. The bell\'s state and events live in the graph, not here.' },
   { match: /^channel-config\.json$/, kind: 'CONFIG', env: 'SCRUM_CHANNEL_CONFIG_FILE',
     why: 'The channel delivery settings. With the collections unit on (production) a ONE-TIME IMPORT: boot copies it onto the graph node <https://scrumboard.local/config/channel> when none exists, and nothing reads or writes it after (#1784). With the unit off, REST reads and writes it live. The MCP scheduler never opens it; it reads REST.' },
   { match: /^whisper-(state|pool)\.json$/, kind: 'CONFIG', env: null,

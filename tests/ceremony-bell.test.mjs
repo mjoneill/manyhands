@@ -248,6 +248,24 @@ test('R10b: the after-window flag for that slot says what the store knows (nothi
   assert.doesNotMatch(flags(h)[0].body, /landed/, 'the store cannot know whether a post landed');
 });
 
+// R11 ──────────────────────────────────────────────────────────────────────
+// The bell is reserved before the seats are read, so a seat-state read that throws must not burn the ceremony, and it
+// must not claim nobody is declared: "I could not ask" is not "nobody holds the role".
+test('R11: seat state unreadable → it still posts, says the role holders could not be read, and names nobody', async () => {
+  const h = harness();
+  await ceremonyBellTick({ now: W(16, 0, 30), schedule: [REVIEW], store: h.store, record: (e) => h.events.push(e),
+    seatState: async () => { throw new Error('injected: seat state unreadable'); },
+    post: async (b) => { h.posts.push(b); return { id: 'p1', createdAt: W(16, 0, 31) }; } });
+  assert.equal(openers(h).length, 1, 'the ceremony still opens');
+  const body = openers(h)[0].body;
+  assert.match(body, /could not be read/i, body);
+  assert.doesNotMatch(body, /No scrum master or PO is declared/, 'it does not claim nobody is declared');
+  assert.doesNotMatch(body, /@/, 'and names nobody');
+  const e = h.events.find((x) => x.key && x.outcome && x.outcome.startsWith('fired'));
+  assert.equal(e?.openerSource, 'seat-state-unreadable', JSON.stringify(h.events));
+  assert.match(e?.seatStateError || '', /injected/);
+});
+
 // R8 / R9 ───────────────────────────────────────────────────────────────────
 function writeSched(file, entries) {
   fs.writeFileSync(file, JSON.stringify({ enabled: true, ceremonies: entries }));

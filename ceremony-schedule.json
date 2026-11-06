@@ -1,0 +1,7 @@
+{
+  "enabled": true,
+  "ceremonies": [
+    { "kind": "review", "weekday": 3, "time": "16:00" },
+    { "kind": "retro", "weekday": 3, "time": "17:00" }
+  ]
+}
