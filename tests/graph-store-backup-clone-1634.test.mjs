@@ -51,6 +51,7 @@ import { createGraphClient } from '../core/graph-client.mjs';
 import * as BK from '../scripts/graph-store-backup.mjs';
 import { planPrune, scanDest, pruneDest, stampOf } from '../scripts/graph-store-backup-schedule.mjs';
 import * as MON from '../scripts/graph-store-backup-monitor.mjs';
+import { uniqueBytesSync } from '../scripts/graph-store-backup-space.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BACKUP = path.join(ROOT, 'scripts', 'graph-store-backup.mjs');
@@ -418,6 +419,48 @@ test('K14 PRUNE FREES ONLY LAST-REFERENCE BYTES: deleting a copy whose files ano
   assert.equal(planPrune({ copies: scanDest(d2), nowMs: now2, policy }).delete.length, 2, 'CONTROL: R and H1 are both deleted');
   const r2 = await pruneDest({ dest: d2, nowMs: now2, policy });
   near(r2.freedBytes, 13 * MiB, 'deleting the last holders frees 13 MiB (12 shared, once, + 1 private), not 25', MiB / 2);
+});
+
+// K14p/K14q (review 50286, the isolated-volume check): before - after of two CONSERVATIVE figures is not a bound on what was freed. the review's specimen, on an isolated volume: a 64 MiB
+// copy A, a newer copy B cloned from it with 4 MiB rewritten, A pruned. The volume gained ~4 MiB; pruneDest at 401050a reported 67,112,960 bytes freed with no caveat. Contract (50290):
+// either read inexact -> freedBytes null, freedEstimateBytes a number, freedExact false, freedNote names partial sharing, no log line /^FREED \d/. Both exact -> freedExact true and
+// freedBytes === freedEstimateBytes. A non-null freedBytes with a flag beside it still fails K14p: a figure with a flag is a figure someone will quote.
+const partlySharedPair = (label) => {
+  const dest = fresh(label);
+  const a = synthCopy(dest, '2026-10-28T00:00:00Z', [{ name: '0.sst', bytes: rnd(64 * MiB) }]);
+  const b = synthCopy(dest, '2026-10-28T01:00:00Z', [{ name: '0.sst', cloneOf: path.join(a, '0.sst') }]);
+  const f = path.join(b, '0.sst'); const fd = fs.openSync(f, 'r+');
+  try { fs.writeSync(fd, rnd(4 * MiB), 0, 4 * MiB, 8 * MiB); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  fs.writeFileSync(path.join(b, BK.MANIFEST), JSON.stringify({ takenAt: '2026-10-28T01:00:00Z', files: [{ name: '0.sst', size: fs.statSync(f).size, sha256: sha(f) }] }, null, 2));
+  return { dest, a, b };
+};
+const ZERO = { recentMs: 0, hourlyMaxMs: 0, dailyMaxMs: 0, weeklyMaxMs: 0 };
+const NOW_P = Date.parse('2026-11-06T21:00:00Z');
+
+test('K14p A PARTLY SHARED PRUNE REPORTS NO EXACT FREED FIGURE: A (64 MiB) pruned, B (A\'s clone, 4 MiB rewritten) kept -> freedBytes null, freedExact false, an estimate and a note, never a bare FREED line', { skip: !APFS && NO_APFS }, async () => {
+  const { dest, a, b } = partlySharedPair('k14p');
+  const pre = uniqueBytesSync([a, b]);
+  assert.equal(pre.exact, false, `PRECONDITION: the specimen really is partly shared (exact:false), or this row tests nothing (${JSON.stringify(pre)})`);
+  assert.deepEqual(planPrune({ copies: scanDest(dest), nowMs: NOW_P, policy: ZERO }).delete.map((x) => x.name), [path.basename(a)], 'CONTROL: the rule deletes exactly A and keeps B');
+  const log = [];
+  const r = await pruneDest({ dest, nowMs: NOW_P, policy: ZERO, log: (x) => log.push(x) });
+  assert.ok(!fs.existsSync(a) && fs.existsSync(b), 'CONTROL: the prune itself ran (the accounting never gates it)');
+  assert.equal(r.freedBytes, null, `freedBytes must be null when either read is inexact (got ${r.freedBytes}; ~4 MiB was really freed)`);
+  assert.equal(r.freedExact, false, `freedExact is false (got ${r.freedExact})`);
+  assert.equal(typeof r.freedEstimateBytes, 'number', `freedEstimateBytes keeps before - after as a number (got ${r.freedEstimateBytes})`);
+  assert.match(String(r.freedNote), /partial/i, `freedNote names partial sharing (got ${r.freedNote})`);
+  assert.deepEqual(log.filter((l) => /^FREED \d/.test(l)), [], 'no log line states a bare FREED figure');
+  assert.ok(log.some((l) => /^FREED unknown/.test(l) && /not exact/.test(l)), `the log says FREED unknown with the estimate labelled "not exact" (log: ${JSON.stringify(log.filter((l) => /^FREED/.test(l)))})`);
+});
+
+test('K14q BOTH READS EXACT -> freedExact true and freedBytes === freedEstimateBytes (the K14 world, with the new fields)', { skip: !APFS && NO_APFS }, async () => {
+  const dest = fresh('k14q');
+  const a = synthCopy(dest, '2026-10-28T00:00:00Z', [{ name: '0.sst', bytes: rnd(4 * MiB) }]);
+  synthCopy(dest, '2026-10-28T01:00:00Z', [{ name: '0.sst', cloneOf: path.join(a, '0.sst') }, { name: '9.sst', bytes: rnd(MiB) }]);
+  const r = await pruneDest({ dest, nowMs: NOW_P, policy: ZERO });
+  assert.equal(r.freedExact, true, `freedExact is true when both reads are exact (got ${r.freedExact})`);
+  assert.equal(typeof r.freedBytes, 'number', 'freedBytes is a number');
+  assert.equal(r.freedBytes, r.freedEstimateBytes, `freedBytes === freedEstimateBytes (got ${r.freedBytes} vs ${r.freedEstimateBytes})`);
 });
 
 test('K13b CONTROL (green today): the retention rule keeps the FIRST copy of each UTC day (the chain root) and prunes the later hourlies, so a pruned hourly never takes a day\'s full byte copy with it', () => {
