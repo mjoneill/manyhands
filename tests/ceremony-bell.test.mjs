@@ -13,7 +13,7 @@
  *   (d) drop schedule change-detect   → R9 fails
  */
 
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -27,7 +27,10 @@ import {
   BELL_TOLERANCE_MS,
 } from '../core/ceremony-bell.mjs';
 
-const dir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'bell-'));
+// Every temp dir a row makes is removed when the file ends: the suite runner fails a file that leaves entries behind.
+const made = [];
+const dir = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'bell-')); made.push(d); return d; };
+after(() => { for (const d of made) fs.rmSync(d, { recursive: true, force: true }); });
 // 2026-11-11 is a Wednesday (UTC weekday 3).
 const W = (h, m = 0, s = 0) =>
   `2026-11-11T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.000Z`;
@@ -217,6 +220,32 @@ test('R7: an opener that never posted raises one "missing" flag after the window
   await h.tick(W(16, 7));
   assert.equal(flags(h).length, 1);
   assert.match(flags(h)[0].body, /missing|no opener/i);
+});
+
+// R10 ──────────────────────────────────────────────────────────────────────
+// Over REST the state write can fail AFTER the opener has posted. That is not a failed post: the room has its opener.
+function failingPostedPut(store) {
+  return { get: (k) => store.get(k), reserve: (k, v) => store.reserve(k, v),
+    put: (k, v) => { if (v.state === 'posted') throw new Error('injected: state write refused'); return store.put(k, v); } };
+}
+test('R10: the opener posts but its state write fails → one opener, recorded as fired-state-not-saved, never post-failed', async () => {
+  const h = harness();
+  await h.tick(W(16, 0, 30), { store: failingPostedPut(h.store) });
+  assert.equal(openers(h).length, 1, 'the opener posted');
+  const outs = h.events.map((e) => e.outcome);
+  assert.ok(!outs.includes('post-failed'), `a post that landed is not a failed post (${outs})`);
+  const e = h.events.find((x) => x.outcome === 'fired-state-not-saved');
+  assert.ok(e, `the lost state write is recorded (${outs})`);
+  assert.equal(e.postId, 'p1', 'with the post it lost');
+  assert.match(e.error, /state write refused/);
+});
+test('R10b: the after-window flag for that slot says what the store knows (nothing recorded), not that nothing landed', async () => {
+  const h = harness();
+  await h.tick(W(16, 0, 30), { store: failingPostedPut(h.store) });
+  await h.tick(W(16, 6));
+  assert.equal(flags(h).length, 1);
+  assert.match(flags(h)[0].body, /recorded/, flags(h)[0].body);
+  assert.doesNotMatch(flags(h)[0].body, /landed/, 'the store cannot know whether a post landed');
 });
 
 // R8 / R9 ───────────────────────────────────────────────────────────────────

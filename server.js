@@ -72,6 +72,7 @@ import { buildTendingEntities, person as personIri } from './core/tending-bootst
 import { resolvePool as resolveWhisperPool, bagState } from './core/tending-pool.mjs';
 import { mintId } from './core/tending-ids.mjs';
 import { windowReserved, reservationEntity, claimStateFor, grantEntity, claimHistory } from './core/whisper-graph.mjs';   // #1786
+import { parseBellKey, bellEntity, bellValue, findBell, unknownBellFields, bellEventEntity } from './core/ceremony-bell-graph.mjs';   // #1815
 import { claimWhisper, HOUR_MS } from './core/whisper-window.mjs';   // #1786 — the claim decision, unchanged, over graph state
 import { createPrompt, editPrompt, setEnabled, reorderPlaylist, removePrompt, setShuffle, readShuffle, assertSlug, readTendingConfigFrom, setTendingConfig, tendingConfigImported } from './core/tending-authoring.mjs';
 import { resolveProvenance } from './core/tending-provenance.mjs';
@@ -10020,6 +10021,68 @@ async function handleReserveWindow(req, res) {
     sendJSON(res, 500, { error: 'Failed to reserve the window' });
   }
 }
+// ── #1815 — the ceremony bell's reservation, state and events, as graph state decided under the write lock
+// (core/ceremony-bell-graph.mjs). Several MCP processes run the bell tick; REST is the one writer, so two ticks racing one
+// bell get one 201 and one 409, the same guarantee #1786 gives the tending window.
+async function readJSONBody(req) { const raw = await readBody(req); return raw ? JSON.parse(raw) : {}; }
+async function handleReserveBell(req, res) {
+  try {
+    const { key, value, by } = await readJSONBody(req);
+    if (!parseBellKey(key)) return sendJSON(res, 400, { error: 'key must be `${kind}@${slotISO}`, the slot a canonical ISO instant' });
+    const bad = unknownBellFields(value);
+    if (bad.length) return sendJSON(res, 400, { error: `unknown bell field(s): ${bad.join(', ')}` });
+    const out = await withWriteLock(async () => {
+      if (findBell(tendingEntities(), key)) return { already: true };
+      writeTendingEntities([bellEntity(key, value, new Date().toISOString())], { actor: by || 'board', op: 'create' });
+      return { reserved: true };
+    });
+    return out.already ? sendJSON(res, 409, { already: true, key }) : sendJSON(res, 201, { reserved: true, key });
+  } catch (e) {
+    console.error('POST /api/ceremony-bells:', e.message);
+    sendJSON(res, 500, { error: 'Failed to reserve the bell' });
+  }
+}
+async function handlePutBell(req, res) {
+  try {
+    const { key, value, by } = await readJSONBody(req);
+    if (!parseBellKey(key)) return sendJSON(res, 400, { error: 'key must be `${kind}@${slotISO}`' });
+    const bad = unknownBellFields(value);
+    if (bad.length) return sendJSON(res, 400, { error: `unknown bell field(s): ${bad.join(', ')}` });
+    const out = await withWriteLock(async () => {
+      const was = findBell(tendingEntities(), key);
+      if (!was) return { missing: true };
+      writeTendingEntities([bellEntity(key, value, was['scrum:occurredAt'])], { actor: by || 'board', op: 'update' });
+      return { ok: true };
+    });
+    return out.missing ? sendJSON(res, 404, { error: 'no such bell: a bell begins only with a reservation', key }) : sendJSON(res, 200, { ok: true, key });
+  } catch (e) {
+    console.error('PATCH /api/ceremony-bells:', e.message);
+    sendJSON(res, 500, { error: 'Failed to write the bell state' });
+  }
+}
+function handleGetBell(req, res) {
+  try {
+    const key = new URL(req.url, 'http://localhost').searchParams.get('key');
+    const was = key ? findBell(tendingEntities(), key) : null;
+    return was ? sendJSON(res, 200, { key, value: bellValue(was) }) : sendJSON(res, 404, { error: 'no such bell', key });
+  } catch (e) {
+    console.error('GET /api/ceremony-bells:', e.message);
+    sendJSON(res, 500, { error: 'Failed to read the bell' });
+  }
+}
+async function handleRecordBellEvent(req, res) {
+  try {
+    const { key, event, by } = await readJSONBody(req);
+    if (!event || typeof event !== 'object' || typeof event.type !== 'string') return sendJSON(res, 400, { error: 'event with a type is required' });
+    if (key !== undefined && key !== null && !parseBellKey(key)) return sendJSON(res, 400, { error: 'key must be `${kind}@${slotISO}`' });
+    const ent = bellEventEntity({ key: key || null, event, receivedAt: new Date().toISOString() });
+    await withWriteLock(async () => { writeTendingEntities([ent], { actor: by || 'board', op: 'create' }); });
+    return sendJSON(res, 201, { id: ent['@id'] });
+  } catch (e) {
+    console.error('POST /api/ceremony-bells/events:', e.message);
+    sendJSON(res, 500, { error: 'Failed to record the bell event' });
+  }
+}
 async function handleClaimWhisper(req, res) {
   try {
     const raw = await readBody(req);
@@ -13785,6 +13848,10 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/tending\/windows$/,      fn: (req, res) => handleReserveWindow(req, res) },   // #1786
   { method: 'POST',   re: /^\/api\/tending\/claims$/,       fn: (req, res) => handleClaimWhisper(req, res) },    // #1786
   { method: 'GET',    re: /^\/api\/tending\/claims$/,       fn: (req, res) => handleGetClaims(req, res) },       // #1786
+  { method: 'POST',   re: /^\/api\/ceremony-bells$/,       fn: (req, res) => handleReserveBell(req, res) },     // #1815
+  { method: 'PATCH',  re: /^\/api\/ceremony-bells$/,       fn: (req, res) => handlePutBell(req, res) },         // #1815
+  { method: 'GET',    re: /^\/api\/ceremony-bells$/,       fn: (req, res) => handleGetBell(req, res) },         // #1815
+  { method: 'POST',   re: /^\/api\/ceremony-bells\/events$/, fn: (req, res) => handleRecordBellEvent(req, res) }, // #1815
   { method: 'POST',   re: /^\/api\/tending-config$/,       fn: (req, res) => handleSetTendingConfig(req, res) },
   { method: 'POST',   re: /^\/api\/roster$/,               fn: (req, res) => handleSetRoster(req, res) },   // #506
   { method: 'GET',    re: /^\/api\/people$/,               fn: (req, res) => handleListPeople(req, res) },       // #619

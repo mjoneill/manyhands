@@ -56,6 +56,11 @@ const DECLARED_SINCE_GOLDEN = [
   'scrum:LabelAlias', 'scrum:aliasLabel', 'scrum:canonicalLabel',   // #1640 — label aliases as records
   'scrum:RosterSeat', 'scrum:RosterRoles', 'scrum:rosterOrder', 'scrum:kind', 'scrum:poSeat', 'scrum:color',   // #1764 — the configured roster
   'scrum:TendingWindowReservation',   // #1786 — the whisper send guard's per-window reservation
+  'scrum:CeremonyBell', 'scrum:CeremonyBellEvent',   // #1815 — the ceremony bell's reservation and its events,
+  'scrum:bellKey', 'scrum:ceremonyKind', 'scrum:slotAt', 'scrum:bellState', 'scrum:stateAt', 'scrum:opener', 'scrum:openerSource',
+  'scrum:openerPost', 'scrum:postCreatedAt', 'scrum:checked', 'scrum:checkedAt', 'scrum:checkOutcome', 'scrum:lagSeconds',
+  'scrum:ofBell', 'scrum:eventType', 'scrum:tickAt', 'scrum:bootId', 'scrum:bootAt', 'scrum:droppedSince', 'scrum:firstDropAt',
+  'scrum:detail',   // #1815 — and their predicates (core/ceremony-bell-graph.mjs)
   'scrum:ChannelConfig', 'scrum:channelMode', 'scrum:softMinMs', 'scrum:softMaxMs', 'scrum:hardTimeoutMs', 'scrum:tokenRingTimeoutMs',
   'scrum:bearerSeat', 'scrum:residentReplyWakesPerPairPerHour', 'scrum:configImportedFrom', 'scrum:configImportedAt',   // #1784 — the channel config node
 ];
