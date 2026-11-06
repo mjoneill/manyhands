@@ -108,6 +108,20 @@ test('R2: a restart (fresh store over the same file) does not post again', async
   assert.equal(openers(h).length, 1);
 });
 
+test('R2c: two ticks racing one bell over one store post once', async () => {
+  // The seat-state read is the await between "is it taken?" and "take it".
+  const h = harness();
+  const slowSeats = () => new Promise((r) => setTimeout(() => r(seats()), 20));
+  const tick = (store) => ceremonyBellTick({
+    now: W(16, 0, 30), schedule: [REVIEW], seatState: slowSeats, store,
+    post: async (b) => { h.posts.push(b); return { id: 'x', createdAt: W(16, 0, 30) }; },
+    record: (e) => h.events.push(e),
+  });
+  const other = fileBellStore(path.join(h.d, 'bell-state.json'));
+  await Promise.all([tick(h.store), tick(other)]);
+  assert.equal(openers(h).length, 1);
+});
+
 // R3 / R3b ──────────────────────────────────────────────────────────────────
 test('R3: SM unheld → the PO is named as opener, and the post says the SM role is unheld', async () => {
   const h = harness({ seatState: seats({ sm: null }) });
