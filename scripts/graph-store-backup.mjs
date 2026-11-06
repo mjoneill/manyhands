@@ -180,6 +180,18 @@ export function verifyBackup(dir, { python = DEFAULT_PYTHON } = {}) {
   return { ok: checks.every((c) => c.ok), checks, observed };
 }
 
+/** Re-read every retained verified copy in `dest` against its own manifest. Changes nothing. */
+export async function scrubBackups({ dest, python = DEFAULT_PYTHON }) {
+  const checked = [];
+  const bad = [];
+  for (const name of fs.readdirSync(dest).filter((n) => PUBLISHED.test(n)).sort()) {
+    const v = verifyBackup(path.join(dest, name), { python });
+    checked.push(name);
+    if (!v.ok) bad.push({ name, problems: v.checks.filter((c) => !c.ok).map((c) => `${c.name}: ${c.detail}`) });
+  }
+  return { checked, bad };
+}
+
 /** Take a checkpoint from the executor at `url`, copy it to an independent dir under `dest`, verify. */
 export async function backupStore({ url, dest, python = DEFAULT_PYTHON, fetchImpl = fetch, now = () => new Date(), keepCheckpoint = false }) {
   if (!dest) throw new Error('dest required');
@@ -246,6 +258,7 @@ function parseArgs(argv) {
     if (k === '--url') a.url = argv[++i];
     else if (k === '--dest') a.dest = argv[++i];
     else if (k === '--verify') a.verify = argv[++i];
+    else if (k === '--scrub') a.scrub = argv[++i];
     else if (k === '--python') a.python = argv[++i];
     else throw new Error(`unknown arg: ${k}`);
   }
@@ -260,7 +273,12 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
     console.log(JSON.stringify({ verified: v.ok, path: a.verify, checks: v.checks }));
     process.exit(v.ok ? 0 : 1);
   }
-  if (!a.url || !a.dest) { console.error('usage: graph-store-backup.mjs --url URL --dest DIR | --verify DIR'); process.exit(2); }
+  if (a.scrub) {
+    scrubBackups({ dest: a.scrub, python: a.python }).then((s) => { console.log(JSON.stringify(s)); process.exit(s.bad.length ? 1 : 0); },
+      (e) => { console.error(`SCRUB FAILED: ${e.message}`); process.exit(1); });
+  } else {
+  if (!a.url || !a.dest) { console.error('usage: graph-store-backup.mjs --url URL --dest DIR | --verify DIR | --scrub DIR'); process.exit(2); }
   backupStore(a).then((r) => { console.log(JSON.stringify(r)); process.exit(r.ok ? 0 : 1); },
     (e) => { console.error(`BACKUP FAILED: ${e.message}`); process.exit(1); });
+  }
 }
