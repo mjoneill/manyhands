@@ -187,6 +187,20 @@ export function decisionsFromRows(rows, { limit } = {}) {
 // ── entity shape → intention payload (the replica's projection rules) ─────────
 
 const asPerson = (v) => (String(v).startsWith('http') ? String(v) : PERSON_BASE + v);   // = projectMemory / projectDecision
+// #1821 — a person field holds a SEAT KEY (or a clean person IRI), never prose. Unchecked,
+// prose went raw into the person lookup's VALUES clause: the executor refused the parse (400)
+// and the read path reported it as UNAVAILABLE, so the caller saw an outage for its own bad
+// input. Refusing here, before any executor call, gives a 400 that names the field.
+const SEAT_KEY = /^[a-z0-9][a-z0-9_-]{0,63}$/;   // = core/refusal-record.mjs SEAT_RE: one shape for a seat key
+const IRI_UNSAFE = /[\s<>"{}|\\^`]/;
+/** @returns {string|null} why `value` is not a usable person reference for `field`, or null. */
+export function personRefRefusal(field, value) {
+  const v = String(value ?? '');
+  const key = v.startsWith(PERSON_BASE) ? v.slice(PERSON_BASE.length) : v.startsWith('http') ? null : v;
+  const ok = key === null ? !IRI_UNSAFE.test(v) : SEAT_KEY.test(key);
+  return ok ? null : `${field} must be a seat key (lowercase letters, digits, '_' or '-'), not ${JSON.stringify(v.slice(0, 80))}`;
+}
+const PERSON_FIELDS = ['scrum:owner', 'author', 'scrum:decidedBy', 'scrum:declaredSeat'];
 const asDecision = (t) => (String(t).startsWith('http') ? String(t) : DECISION_BASE + t);
 const str = (v) => (v === undefined || v === null ? null : String(v));
 const opIri = (tag) => `urn:ex:op/logborn/${tag}/${crypto.randomUUID()}`;
@@ -465,7 +479,7 @@ export function createLogbornUnit({ slice, loadIri, audit = stderrPersonAudit })
     if (!entities.length) return { intention, unresolvedReferences: [] };
     // only the person IRIs this write references: a unit write's plan.create is empty by
     // construction, so the identities it does not name cannot change its plan or its report
-    const refs = [...new Set(entities.flatMap((e) => ['scrum:owner', 'author', 'scrum:decidedBy', 'scrum:declaredSeat']
+    const refs = [...new Set(entities.flatMap((e) => PERSON_FIELDS
       .map((k) => e[k]).filter((v) => typeof v === 'string').map(asPerson)))];
     if (!refs.length) return { intention, unresolvedReferences: [] };
     const values = `VALUES ?s { ${refs.map((r) => `<${r}>`).join(' ')} }`;
@@ -486,6 +500,12 @@ export function createLogbornUnit({ slice, loadIri, audit = stderrPersonAudit })
   async function write(intention0) {
     const fenced = await slice.fence();
     if (fenced) return { outcome: 'UNAVAILABLE', reason: fenced };
+    for (const e of entitiesOfIntention(intention0)) {
+      for (const k of PERSON_FIELDS) {
+        const why = typeof e[k] === 'string' ? personRefRefusal(k.replace(/^scrum:/, ''), e[k]) : null;
+        if (why) return { outcome: 'REJECTED', reason: why, opId: intention0.opId, kind: intention0.kind, actor: intention0.actor };
+      }
+    }
     let intention, unresolvedReferences;
     try { ({ intention, unresolvedReferences } = await planPeople(intention0)); } catch (e) {
       if (e?.code === 'GRAPH_EXECUTOR_UNAVAILABLE') return { outcome: 'UNAVAILABLE', reason: e.message };

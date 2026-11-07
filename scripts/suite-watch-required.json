@@ -129,6 +129,7 @@
   "tests/origin-outcome-settle-1629-s3.test.mjs",
   "tests/origin-slice4-1744-part2.test.mjs",
   "tests/origin-slice4-1744.test.mjs",
+  "tests/person-ref-1821.test.mjs",
   "tests/post-import-referenced-1626.test.mjs",
   "tests/post-redaction-r4a-addendum.test.mjs",
   "tests/post-redaction-r4a.test.mjs",
