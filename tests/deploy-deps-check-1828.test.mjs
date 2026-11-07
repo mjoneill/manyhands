@@ -105,7 +105,8 @@ test('#1828 SEAM — deploy.sh REFUSES when the installed tree is behind its loc
   assert.notEqual(r.status, 0, 'a green deploy here is the bug');
   assert.match(r.stderr, /MISMATCH a: lockfile 2\.1\.6, installed 2\.0\.12/);
   assert.match(r.stderr, /npm ci/, 'the refusal says what to run');
-  assert.match(r.stderr, /stop the services/, 'and says to stop the services first: npm ci under live services broke REST for ~1 min on 2026-11-07');
+  assert.match(r.stderr, /launchctl bootout gui\/\$\(id -u\)\/com\.scrumboard\.rest/, 'the jobs are KeepAlive: the text names bootout, not stop (npm ci under live services broke REST for ~1 min on 2026-11-07)');
+  assert.match(r.stderr, /launchctl bootstrap gui\/\$\(id -u\) ~\/Library\/LaunchAgents\/com\.scrumboard\.mcp\.plist/, 'and reloads them before the deploy, whose kickstart needs them loaded');
   assert.ok(!existsSync(join(fx.serve, 'DEPLOYED-SHA')), 'nothing was swapped in');
 });
 
@@ -136,5 +137,16 @@ test('#1828 SEAM — ⛔ REVIEW REGRESSION: an UNCOMMITTED lockfile that matches
   const r = exportRun(fx);                                   // `export` mode has no dirty-clone refusal
   assert.notEqual(r.status, 0, 'exporting the 2.1.6 lockfile over 2.0.12 packages is the bug');
   assert.match(r.stderr, /MISMATCH a: lockfile 2\.1\.6, installed 2\.0\.12/);
+  assert.ok(!existsSync(join(fx.serve, 'DEPLOYED-SHA')));
+});
+
+test('#1828 SEAM — a checker that CRASHES (exit 1, no MISMATCH line) is "could NOT check", not a mismatch', () => {
+  const fx = fixtureClone('2.1.6');
+  writeFileSync(join(fx.clone, 'scripts', 'deploy-deps-check.mjs'), 'this is not javascript (\n');
+  spawnSync('git', ['-C', fx.clone, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qam', 'broken check'], { encoding: 'utf8' });
+  const r = exportRun(fx);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /could NOT check/);
+  assert.doesNotMatch(r.stderr, /do not match/);
   assert.ok(!existsSync(join(fx.serve, 'DEPLOYED-SHA')));
 });

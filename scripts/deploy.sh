@@ -117,6 +117,11 @@ export_tree() {
   # The positive line is required too: a check that exits 0 having printed
   # nothing has not said the tree matches, and silence is not an all-clear.
   case "$deps_out" in *"packages match the lockfile"*) : ;; *) [ "$deps_rc" -eq 0 ] && deps_rc=2 && deps_out="deps: CANNOT CHECK — the check printed no verdict: $deps_out" ;; esac
+  # A failure that names no package (node crashed, a syntax error) is not a
+  # mismatch either: it is a check that could not run.
+  if [ "$deps_rc" -ne 0 ] && [ "$deps_rc" -ne 2 ]; then
+    case "$deps_out" in *MISMATCH*) : ;; *) deps_rc=2; deps_out="deps: CANNOT CHECK — the check exited without naming a mismatch: $deps_out" ;; esac
+  fi
   if [ "$deps_rc" -eq 2 ]; then
     rm -rf "$staging"
     printf '%s\n' "$deps_out" | sed 's/^/   /' >&2
@@ -128,10 +133,15 @@ export_tree() {
     die "the clone's installed packages do not match the package-lock.json being deployed — production untouched.
    ⚠️ The running services load from $CLONE/node_modules (it is linked, and REST imports from it
    at request time), and \`npm ci\` deletes that tree before reinstalling. Running it under live
-   services makes them fail until it finishes (measured 2026-11-07). So:
-     1. stop the services that run from $SERVE
-     2. (cd $CLONE && npm ci)
-     3. deploy again (it restarts them)"
+   services makes them fail until it finishes (measured 2026-11-07). Both jobs are KeepAlive, so
+   \`launchctl stop\` is undone by launchd within seconds: UNLOAD them, install, LOAD them, deploy:
+     launchctl bootout gui/\$(id -u)/com.scrumboard.rest
+     launchctl bootout gui/\$(id -u)/com.scrumboard.mcp
+     (cd $CLONE && npm ci)
+     launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/com.scrumboard.rest.plist
+     launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/com.scrumboard.mcp.plist
+     then run this deploy again (its restart needs both jobs loaded).
+   Any other job that runs from $SERVE (launchctl list | grep scrumboard) also loads from that tree."
   fi
   printf '%s\n' "$deps_out" | sed 's/^/   /'
   ln -s "$CLONE/node_modules" "$staging/node_modules"
