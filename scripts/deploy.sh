@@ -125,8 +125,7 @@ export_tree() {
   if [ "$deps_rc" -eq 2 ]; then
     rm -rf "$staging"
     printf '%s\n' "$deps_out" | sed 's/^/   /' >&2
-    die "could NOT check the installed packages against the lockfile being deployed — production untouched. A deploy that cannot look does not guess.
-   Note: lsof printing ANY warning (an unreadable mount, say) with no holders is treated as could-not-check: it fails closed. Read the lines above."
+    die "could NOT check the installed packages against the lockfile being deployed — production untouched. A deploy that cannot look does not guess."
   fi
   if [ "$deps_rc" -ne 0 ]; then
     rm -rf "$staging"
