@@ -117,6 +117,11 @@ export_tree() {
   # The positive line is required too: a check that exits 0 having printed
   # nothing has not said the tree matches, and silence is not an all-clear.
   case "$deps_out" in *"packages match the lockfile"*) : ;; *) [ "$deps_rc" -eq 0 ] && deps_rc=2 && deps_out="deps: CANNOT CHECK — the check printed no verdict: $deps_out" ;; esac
+  if [ "$deps_rc" -eq 2 ]; then
+    rm -rf "$staging"
+    printf '%s\n' "$deps_out" | sed 's/^/   /' >&2
+    die "could NOT check the installed packages against the lockfile being deployed — production untouched. A deploy that cannot look does not guess."
+  fi
   if [ "$deps_rc" -ne 0 ]; then
     rm -rf "$staging"
     printf '%s\n' "$deps_out" | sed 's/^/   /' >&2

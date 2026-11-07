@@ -125,6 +125,8 @@ test('#1828 SEAM — ⛔ a check that exits 0 WITHOUT its verdict line is refuse
   const r = exportRun(fx);
   assert.notEqual(r.status, 0, 'a silent check must not let the deploy through');
   assert.match(r.stderr, /printed no verdict/);
+  assert.match(r.stderr, /could NOT check/, 'a check that could not run is not reported as a mismatch');
+  assert.doesNotMatch(r.stderr, /do not match/);
   assert.ok(!existsSync(join(fx.serve, 'DEPLOYED-SHA')));
 });
 
