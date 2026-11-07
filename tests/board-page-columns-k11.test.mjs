@@ -67,7 +67,7 @@ const names = (cols) => Object.fromEntries((cols ?? []).map((c) => [c.id, c.name
 const headerText = (page, id) => page.$eval(`.column-header[data-column-id="${id}"] .column-name-text`, (e) => e.textContent.trim()).catch(() => null);
 
 async function rename(page, id, newName) {
-  await page.click(`.column-header[data-column-id="${id}"] .column-name-text`, { clickCount: 2 });
+  await page.click(`.column-header[data-column-id="${id}"] .column-name-text`, { count: 2 });
   await page.waitForSelector(`.column-header[data-column-id="${id}"] .column-rename-input`, { timeout: 4000 });
   await page.keyboard.down('Control'); await page.keyboard.press('KeyA'); await page.keyboard.up('Control');
   await page.$eval(`.column-header[data-column-id="${id}"] .column-rename-input`, (el) => { el.value = ''; });
