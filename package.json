@@ -19,7 +19,7 @@
     "@langchain/langgraph-checkpoint-validation": "1.1.1",
     "acorn": "8.18.0",
     "jsdom": "^29.1.1",
-    "puppeteer": "^24.0.0"
+    "puppeteer": "^25.16.0"
   },
   "name": "manyhands",
   "overrides": {
