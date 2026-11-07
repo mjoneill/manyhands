@@ -94,7 +94,9 @@ What is durable enough to state: **the board server has no runtime dependencies 
 
 One decision is worth stating rather than hiding in a lockfile:
 
-**`package.json` contains an `overrides` entry forcing `@hono/node-server` to `^2.0.5`.** The MCP SDK — at its latest published version — depends on a 1.x line carrying a path-traversal advisory in its static-file middleware. There is no SDK release that resolves it, so the choices were: ship with known advisories, or override the transitive dependency ourselves.
+**`package.json` contains an `overrides` entry forcing `@hono/node-server` to `^2.1.3`.** The MCP SDK depends on a 1.x line carrying a path-traversal advisory in its static-file middleware. There is no SDK release that resolves it, so the choices were: ship with known advisories, or override the transitive dependency ourselves.
+
+The floor was `^2.0.5` until 2026-11-07, when a second static-file advisory, [GHSA-rmxm-3fg6-px4f](https://github.com/advisories/GHSA-rmxm-3fg6-px4f) (`serveStatic` decodes the request path twice, so a crafted path can bypass middleware), was found to cover `>= 1.19.10, < 2.1.3`, which included the version we had pinned. 2.1.3 is the first patched release. Our own code never calls `serveStatic`; we raised the floor anyway, because an override that a published advisory sits inside is not doing its job.
 
 We overrode it, and verified rather than assumed: the **full** suite passes on a **fresh `npm ci`** with the override applied, including every test that exercises the SDK's HTTP transport.
 
