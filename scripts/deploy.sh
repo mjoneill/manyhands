@@ -146,6 +146,45 @@ export_tree() {
   printf '%s\n' "$deps_out" | sed 's/^/   /'
   ln -s "$CLONE/node_modules" "$staging/node_modules"
 
+  # #1831 — ⛔ A SERVICE THIS DEPLOY DOES NOT RESTART IS STILL RUNNING FROM
+  # `.previous`. The rename below moves the live tree to `.previous` with every
+  # unrestarted process still inside it (its cwd, its resolved paths), so the
+  # NEXT deploy's `rm -rf` deleted the folder under them. Measured 2026-11-07
+  # after a rest-only deploy: the MCP, the graph executor and the activity
+  # projector all had their cwd in `.previous`. New opens there would fail.
+  #
+  # So: if any process references `.previous`, STOP, and name it. Do not restart
+  # anything here to clear the check. Restarting the graph executor is a
+  # consequential act with its own plan, never a step taken to make a gate pass.
+  # A check that cannot run refuses too: `lsof` failing is not "nothing there".
+  if [ -d "$previous" ]; then
+    set +e
+    inuse_out="$(lsof -nP +D "$previous" -F pc 2>"$staging.lsof-err")"
+    inuse_rc=$?
+    set -e
+    inuse_err="$(cat "$staging.lsof-err" 2>/dev/null)"; rm -f "$staging.lsof-err"
+    holders="$(printf '%s\n' "$inuse_out" | awk '/^p/{pid=substr($0,2)} /^c/{print "     pid " pid "  " substr($0,2)}' | sort -u)"
+    # ⚠️ Decide on lsof's OUTPUT, not its exit code: macOS lsof 4.91 printed a
+    # holder of a read-only tree AND exited 1 (measured 2026-11-07), the same code
+    # it uses for "nothing found". Any holder printed refuses, whatever the rc.
+    if [ -n "$holders" ]; then
+      rm -rf "$staging"
+      die "$previous is still in use — production untouched.
+   These processes have their working directory or open files inside it, so deleting it
+   would pull their code out from under them:
+$holders
+   This deploy does NOT restart them to clear this check. Restarting a service (above all
+   the graph executor) needs its own plan and the owner's go; once they run from $SERVE,
+   deploy again."
+    elif [ "$inuse_rc" -le 1 ] && [ -z "$inuse_out" ] && [ -z "$inuse_err" ]; then
+      :   # lsof's "no matching files": nothing references it
+    else
+      rm -rf "$staging"
+      [ -n "$inuse_err" ] && printf '%s\n' "$inuse_err" | sed 's/^/   /' >&2
+      die "could NOT check whether any process is running from $previous (lsof rc=$inuse_rc) — production untouched. A deploy that cannot look does not guess."
+    fi
+  fi
+
   if [ -d "$SERVE" ]; then
     chmod -R u+w "$SERVE" 2>/dev/null || true
     rm -rf "$previous"
