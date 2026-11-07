@@ -149,7 +149,7 @@ test('#229 wiki nav: filter narrows + keeps ancestors, field:value works, collap
     assert.ok(!filtered.includes('Linker'), 'non-match pruned');
 
     // field:value filter (id:3 → Linker only)
-    await page.click('#nav-filter', { clickCount: 3 });
+    await page.click('#nav-filter', { count: 3 });
     await page.type('#nav-filter', 'id:3');
     await page.waitForFunction(() => {
       const ns = [...document.querySelectorAll('#tree .tree-row a')].map((e) => e.textContent);
@@ -157,7 +157,7 @@ test('#229 wiki nav: filter narrows + keeps ancestors, field:value works, collap
     }, { timeout: 5000 });
 
     // clear filter, then collapse Parent → Child disappears
-    await page.click('#nav-filter', { clickCount: 3 });
+    await page.click('#nav-filter', { count: 3 });
     await page.keyboard.press('Backspace');
     await page.waitForFunction(() => [...document.querySelectorAll('#tree .tree-row a')].some((e) => e.textContent === 'Linker'), { timeout: 5000 });
     await page.evaluate(() => {
@@ -232,7 +232,7 @@ test('#231 wiki nav: Done hidden by default; revealed by checkbox or column:done
     assert.ok(shown.includes('Active Page') && !shown.includes('Done Page'), 'generic filter stays Done-free: ' + shown);
 
     // column:done explicitly reveals Done (and only Done)
-    await page.click('#nav-filter', { clickCount: 3 });
+    await page.click('#nav-filter', { count: 3 });
     await page.type('#nav-filter', 'column:done');
     await page.waitForFunction(() => {
       const ns = [...document.querySelectorAll('#tree .tree-row a')].map((e) => e.textContent);
