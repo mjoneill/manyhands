@@ -9,9 +9,9 @@
  * the CLI's three exit codes, and THE SEAM — deploy.sh itself on a fixture clone,
  * refusing before the swap and serving when in step.
  */
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, copyFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, copyFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -21,9 +21,15 @@ import { checkInstalled } from '../scripts/deploy-deps-check.mjs';
 const CHECK = fileURLToPath(new URL('../scripts/deploy-deps-check.mjs', import.meta.url));
 const DEPLOY = fileURLToPath(new URL('../scripts/deploy.sh', import.meta.url));
 
+// #1672: ONE temp root for this file, removed after. The seam rows run a real export, and deploy.sh locks the served
+// tree read-only (chmod -R a-w), so the root is made writable again before it is removed. Without this the suite's
+// own temp sweep hit EACCES and failed the run (CI on 82eee2b, 2026-11-07).
+const ROOT_TMP = mkdtempSync(join(tmpdir(), 'deps-1828-'));
+after(() => { spawnSync('chmod', ['-R', 'u+w', ROOT_TMP]); rmSync(ROOT_TMP, { recursive: true, force: true }); });
+
 /** A repo dir with a lockfile and an installed tree. `installed` maps lockfile path → version (null = absent). */
 function fixture(lockPackages, installed) {
-  const dir = mkdtempSync(join(tmpdir(), 'deps-1828-'));
+  const dir = mkdtempSync(join(ROOT_TMP, 'fx-'));
   writeFileSync(join(dir, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: { '': { name: 'fx' }, ...lockPackages } }));
   for (const [rel, version] of Object.entries(installed)) {
     if (version === null) continue;
@@ -83,7 +89,7 @@ test('#1828 CLI: exit 0 names the installed version of each package asked for; e
 // A fixture clone whose own tools/ci-verdict.mjs answers green, so `deploy.sh
 // export` reaches export_tree and the check runs where production would.
 function fixtureClone(installedA) {
-  const dir = mkdtempSync(join(tmpdir(), 'deps-1828-seam-'));
+  const dir = mkdtempSync(join(ROOT_TMP, 'seam-'));
   const clone = join(dir, 'clone'); const serve = join(dir, 'serve');
   mkdirSync(join(clone, 'tools'), { recursive: true }); mkdirSync(join(clone, 'scripts'), { recursive: true });
   writeFileSync(join(clone, 'tools', 'ci-verdict.mjs'), 'process.exit(0);\n');
