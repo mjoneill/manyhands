@@ -16,7 +16,12 @@
  *   F5  postSeq holes are DIAGNOSTIC (PO 50927): listed in the INDEX with a count, and the export still succeeds
  *   F6  a kind whose recount cannot be taken is UNVERIFIED in the INDEX, never matched, and the export still succeeds
  *   F7  every recount is labelled "recounted, same store": the second count comes from the same graph, so nothing is called matched
- * Rows F1–F7 run against a small fake board (this file's own), so each fault can be planted exactly. G1 is the real thing.
+ *   F8  a collection holding heads AND versions (agent prompts: 1 prompt + 2 versions) is recounted by each row's own @type and
+ *       summed, so 3 written against 1 head + 2 versions is recounted, not a false INCOMPLETE (found on the live board, 20:22Z:
+ *       procedures 8 vs 3 and agent-prompts 11 vs 2 were heads + versions counted against the head type alone)
+ *   F9  rows typed with a GENERIC type other entities share (runs as prov:Activity, which every write receipt also is) are not
+ *       counted by that type: the kind is unverified, never a false INCOMPLETE (live board, 20:24Z: runs 31 vs 117,518)
+ * Rows F1–F9 run against a small fake board (this file's own), so each fault can be planted exactly. G1 is the real thing.
  */
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -71,7 +76,7 @@ const delivery = (n) => ({ id: `d-${n}`, to: 'ada', conversation: 'p-1', offered
  * COUNT answers, or to 'fail' for a 503. `deliveriesRecent` is what the bare /api/deliveries serves (the route's 24-hour bound);
  * `callsKey` is the key /api/model-calls answers under.
  */
-function fakeBoard({ posts = [], calls = [], deliveries = [], deliveriesRecent = [], callsKey = 'calls', counts = {} } = {}) {
+function fakeBoard({ posts = [], calls = [], deliveries = [], deliveriesRecent = [], callsKey = 'calls', counts = {}, doc = {} } = {}) {
   const seen = [];
   const srv = http.createServer(async (req, res) => {
     const u = new URL(req.url, 'http://x');
@@ -85,7 +90,7 @@ function fakeBoard({ posts = [], calls = [], deliveries = [], deliveriesRecent =
       if (n === undefined || n === 'fail') return send(503, { error: 'graph unavailable (planted)' });
       return send(200, { rows: [{ n: String(n) }], truncated: false });
     }
-    if (u.pathname === '/api/board') return send(200, { cards: [fakeCard], columns: [{ id: 'backlog', name: 'Backlog' }] });
+    if (u.pathname === '/api/board') return send(200, { cards: [fakeCard], columns: [{ id: 'backlog', name: 'Backlog' }], ...doc });
     if (['/api/decisions', '/api/kinds', '/api/predicates', '/api/wakes'].includes(u.pathname)) return send(200, []);
     if (u.pathname === '/api/memories') return send(200, { total: 0, memories: [] });
     if (u.pathname === '/api/conversations') return send(200, u.searchParams.get('limit') ? posts.slice(-Number(u.searchParams.get('limit'))) : posts, { 'X-Total-Count': String(posts.length) });
@@ -177,5 +182,45 @@ test('#1825 F7: an agreeing recount from the same graph is labelled "recounted, 
     assert.match(idx, /commons[^\n]*recounted, same store/, idx.slice(0, 1500));
     assert.match(idx, /cards[^\n]*recounted, same store/);
     assert.doesNotMatch(idx, /\bmatched\b/, 'nothing is called matched: no independent store was consulted');
+  } finally { await b.close(); }
+});
+
+test('#1825 F8: a collection of heads AND versions is recounted by each row\'s own @type, summed — not a false INCOMPLETE', async () => {
+  const AP = 'https://scrumboard.local/agent-prompt/guest';
+  const agentPrompts = [
+    { '@id': AP, '@type': 'scrum:AgentPrompt', 'scrum:currentVersion': `${AP}/v2` },
+    { '@id': `${AP}/v1`, '@type': 'scrum:AgentPromptVersion', 'scrum:version': 1 },
+    { '@id': `${AP}/v2`, '@type': 'scrum:AgentPromptVersion', 'scrum:version': 2 },
+  ];
+  const b = await fakeBoard({ doc: { agentPrompts }, counts: { 'scrum:AgentPrompt': 1, 'scrum:AgentPromptVersion': 2, 'scrum:Card': 1 } });
+  try {
+    const dir = fresh(); const r = await exportAsync(b.base, 'cards,agent-prompts', dir);
+    assert.equal(r.status, 0, r.out.slice(-600));
+    const idx = indexOf(dir);
+    assert.match(idx, /agent-prompts[^\n]*wrote 3[^\n]*recounted, same store/, idx.slice(0, 1800));
+    assert.doesNotMatch(idx, /INCOMPLETE/);
+  } finally { await b.close(); }
+});
+
+test('#1825 F9: rows typed with a generic shared type (runs as prov:Activity) are unverified, never a false INCOMPLETE', async () => {
+  const runs = [{ '@id': 'https://scrumboard.local/run/r-1', '@type': 'prov:Activity' }, { '@id': 'https://scrumboard.local/run/r-2', '@type': 'prov:Activity' }];
+  const b = await fakeBoard({ doc: { runs }, counts: { 'prov:Activity': 1000, 'scrum:Card': 1 } });
+  try {
+    const dir = fresh(); const r = await exportAsync(b.base, 'cards,runs', dir);
+    assert.equal(r.status, 0, r.out.slice(-600));
+    const idx = indexOf(dir);
+    assert.match(idx, /\*\*runs\*\*[^\n]*wrote 2[^\n]*unverified/, idx.slice(0, 1800));
+    assert.doesNotMatch(idx, /INCOMPLETE/);
+  } finally { await b.close(); }
+});
+
+test('#1825 F9b: a typed kind whose rows carry a type it does not own is unverified, never counted by the foreign type', async () => {
+  const agentPrompts = [{ '@id': 'https://scrumboard.local/agent-prompt/x', '@type': 'scrum:AgentPrompt' }, { '@id': 'https://scrumboard.local/agent-prompt/x/act', '@type': 'prov:Activity' }];
+  const b = await fakeBoard({ doc: { agentPrompts }, counts: { 'scrum:AgentPrompt': 1, 'prov:Activity': 1, 'scrum:Card': 1 } });
+  try {
+    const dir = fresh(); const r = await exportAsync(b.base, 'cards,agent-prompts', dir);
+    assert.equal(r.status, 0, r.out.slice(-600));
+    const idx = indexOf(dir);
+    assert.match(idx, /agent-prompts[^\n]*unverified[^\n]*prov:Activity/, `a sum that happens to agree (1 + 1 = 2) must not pass a foreign type:\n${idx.slice(0, 1800)}`);
   } finally { await b.close(); }
 });

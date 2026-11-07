@@ -548,8 +548,9 @@ async function main() {
   const exportedOf = (space) => (space === 'commons'
     ? (args.spaces.includes('commons') ? boardLevel.length : 0) + (args.spaces.includes('cards') ? homedCount : 0)
     : space === 'cards' ? allCards.length : records.filter((r) => sectionKind(r.section) === space).length);
+  const TYPE_RE = /^[a-z][a-z0-9]*:[A-Za-z][A-Za-z0-9]*$/;
   const recount = async (kind) => {
-    if (!/^[a-z][a-z0-9]*:[A-Za-z][A-Za-z0-9]*$/.test(String(kind || ''))) return { why: 'no registered type to count it by' };
+    if (!TYPE_RE.test(String(kind || ''))) return { why: 'no registered type to count it by' };
     try {
       const r = await fetch(`${args.base}/api/graph`, { method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ query: `SELECT (COUNT(DISTINCT ?e) AS ?n) WHERE { ?e a ${kind} }` }) });
@@ -561,14 +562,38 @@ async function main() {
     } catch (err) { return { why: `/api/graph could not be read: ${err.message}` }; }
   };
   const coverage = [];
+  // A collection can hold more than one type: agent prompts and procedures carry their heads AND their versions (found on the
+  // live board, 2026-11-07T20:22Z: 11 rows against 2 heads). Where every written row names its own @type, the second count is
+  // the sum of a COUNT per type, so it counts the same unit the archive wrote. Rows without a type (a route's wire shape) are
+  // counted by the kind.
+  // A type is counted only if it is the kind's OWN: the kind's type or one that extends its name (scrum:Procedure →
+  // scrum:ProcedureVersion). A generic type other entities share is never a count of this kind (runs are prov:Activity, as is
+  // every write receipt: 31 runs against 117,518 activities on the live board) — such a kind is unverified, not INCOMPLETE.
+  const ownType = (kind, t) => { const [kp, kl] = kind.split(':'); const [tp, tl] = t.split(':'); return tp === kp && tl.startsWith(kl); };
+  const recountKind = async (inc) => {
+    if (inc.space === 'commons' || inc.space === 'cards' || !TYPE_RE.test(String(inc.kind || ''))) return recount(inc.kind);
+    const types = rowsFor(board, inc, overrides).map((e) => e?.['@type']);
+    if (!types.length || !types.every((t) => typeof t === 'string' && TYPE_RE.test(t))) return recount(inc.kind);
+    const distinct = [...new Set(types)].sort();
+    const foreign = distinct.filter((t) => !ownType(inc.kind, t));
+    if (foreign.length) return { why: `rows carry ${foreign.join(', ')}, a type this kind does not own, so a COUNT of it is not a count of this kind` };
+    if (distinct.length === 1 && distinct[0] === inc.kind) return recount(inc.kind);
+    let n = 0; const parts = [];
+    for (const t of distinct) {
+      const r = await recount(t);
+      if (r.why) return { why: `${t}: ${r.why}` };
+      n += r.n; parts.push(`${t} ${r.n}`);
+    }
+    return { n, by: parts.join(' + ') };
+  };
   for (const inc of setInfo.included) {
     const wrote = exportedOf(inc.space);
-    const rc = await recount(inc.kind);
+    const rc = await recountKind(inc);
     let state; let line;
     if (rc.why) { state = 'unverified'; line = `wrote ${wrote} · unverified — ${rc.why}`; }
-    else if (rc.n === wrote) { state = 'recounted'; line = `wrote ${wrote} · recounted, same store (the graph counts ${rc.n})`; }
+    else if (rc.n === wrote) { state = 'recounted'; line = `wrote ${wrote} · recounted, same store (the graph counts ${rc.n}${rc.by ? `: ${rc.by}` : ''})`; }
     else if (rc.n === 0) { state = 'unverified'; line = `wrote ${wrote} · unverified — the graph holds none of this type, so it is not a second count for it`; }
-    else { state = 'incomplete'; line = `⛔ INCOMPLETE — wrote ${wrote}, the board's graph holds ${rc.n}`; }
+    else { state = 'incomplete'; line = `⛔ INCOMPLETE — wrote ${wrote}, the board's graph holds ${rc.n}${rc.by ? ` (${rc.by})` : ''}`; }
     coverage.push({ space: inc.space, kind: inc.kind || inc.collection, state, line, wrote, holds: rc.n });
   }
   const incomplete = coverage.filter((c) => c.state === 'incomplete');
