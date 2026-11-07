@@ -100,6 +100,28 @@ export_tree() {
   # the link and never recurses into the shared tree — which is what we want:
   # locking node_modules would break the next `npm ci` in the clone.
   [ -d "$CLONE/node_modules" ] || die "clone has no node_modules — run npm ci in $CLONE first"
+  # #1828 — ⛔ NOTHING HERE INSTALLS. The link serves whatever the clone last
+  # installed, so a deploy that ships a new package-lock.json used to restart
+  # the services onto the OLD tree (2026-11-07: lockfile 2.1.6, installed 2.0.12,
+  # inside an advisory) — and `npm audit` said 0, because it reads the lockfile.
+  # Compare the installed tree with the lockfile and refuse on any difference,
+  # before the swap. Refuse, not `npm ci`: the live services load from this
+  # same node_modules, and `npm ci` deletes it first.
+  set +e
+  deps_out="$(node "$CLONE/scripts/deploy-deps-check.mjs" "$CLONE" @modelcontextprotocol/sdk @hono/node-server 2>&1)"
+  deps_rc=$?
+  set -e
+  # The positive line is required too: a check that exits 0 having printed
+  # nothing has not said the tree matches, and silence is not an all-clear.
+  case "$deps_out" in *"packages match the lockfile"*) : ;; *) [ "$deps_rc" -eq 0 ] && deps_rc=2 && deps_out="deps: CANNOT CHECK — the check printed no verdict: $deps_out" ;; esac
+  if [ "$deps_rc" -ne 0 ]; then
+    rm -rf "$staging"
+    printf '%s\n' "$deps_out" | sed 's/^/   /' >&2
+    die "the clone's installed packages do not match its package-lock.json — production untouched.
+   Install the lockfile, then deploy again:
+     (cd $CLONE && npm ci)"
+  fi
+  printf '%s\n' "$deps_out" | sed 's/^/   /'
   ln -s "$CLONE/node_modules" "$staging/node_modules"
 
   if [ -d "$SERVE" ]; then
