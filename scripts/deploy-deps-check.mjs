@@ -25,7 +25,8 @@
  * deletes it first — an install inside the deploy would pull modules out from
  * under the running processes, and put a network fetch inside the deploy.
  *
- * CLI:   node scripts/deploy-deps-check.mjs <repo-dir> [package ...]
+ * CLI:   node scripts/deploy-deps-check.mjs <repo-dir> [--lockfile <path>] [package ...]
+ *        (<repo-dir> holds node_modules; --lockfile defaults to <repo-dir>/package-lock.json)
  *        exit 0: in step (prints `deps: N packages match the lockfile`, then one
  *                `installed <name>@<version>` line per named package)
  *        exit 1: mismatch (one `MISMATCH <name>: lockfile <v>, installed <v|absent>` per package)
@@ -37,9 +38,12 @@ import { fileURLToPath } from 'node:url';
 
 const readJson = (p) => JSON.parse(fs.readFileSync(p, 'utf8'));
 
-/** Returns { checked, mismatches: [{name, path, want, have}] }. Throws when the lockfile cannot be read. */
-export function checkInstalled(repoDir) {
-  const lockPath = path.join(repoDir, 'package-lock.json');
+/**
+ * Returns { checked, mismatches: [{name, path, want, have}] }. Throws when the lockfile cannot be read.
+ * `lockPath` defaults to repoDir's own lockfile. deploy.sh passes the EXPORTED one: the clone's working
+ * tree can hold an uncommitted lockfile that matches node_modules while the commit being served does not.
+ */
+export function checkInstalled(repoDir, lockPath = path.join(repoDir, 'package-lock.json')) {
   let lock;
   try { lock = readJson(lockPath); } catch (e) { throw new Error(`cannot read ${lockPath}: ${e.message}`); }
   if (!lock || typeof lock.packages !== 'object' || lock.packages === null) {
@@ -73,10 +77,14 @@ export function installedVersion(repoDir, name) {
 // exit cannot pass there either.
 const real = (p) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
 if (process.argv[1] && real(process.argv[1]) === real(fileURLToPath(import.meta.url))) {
-  const [repoDir, ...names] = process.argv.slice(2);
-  if (!repoDir) { console.error('usage: deploy-deps-check.mjs <repo-dir> [package ...]'); process.exit(2); }
+  const args = process.argv.slice(2);
+  let lockArg;
+  const li = args.indexOf('--lockfile');
+  if (li !== -1) { lockArg = args[li + 1]; args.splice(li, 2); if (!lockArg) { console.error('--lockfile needs a path'); process.exit(2); } }
+  const [repoDir, ...names] = args;
+  if (!repoDir) { console.error('usage: deploy-deps-check.mjs <repo-dir> [--lockfile <path>] [package ...]'); process.exit(2); }
   let r;
-  try { r = checkInstalled(repoDir); } catch (e) { console.error(`deps: CANNOT CHECK — ${e.message}`); process.exit(2); }
+  try { r = checkInstalled(repoDir, lockArg); } catch (e) { console.error(`deps: CANNOT CHECK — ${e.message}`); process.exit(2); }
   if (r.mismatches.length) {
     for (const m of r.mismatches) console.log(`MISMATCH ${m.path.replace(/^node_modules\//, '')}: lockfile ${m.want}, installed ${m.have ?? 'absent'}`);
     process.exit(1);

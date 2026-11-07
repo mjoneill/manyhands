@@ -105,6 +105,7 @@ test('#1828 SEAM — deploy.sh REFUSES when the installed tree is behind its loc
   assert.notEqual(r.status, 0, 'a green deploy here is the bug');
   assert.match(r.stderr, /MISMATCH a: lockfile 2\.1\.6, installed 2\.0\.12/);
   assert.match(r.stderr, /npm ci/, 'the refusal says what to run');
+  assert.match(r.stderr, /stop the services/, 'and says to stop the services first: npm ci under live services broke REST for ~1 min on 2026-11-07');
   assert.ok(!existsSync(join(fx.serve, 'DEPLOYED-SHA')), 'nothing was swapped in');
 });
 
@@ -124,5 +125,14 @@ test('#1828 SEAM — ⛔ a check that exits 0 WITHOUT its verdict line is refuse
   const r = exportRun(fx);
   assert.notEqual(r.status, 0, 'a silent check must not let the deploy through');
   assert.match(r.stderr, /printed no verdict/);
+  assert.ok(!existsSync(join(fx.serve, 'DEPLOYED-SHA')));
+});
+
+test('#1828 SEAM — ⛔ REVIEW REGRESSION: an UNCOMMITTED lockfile that matches node_modules does not hide a COMMITTED one that does not — the check reads the lockfile being exported', () => {
+  const fx = fixtureClone('2.0.12');                         // HEAD locks 2.1.6; installed 2.0.12
+  writeFileSync(join(fx.clone, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: { '': {}, 'node_modules/a': { version: '2.0.12' } } }));
+  const r = exportRun(fx);                                   // `export` mode has no dirty-clone refusal
+  assert.notEqual(r.status, 0, 'exporting the 2.1.6 lockfile over 2.0.12 packages is the bug');
+  assert.match(r.stderr, /MISMATCH a: lockfile 2\.1\.6, installed 2\.0\.12/);
   assert.ok(!existsSync(join(fx.serve, 'DEPLOYED-SHA')));
 });
