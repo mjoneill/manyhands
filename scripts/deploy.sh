@@ -108,7 +108,10 @@ export_tree() {
   # before the swap. Refuse, not `npm ci`: the live services load from this
   # same node_modules, and `npm ci` deletes it first.
   set +e
-  deps_out="$(node "$CLONE/scripts/deploy-deps-check.mjs" "$CLONE" @modelcontextprotocol/sdk @hono/node-server 2>&1)"
+  # Check the EXPORTED lockfile with the EXPORTED checker: the clone's working
+  # tree may hold an uncommitted lockfile that matches node_modules while the
+  # commit being served does not.
+  deps_out="$(node "$staging/scripts/deploy-deps-check.mjs" "$CLONE" --lockfile "$staging/package-lock.json" @modelcontextprotocol/sdk @hono/node-server 2>&1)"
   deps_rc=$?
   set -e
   # The positive line is required too: a check that exits 0 having printed
@@ -117,9 +120,13 @@ export_tree() {
   if [ "$deps_rc" -ne 0 ]; then
     rm -rf "$staging"
     printf '%s\n' "$deps_out" | sed 's/^/   /' >&2
-    die "the clone's installed packages do not match its package-lock.json — production untouched.
-   Install the lockfile, then deploy again:
-     (cd $CLONE && npm ci)"
+    die "the clone's installed packages do not match the package-lock.json being deployed — production untouched.
+   ⚠️ The running services load from $CLONE/node_modules (it is linked, and REST imports from it
+   at request time), and \`npm ci\` deletes that tree before reinstalling. Running it under live
+   services makes them fail until it finishes (measured 2026-11-07). So:
+     1. stop the services that run from $SERVE
+     2. (cd $CLONE && npm ci)
+     3. deploy again (it restarts them)"
   fi
   printf '%s\n' "$deps_out" | sed 's/^/   /'
   ln -s "$CLONE/node_modules" "$staging/node_modules"
