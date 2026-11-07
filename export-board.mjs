@@ -87,7 +87,7 @@ const DEFAULTS = {
 // and `conversations` stay as aliases; `all` means everything registered. The
 // INDEX names what was included, what was excluded (with counts), and anything
 // present on the board that the registry does not know.
-import { exportableSpaces, resolveSpaces, describeExportSet, rowsFor } from './core/export-spaces.mjs';
+import { exportableSpaces, resolveSpaces, describeExportSet, rowsFor, rowsOfResponse } from './core/export-spaces.mjs';
 
 /**
  * Where EXPORT_TRANSFORMS.json comes from — the same rule as export-wiki.mjs,
@@ -305,18 +305,26 @@ async function main() {
   }
 
   const allCards = board.cards || [];
-  const allMessages = board.conversations || [];
-  // Spaces that live outside the document are read from their own endpoint.
+  // Spaces that live outside the document are read from their own endpoint (#1321: the registry's own three, always; #1825:
+  // the kinds whose record is the graph, when selected, and the posts whenever cards are, because a card carries its thread).
+  // A source is held to the key it declares: a response without it REFUSES the export, never reads as [] (rowsOfResponse).
   const overrides = {};
-  for (const sp of exportableSpaces().filter((x) => x.source)) {
+  const wanted = (sp) => sp.key === undefined || args.spaces.includes(sp.space) || (sp.space === 'commons' && args.spaces.includes('cards'));
+  for (const sp of exportableSpaces().filter((x) => x.source && wanted(x))) {
+    let j;
     try {
       const r = await fetch(`${args.base}${sp.source}`);
-      if (!r.ok) die(`${sp.source} answered ${r.status}`);
-      const j = await r.json();
-      overrides[sp.space] = Array.isArray(j) ? j : (j?.[sp.space] ?? j?.rows ?? []);
+      if (!r.ok) die(`${sp.source} answered ${r.status} — refusing to export ${sp.space} as empty`);
+      j = await r.json();
     } catch (err) { die(`could not read ${sp.source} — ${err.message}`); }
+    const rows = rowsOfResponse(sp, j);
+    if (rows instanceof Error) die(`${rows.message} — refusing to export ${sp.space} as empty`);
+    overrides[sp.space] = rows;
   }
-  const setInfo = describeExportSet(board, args.spaces, overrides);
+  // #1825 — the posts come from their own route. GET /api/board omits them under the graph conversations unit, and reading the
+  // document's absent key as [] is exactly how an archive of 0 messages called itself complete.
+  const allMessages = Array.isArray(overrides.commons) ? overrides.commons : (board.conversations || []);
+  const setInfo = describeExportSet(board, args.spaces, overrides, { unreadIfAbsent: true });
   console.log(`  received: ${allMessages.length} messages · ${allCards.length} cards · ${setInfo.included.length} of ${setInfo.included.length + setInfo.excluded.length} kinds selected\n`);
   const emptyDryRun = () => { process.stdout.write(JSON.stringify({ dryRun: true, mode: args.raw ? 'raw' : 'scrub', empty: true, wouldPass: false, residue: 0, byKind: {}, samples: [], perKind: {} }) + '\n'); process.exit(0); };
   if (!allMessages.length && !allCards.length && !setInfo.included.some((x) => x.count)) {
@@ -532,7 +540,49 @@ async function main() {
     const built = records.filter((r) => r.section === space.toUpperCase()).length;
     if (built !== n) die(`${space}: board holds ${n}, archive built ${built} — refusing to report a complete export`);
   }
-  const kindLine = (x) => `- **${x.space}** (\`${x.kind || x.collection}\`) — ${x.count}`;
+  // ── #1825: coverage, per kind — the count written beside a count taken another way ─────────────────────────────────────
+  // The second count is a graph COUNT through /api/graph. Today that is the SAME STORE the routes read, so an agreeing count is
+  // reported as "recounted, same store" and never as "matched" (that word is kept for a count from an independent store, which
+  // no kind has yet). A disagreement is INCOMPLETE: the archive is written and labelled, and the exporter exits 1. A kind with no
+  // count to take is "unverified". postSeq holes are listed and never fail: a deleted or redacted post leaves one (PO 50927).
+  const exportedOf = (space) => (space === 'commons'
+    ? (args.spaces.includes('commons') ? boardLevel.length : 0) + (args.spaces.includes('cards') ? homedCount : 0)
+    : space === 'cards' ? allCards.length : records.filter((r) => sectionKind(r.section) === space).length);
+  const recount = async (kind) => {
+    if (!/^[a-z][a-z0-9]*:[A-Za-z][A-Za-z0-9]*$/.test(String(kind || ''))) return { why: 'no registered type to count it by' };
+    try {
+      const r = await fetch(`${args.base}/api/graph`, { method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ query: `SELECT (COUNT(DISTINCT ?e) AS ?n) WHERE { ?e a ${kind} }` }) });
+      if (!r.ok) return { why: `/api/graph answered ${r.status}` };
+      const j = await r.json();
+      if (j?.truncated) return { why: '/api/graph says its answer was truncated' };
+      const n = Number(j?.rows?.[0]?.n);
+      return Number.isSafeInteger(n) && n >= 0 ? { n } : { why: 'the count came back without a number' };
+    } catch (err) { return { why: `/api/graph could not be read: ${err.message}` }; }
+  };
+  const coverage = [];
+  for (const inc of setInfo.included) {
+    const wrote = exportedOf(inc.space);
+    const rc = await recount(inc.kind);
+    let state; let line;
+    if (rc.why) { state = 'unverified'; line = `wrote ${wrote} · unverified — ${rc.why}`; }
+    else if (rc.n === wrote) { state = 'recounted'; line = `wrote ${wrote} · recounted, same store (the graph counts ${rc.n})`; }
+    else if (rc.n === 0) { state = 'unverified'; line = `wrote ${wrote} · unverified — the graph holds none of this type, so it is not a second count for it`; }
+    else { state = 'incomplete'; line = `⛔ INCOMPLETE — wrote ${wrote}, the board's graph holds ${rc.n}`; }
+    coverage.push({ space: inc.space, kind: inc.kind || inc.collection, state, line, wrote, holds: rc.n });
+  }
+  const incomplete = coverage.filter((c) => c.state === 'incomplete');
+  let holesLine = null;
+  if (args.spaces.includes('commons')) {
+    const seqs = [...new Set(allMessages.map((m) => m?.postSeq).filter(Number.isSafeInteger))].sort((a, b) => a - b);
+    const unnumbered = allMessages.filter((m) => !Number.isSafeInteger(m?.postSeq)).length;
+    const have = new Set(seqs); const holes = [];
+    for (let n = 1; n <= (seqs.length ? seqs[seqs.length - 1] : 0); n++) if (!have.has(n)) holes.push(n);
+    holesLine = `- **postSeq holes:** ${holes.length}${holes.length ? ` (${holes.slice(0, 20).join(', ')}${holes.length > 20 ? ', …' : ''})` : ''}`
+      + `${unnumbered ? ` · ${unnumbered} post${unnumbered === 1 ? '' : 's'} without a postSeq` : ''}`
+      + ' — diagnostic only: a deleted or redacted post leaves a hole, so a hole is not a failure.';
+  }
+  const kindLine = (x) => `- **${x.space}** (\`${x.kind || x.collection}\`) — ${x.count === null ? 'not read (it is served by its own route)' : x.count}`;
   const index = [
     `# Scrum-Board — Export (${args.spaces.join(' + ')})`,
     '',
@@ -545,7 +595,10 @@ async function main() {
     `- **Commons messages:** ${expectedMessages}${orphaned ? ` (includes ${orphaned} orphaned — attached to a card that no longer exists)` : ''}`,
     `- **Cards / wiki nodes:** ${args.spaces.includes('cards') ? allCards.length : 0}`,
     `- **Card-attached comments:** ${homedCount}`,
-    `- **Total messages on the board:** ${allMessages.length} _(commons + card-attached; all accounted for)_`,
+    `- **Total messages on the board:** ${allMessages.length} _(commons + card-attached; ${incomplete.length ? 'INCOMPLETE — see Coverage' : 'all accounted for'})_`,
+    incomplete.length
+      ? `- **Coverage:** ⛔ INCOMPLETE — ${incomplete.map((c) => `${c.space}: wrote ${c.wrote}, the board holds ${c.holds}`).join('; ')}. Do not treat this archive as a backup.`
+      : `- **Coverage:** no count disagreed. Each kind below says how it was checked: "recounted, same store" or "unverified". None was checked against an independent store.`,
     `- **Parts:** ${parts.length} · target **${(args.maxBytes / 1e6).toFixed(2)} MB ±${args.tolerancePct}%** `
       + `(ceiling ${(args.ceiling / 1e6).toFixed(2)} MB) · largest written **${(Math.max(...written.map((w) => w.bytes)) / 1e6).toFixed(2)} MB** `
       + `— ${beyond.length ? `⚠️ ${beyond.length} beyond tolerance` : 'all within tolerance'}. Split at message/card boundaries, never mid-record.`,
@@ -554,6 +607,11 @@ async function main() {
     '### What this archive holds, by kind',
     '',
     ...setInfo.included.map(kindLine),
+    '',
+    '### Coverage, by kind (#1825)',
+    '',
+    ...coverage.map((c) => `- **${c.space}** (\`${c.kind}\`) — ${c.line}`),
+    ...(holesLine ? ['', holesLine] : []),
     '',
     `### Not exported (${setInfo.excluded.length} registered kind${setInfo.excluded.length === 1 ? '' : 's'} on this board, not selected)`,
     '',
@@ -586,7 +644,16 @@ async function main() {
 
   console.log(`  ✔ ${parts.length} parts + 00-INDEX.md`);
   for (const w of written) console.log(`      ${w.name}  ${w.section.padEnd(13)} ${(w.bytes / 1e6).toFixed(2)} MB  ${w.records} records`);
-  console.log(`\n  counts verified: ${allMessages.length} messages all accounted for, ${records.length} records written\n`);
+  if (incomplete.length) {
+    // #1825 — written and labelled, so the operator can see what is there, and refused, so nothing calls it complete
+    console.error(`\n  ⛔ INCOMPLETE: ${incomplete.map((c) => `${c.space} wrote ${c.wrote}, the board holds ${c.holds}`).join('; ')}`);
+    console.error('     The archive is written and its INDEX says INCOMPLETE. Do not treat it as a backup.\n');
+    process.exit(1);
+  }
+  const unverified = coverage.filter((c) => c.state === 'unverified').map((c) => c.space);
+  console.log(`\n  counts verified: ${allMessages.length} messages received, ${records.length} records written; `
+    + `recounted (same store): ${coverage.filter((c) => c.state === 'recounted').length} kinds`
+    + `${unverified.length ? `; unverified: ${unverified.join(', ')}` : ''}\n`);
 }
 
 // Only run when invoked directly — the renderers above are imported by tests.

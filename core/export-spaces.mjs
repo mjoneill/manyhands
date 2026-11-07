@@ -35,6 +35,39 @@ const PROSE = new Set(['cards', 'commons', 'memories', 'decisions', 'procedures'
 /** Collections that are not entities anyone reads in an archive: operator config and internal state. */
 const NOT_EXPORTABLE = new Set(['columns', 'labelAliases', 'seatStates']);
 
+/**
+ * #1825 — the kinds whose RECORD IS THE GRAPH, and the route that serves each. With the graph units on, GET /api/board leaves
+ * these collections out on purpose (#1582/#1626 posts, deliveries, model calls; #1624 wakes; #1561 memories), so reading them
+ * from the document gives an empty list that looks like an empty board — which is how a whole room went missing from an export
+ * that said "all accounted for". Each source names the KEY its rows arrive under (`null` = a bare array). The exporter refuses a
+ * response without that key, because a lenient fallback is the same silent zero again (model calls answer under `calls`).
+ * Each route serves both modes (units on: the graph; off: the document), so the exporter reads them the same way on every board.
+ *   - /api/conversations with NO params is uncapped by contract (#202). Never page it by seq: under the conversations unit every
+ *     seq page re-reads every post, so a walk is one full read per 200 posts.
+ *   - /api/deliveries without all=1 is active deliveries plus the last 24 hours (#1582 hotfix 2). #1826 adds a cursor.
+ */
+export const ROUTE_SOURCES = Object.freeze({
+  commons: { source: '/api/conversations', key: null },
+  deliveries: { source: '/api/deliveries?all=1', key: 'deliveries' },
+  'model-calls': { source: '/api/model-calls', key: 'calls' },
+  wakes: { source: '/api/wakes', key: null },
+  memories: { source: '/api/memories', key: 'memories' },
+});
+
+/**
+ * The rows of a source's response, or an Error naming the route and the key it expected. A source with a declared key (or
+ * `null`, a bare array) is held to it exactly. The registry's own three (decisions, kinds, predicates) predate declared keys:
+ * an array, or an array under the space's name or `rows`, and anything else refuses — never `[]`.
+ */
+export function rowsOfResponse(space, json) {
+  const where = `${space.source} (${space.space})`;
+  if (space.key === null) return Array.isArray(json) ? json : new Error(`${where} answered without the bare array it serves`);
+  if (typeof space.key === 'string') return Array.isArray(json?.[space.key]) ? json[space.key] : new Error(`${where} answered without its rows under \`${space.key}\``);
+  if (Array.isArray(json)) return json;
+  for (const k of [space.space, 'rows']) if (Array.isArray(json?.[k])) return json[k];
+  return new Error(`${where} answered without an array, under \`${space.space}\`, or under \`rows\``);
+}
+
 const kebab = (s) => String(s).replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
 
 /**
@@ -54,6 +87,7 @@ export function exportableSpaces() {
       space, kind: k.name ?? null, collection,
       prose: PROSE.has(space), aliases: ALIASES[space] || [],
       definition: String(k.definition || ''),
+      ...(ROUTE_SOURCES[space] || {}),   // #1825
     });
   }
   // Three kinds are registered WITHOUT a document collection because they are
@@ -110,12 +144,16 @@ export function rowsFor(doc, space, overrides = {}) {
  * (types present in `_unmodelled`, by type, with a count and one example).
  * `overrides` supplies rows for spaces that live outside the document (decisions).
  */
-export function describeExportSet(doc, words, overrides = {}) {
+export function describeExportSet(doc, words, overrides = {}, opts = {}) {
   const spaces = exportableSpaces();
   const { resolved } = resolveSpaces(words);
   const included = []; const excluded = [];
   for (const s of spaces) {
-    const row = { space: s.space, kind: s.kind, collection: s.collection, prose: s.prose, count: rowsFor(doc, s, overrides).length };
+    // #1825 — for the EXPORTER (opts.unreadIfAbsent): a kind served by its own route that was not read, on a document without
+    // its collection (GET /api/board omits it under a graph unit), has NO count: null ("not read"), never a 0 the board did not
+    // say. The menu's own call keeps #1321's rule, where an absent collection is an empty one.
+    const unread = opts.unreadIfAbsent && s.source && !Array.isArray(overrides[s.space]) && !Array.isArray(doc?.[s.collection]);
+    const row = { space: s.space, kind: s.kind, collection: s.collection, prose: s.prose, count: unread ? null : rowsFor(doc, s, overrides).length };
     (resolved.includes(s.space) ? included : excluded).push(row);
   }
   const byType = new Map();
