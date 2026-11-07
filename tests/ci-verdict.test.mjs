@@ -120,6 +120,9 @@ function sandbox() {
   fs.copyFileSync(path.join(ROOT, 'tools', 'ci-verdict.mjs'), path.join(clone, 'tools', 'ci-verdict.mjs'));
   fs.mkdirSync(path.join(clone, 'scripts'), { recursive: true });
   fs.copyFileSync(path.join(ROOT, 'scripts', 'deploy.sh'), path.join(clone, 'scripts', 'deploy.sh'));
+  // #1828 — the export now checks the installed tree against the exported lockfile, with the exported checker.
+  fs.copyFileSync(path.join(ROOT, 'scripts', 'deploy-deps-check.mjs'), path.join(clone, 'scripts', 'deploy-deps-check.mjs'));
+  fs.writeFileSync(path.join(clone, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: { '': { name: 'fixture' } } }));
   fs.writeFileSync(path.join(clone, 'server.js'), 'v1\n');
   g('-C', clone, 'add', '-A'); g('-C', clone, 'commit', '-qm', 'base');
   g('-C', clone, 'remote', 'add', 'origin', origin); g('-C', clone, 'push', '-q', 'origin', 'main');
