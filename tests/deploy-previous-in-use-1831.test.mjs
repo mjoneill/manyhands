@@ -72,15 +72,15 @@ async function hold(command, args, cwd, inside) {
   throw new Error(`fixture: pid ${c.pid} never showed as holding ${inside}`);
 }
 
-/** Deploys 1 and 2; returns the fixture with deploy 2 served and deploy 1 in `.previous`. */
-function twoDeploys() {
+/** A fixture clone after deploy 1 (served, no `.previous` yet). Each row runs deploy 2 itself, so it can start a holder first. */
+function firstDeploy() {
   const fx = fixtureClone();
   const r1 = deploy(fx, 1); assert.equal(r1.status, 0, r1.stderr);
   return fx;
 }
 
 test('#1831 SEAM — a process whose WORKING DIRECTORY is in `.previous` stops the next deploy, which names it and deletes nothing', async () => {
-  const fx = twoDeploys();
+  const fx = firstDeploy();
   const c = await hold('sleep', ['300'], fx.serve, fx.serve);  // a service running from the served tree
   const r2 = deploy(fx, 2); assert.equal(r2.status, 0, r2.stderr); // rest-only style deploy: the tree becomes .previous, the process stays in it
   const sha2 = servedSha(fx.serve);
@@ -95,7 +95,7 @@ test('#1831 SEAM — a process whose WORKING DIRECTORY is in `.previous` stops t
 });
 
 test('#1831 SEAM — an OPEN FILE in `.previous` counts too, not only a working directory', async () => {
-  const fx = twoDeploys();
+  const fx = firstDeploy();
   const c = await hold('tail', ['-f', join(fx.serve, 'release.txt')], fx.dir, join(fx.serve, 'release.txt'));
   const r2 = deploy(fx, 2); assert.equal(r2.status, 0, r2.stderr);
   const r3 = deploy(fx, 3);
@@ -105,7 +105,7 @@ test('#1831 SEAM — an OPEN FILE in `.previous` counts too, not only a working 
 });
 
 test('#1831 NEGATIVE CONTROL — nothing references `.previous`: it is replaced as before, and the deploy succeeds', () => {
-  const fx = twoDeploys();
+  const fx = firstDeploy();
   const r2 = deploy(fx, 2); assert.equal(r2.status, 0, r2.stderr);
   const sha2 = servedSha(fx.serve);
   const r3 = deploy(fx, 3);
@@ -115,7 +115,7 @@ test('#1831 NEGATIVE CONTROL — nothing references `.previous`: it is replaced 
 });
 
 test('#1831 ⛔ an `lsof` that cannot run REFUSES: "could not look" must not read as "nothing there"', () => {
-  const fx = twoDeploys();
+  const fx = firstDeploy();
   const r2 = deploy(fx, 2); assert.equal(r2.status, 0, r2.stderr);
   const bin = join(fx.dir, 'bin'); mkdirSync(bin);
   writeFileSync(join(bin, 'lsof'), '#!/bin/sh\necho "lsof: broken" >&2\nexit 3\n'); chmodSync(join(bin, 'lsof'), 0o755);
