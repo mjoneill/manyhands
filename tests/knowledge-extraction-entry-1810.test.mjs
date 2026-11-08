@@ -112,7 +112,16 @@ const run = (env) => new Promise((resolve) => {
 });
 const q = async (s) => { const r = await client.query(s); assert.ok(r.ok, r.reason); return r.rows; };
 
-test('#1810 R14 — one shared link, one launch: exit 0, a summary naming the job, a run on the board, a model-call row, assertions in the graph, the cursor persisted; a second launch does nothing', { skip: SKIP }, async () => {
+test('#1810 R14 — a fresh install\'s first launch reads nothing older; then one shared link, one launch: exit 0, a summary naming the job, a run on the board, a model-call row, assertions in the graph, the cursor persisted; a second launch does nothing', { skip: SKIP }, async () => {
+  await fetch(`${SRV.baseUrl}/api/conversations`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ author: 'person-a', body: `shared before the service existed: ${site.url}-older` }) });
+  const r0 = await run({ ...baseEnv(), OPENROUTER_API_KEY: 'sk-or-test-not-a-real-key' });   // no state file yet: the service begins at the head (#1837)
+  assert.equal(r0.status, 0, `first launch exit 0 (stderr: ${r0.stderr.slice(0, 800)})`);
+  const s0 = JSON.parse(r0.stdout.trim().split('\n').pop());
+  assert.deepEqual(s0.started, [], `nothing older than the install is read or paid for (${r0.stdout.slice(0, 400)})`);
+  assert.equal(site.hits(), 0, 'nothing fetched');
+  assert.ok(fs.existsSync(path.join(DIR, 'extract-state.json')), 'the head cursor persisted');
+  assert.ok(['commit', 'seq'].includes(JSON.parse(fs.readFileSync(path.join(DIR, 'extract-state.json'), 'utf8')).mode), 'with its family');
+
   const p = await fetch(`${SRV.baseUrl}/api/conversations`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ author: 'person-a', body: `worth a read: ${site.url}` }) }).then((r) => r.json());
   assert.ok(p.id);
   const r1 = await run({ ...baseEnv(), OPENROUTER_API_KEY: 'sk-or-test-not-a-real-key' });

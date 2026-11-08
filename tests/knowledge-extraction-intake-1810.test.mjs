@@ -79,12 +79,13 @@ function publishFailsOnce(base) {
 }
 
 test('#1810 R9 — a share queues ONE job for its URL, derived from the post, with no seat in the path; the same link twice is one job; no link or a board author is nothing', { skip: SKIP }, async () => {
+  const cursorBeforeR9 = await cursorNow();   // a fresh install starts at the head (R9d/R9e), so this row seeds just before its own posts
   const p1 = await post('person-a', `A colleague wrote this up, worth a read: ${U}`);
   await post('person-b', `Same one as above ${U} — I'll read it tonight.`);
   await post('person-c', 'No link here, just a thought about harnesses.');
   await post('board', `MAINTENANCE: see ${U}-by-the-board`);   // a DIFFERENT url, so "board authors are never sources" is its own rule, not the dedupe
   const fetched = [];
-  const { intake, runs, model, stateFile } = intakeWith({ fetchSource: async (url) => { fetched.push(url); return { text: ARTICLE, encodingFormat: 'text/plain' }; } });
+  const { intake, runs, model, stateFile } = intakeWith({ cursor: cursorBeforeR9, fetchSource: async (url) => { fetched.push(url); return { text: ARTICLE, encodingFormat: 'text/plain' }; } });
   const before = await postCount();
   const t1 = await intake.tick();
   assert.deepEqual(t1.started.map((j) => j.url), [U], `one job, for U (${JSON.stringify(t1)})`);

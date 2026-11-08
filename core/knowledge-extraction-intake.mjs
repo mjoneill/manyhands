@@ -2,8 +2,16 @@
  * #1810 PR B — the intake (R9): a share in the commons queues ONE job, and no seat touches it.
  *
  * Production creates posts through the graph unit, so REST's post handler is the wrong seam. The service POLLS: one
- * tick reads the posts since its cursor (seq mode, #1592: `GET /api/conversations?afterSeq=start|<token>&limit=N`
- * → `{conversations, nextAfterSeq}`), finds `https://` links in posts by a CONFIGURED SHARER (the PO's ruling, 51192:
+ * tick reads the posts since its cursor — on a graph-served board the commit cursor (#1574: `GET
+ * /api/conversations?afterCommit=<token>&limit=N` → `{conversations, nextAfterCommit}`, fenced by the executor's
+ * incarnation), on a document-served board the post-sequence cursor (#1592: `afterSeq=<token>` → `{conversations,
+ * nextAfterSeq}`); the family is chosen once, by asking the board (`afterCommit=tip`; 400 GRAPH_DISCOVERY_OFF means
+ * document-served), and recorded in the state file as `mode`. A fresh install begins at the HEAD (tip / tail=1), never
+ * at `start`: the first live tick (2026-11-08, #1837) showed that a graph-served board mints a new afterSeq epoch on
+ * every read, so a saved `ps1.` token is always refused and the board's own advice, "resync from afterSeq=start", would
+ * page the whole commons and pay for every link ever shared. A refused cursor re-seeds at the head and ANNOUNCES the
+ * skipped window (state file, stderr, one commons post by this seat) so a share made in it can be re-shared.
+ * It finds `https://` links in posts by a CONFIGURED SHARER (the PO's ruling, 51192:
  * what the owner shares, not what seats post all night; the roster cannot tell a person from a seat, so the list is
  * configuration the owner sets), and for each URL it has not seen starts a LangGraph job whose thread id is derived
  * from the URL. The saver's state IS the queue and the dedupe: a finished job reads back with its outcome and is
@@ -39,31 +47,88 @@ export function linksOf(text, { allowHttp = false } = {}) {
 }
 export const jobIdFor = (url) => `job-${sha256(url)}`;
 
-export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fetchSource, extractor, modelKey, prompt, sharers, limit = 200, allowHttp = false, fetchImpl = fetch, now = () => new Date().toISOString() } = {}) {
+export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fetchSource, extractor, modelKey, prompt, sharers, limit = 200, allowHttp = false, fetchImpl = fetch, now = () => new Date().toISOString(), actor = 'extractor', log = (line) => process.stderr.write(`${line}\n`) } = {}) {
   for (const [k, v] of Object.entries({ boardUrl, stateFile, sourcesDir, fetchSource, extractor, modelKey })) if (!v) throw new Error(`createIntake needs ${k}`);
   if (typeof prompt !== 'string') throw new Error('createIntake needs the prompt text');
   if (!(sharers instanceof Set) || sharers.size === 0) throw new Error('createIntake needs sharers: the configured set of authors whose links become jobs (the PO\'s ruling, 51192). Empty means nobody, so nothing would ever run; refusing to construct.');
   const base = String(boardUrl).replace(/\/$/, '');
+  const headers = () => ({ ...(token ? { Authorization: `Bearer ${token}` } : {}) });
 
+  /**
+   * The cursor and its FAMILY. `commit` = the graph path's afterCommit (#1574: the executor's commitSeq, fenced by its
+   * incarnation; the only discovery position on a graph-served board). `seq` = the document path's afterSeq (#1592),
+   * which a graph-served board cannot hold (#1837: a new epoch per read). A file without a cursor, or holding the
+   * word "start", has none: "start" would page the whole commons from post 1 and pay for every link ever shared.
+   */
   function readState() {
     try {
       const s = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-      return { cursor: typeof s.cursor === 'string' && s.cursor ? s.cursor : 'start', pending: Array.isArray(s.pending) ? s.pending : [] };
-    } catch { return { cursor: 'start', pending: [] }; }
+      const cursor = typeof s.cursor === 'string' && s.cursor && s.cursor !== 'start' ? s.cursor : null;
+      const mode = s.mode === 'commit' || s.mode === 'seq' ? s.mode : (cursor && cursor.startsWith('ps1.') ? 'seq' : cursor && /^g[bc]1\./.test(cursor) ? 'commit' : null);
+      return { cursor: mode ? cursor : null, mode, pending: Array.isArray(s.pending) ? s.pending : [], resyncs: Array.isArray(s.resyncs) ? s.resyncs : [], updatedAt: typeof s.updatedAt === 'string' ? s.updatedAt : null };
+    } catch { return { cursor: null, mode: null, pending: [], resyncs: [], updatedAt: null }; }
   }
   function writeState(st) {
     fs.mkdirSync(path.dirname(stateFile), { recursive: true });
     const tmp = `${stateFile}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ ...st, updatedAt: now() }, null, 2));
+    const { updatedAt: _dropped, ...rest } = st;
+    fs.writeFileSync(tmp, JSON.stringify({ ...rest, updatedAt: now() }, null, 2));
     fs.renameSync(tmp, stateFile);
   }
 
-  async function page(cursor) {
-    const res = await fetchImpl(`${base}/api/conversations?afterSeq=${encodeURIComponent(cursor)}&limit=${limit}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
-    if (!res.ok) throw new Error(`GET /api/conversations (afterSeq) → ${res.status}`);
-    const j = await res.json();
-    if (!j || !Array.isArray(j.conversations) || typeof j.nextAfterSeq !== 'string') throw new Error('the seq-mode listing did not answer {conversations, nextAfterSeq}');
-    return j;
+  async function get(qs) {
+    const res = await fetchImpl(`${base}/api/conversations?${qs}`, { headers: headers() });
+    let body = null;
+    try { body = await res.json(); } catch { body = null; }
+    return { status: res.status, ok: res.ok, body };
+  }
+
+  /**
+   * The HEAD: where a cursor-less intake begins, and where a refused one resumes. The graph path first (tip = the live
+   * head, nothing before it is read); only the one answer that means "this board is document-served" (400
+   * GRAPH_DISCOVERY_OFF) falls through to the document path's tail. Any other failure is a throw: a server error must
+   * never degrade onto the cursor family we left. Never `start`, on either path.
+   */
+  async function head() {
+    const tip = await get('afterCommit=tip&limit=1');
+    if (tip.ok) {
+      if (typeof tip.body?.nextAfterCommit !== 'string') throw new Error('the commit-mode listing did not answer {conversations, nextAfterCommit}');
+      return { mode: 'commit', cursor: tip.body.nextAfterCommit };
+    }
+    if (!(tip.status === 400 && tip.body?.code === 'GRAPH_DISCOVERY_OFF')) throw new Error(`GET /api/conversations (afterCommit=tip) → ${tip.status}${tip.body?.code ? ` ${tip.body.code}` : ''}`);
+    const tail = await get('tail=1');
+    if (!tail.ok) throw new Error(`GET /api/conversations (tail=1) → ${tail.status}${tail.body?.code ? ` ${tail.body.code}` : ''}`);
+    if (typeof tail.body?.nextAfterSeq !== 'string') throw new Error('the seq-mode listing did not answer {conversations, nextAfterSeq}');
+    return { mode: 'seq', cursor: tail.body.nextAfterSeq };
+  }
+
+  /** One page after the cursor, in its family. A 409 is the board refusing the cursor (epoch changed, token fenced): reported, never resolved here. */
+  async function page({ mode, cursor }) {
+    const param = mode === 'commit' ? 'afterCommit' : 'afterSeq';
+    const r = await get(`${param}=${encodeURIComponent(cursor)}&limit=${limit}`);
+    if (r.status === 409) return { refused: { status: 409, code: r.body?.code ?? null, error: r.body?.error ?? null } };
+    if (!r.ok) throw new Error(`GET /api/conversations (${param}) → ${r.status}${r.body?.code ? ` ${r.body.code}` : ''}`);
+    const next = mode === 'commit' ? r.body?.nextAfterCommit : r.body?.nextAfterSeq;
+    if (!r.body || !Array.isArray(r.body.conversations) || typeof next !== 'string') throw new Error(`the ${mode}-mode listing did not answer {conversations, ${mode === 'commit' ? 'nextAfterCommit' : 'nextAfterSeq'}}`);
+    return { conversations: r.body.conversations, next };
+  }
+
+  /**
+   * A refused cursor: re-seed at the head and SAY SO. Every post between the last good read and now is never read, so
+   * the window is written to the state file, to stderr, and to the commons as this seat, asking for a re-share. The
+   * board's own advice ("resync from start") is not taken: that is the whole-history page, paid for.
+   */
+  async function resync(st, refused) {
+    const h = await head();
+    const record = { at: now(), from: st.cursor, to: h.cursor, mode: h.mode, reason: `${refused.status}${refused.code ? ` ${refused.code}` : ''}`, skippedSince: st.updatedAt ?? null, announced: false };
+    const since = record.skippedSince ?? 'an unknown time';
+    log(`extract-once: the board refused the saved cursor (${record.reason}); re-seeded at the head (${h.mode}). Posts since ${since} were not read; a link shared in that window needs re-sharing.`);
+    try {
+      const res = await fetchImpl(`${base}/api/conversations`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers() }, body: JSON.stringify({ author: actor, body: `Extraction skipped a window: the board refused my saved cursor (${record.reason}) and I resumed at the head at ${record.at}. Posts since ${since} were not read. If you shared a link in that window, please re-share it; nothing already queued was lost.` }) });
+      record.announced = res.status === 201;
+      if (!record.announced) log(`extract-once: the skip notice was refused by the board (${res.status})`);
+    } catch (e) { log(`extract-once: the skip notice could not be posted (${e?.message ?? e})`); }
+    return { ...h, record };
   }
 
   /** Keep the fetched bytes on disk; the Source points at them and carries their hash. */
@@ -75,9 +140,16 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
   }
 
   async function tick() {
-    const st = readState();
+    let st = readState();
     const started = [], skipped = [], failed = [], resumed = [];
     let pending = [...st.pending];
+
+    // 0. NO CURSOR (a fresh install, or a file saying "start"): begin at the head. Nothing before this moment is read.
+    if (!st.cursor) {
+      const h = await head();
+      st = { ...st, mode: h.mode, cursor: h.cursor };
+      writeState({ cursor: st.cursor, mode: st.mode, pending, resyncs: st.resyncs });
+    }
 
     // 1. RESUME what died mid-run, before anything new: the checkpoint has the model's answer, so this costs no model call
     for (const p of st.pending) {
@@ -90,11 +162,18 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
         if (attempts >= MAX_RESUME_ATTEMPTS) { failed.push({ url: p.url, jobId: p.jobId, reason: `resume gave up after ${attempts} attempts: ${e?.message ?? e}` }); pending = pending.filter((x) => x.jobId !== p.jobId); }
         else { failed.push({ url: p.url, jobId: p.jobId, reason: `resume: ${e?.message ?? e} (attempt ${attempts} of ${MAX_RESUME_ATTEMPTS}, still pending)` }); pending = pending.map((x) => (x.jobId === p.jobId ? { ...x, attempts } : x)); }
       }
-      writeState({ cursor: st.cursor, pending });
+      writeState({ cursor: st.cursor, mode: st.mode, pending, resyncs: st.resyncs });
     }
 
-    // 2. NEW posts since the cursor
-    const { conversations, nextAfterSeq } = await page(st.cursor);
+    // 2. NEW posts since the cursor — or, if the board refuses the cursor, re-seed at the head and report the window
+    const got = await page(st);
+    if (got.refused) {
+      const r = await resync(st, got.refused);
+      const resyncs = [...st.resyncs, r.record];
+      writeState({ cursor: r.cursor, mode: r.mode, pending, resyncs });
+      return { started, resumed, skipped, failed, pending: pending.length, cursor: r.cursor, mode: r.mode, read: 0, resync: r.record };
+    }
+    const { conversations, next } = got;
     const seenThisTick = new Set(pending.map((p) => p.jobId));
     for (const post of conversations) {
       const author = String(post.author ?? '');
@@ -116,7 +195,7 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
         const source = ingestSource({ text: got.text, url, contentUrl, encodingFormat: got.encodingFormat ?? 'text/plain', retrievedAt: now(), wasDerivedFrom: `${ENTITY}${post.id}` });
         // PENDING before the run, so a death mid-run leaves a record the next tick resumes from
         pending = [...pending, { jobId, url, postId: post.id, since: now(), attempts: 1 }];
-        writeState({ cursor: st.cursor, pending });
+        writeState({ cursor: st.cursor, mode: st.mode, pending, resyncs: st.resyncs });
         try {
           const r = await extractor.run({ source, modelKey, prompt, jobId });
           started.push({ url, jobId, runId: r.runId, outcome: r.outcome, published: r.published.length, rejected: r.rejected.length });
@@ -124,8 +203,8 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
         } catch (e) { failed.push({ url, jobId, reason: `run: ${e?.message ?? e} (pending: the next tick resumes it)` }); }
       }
     }
-    writeState({ cursor: nextAfterSeq, pending });
-    return { started, resumed, skipped, failed, pending: pending.length, cursor: nextAfterSeq, read: conversations.length };
+    writeState({ cursor: next, mode: st.mode, pending, resyncs: st.resyncs });
+    return { started, resumed, skipped, failed, pending: pending.length, cursor: next, mode: st.mode, read: conversations.length };
   }
 
   return { tick, readState };

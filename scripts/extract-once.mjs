@@ -16,7 +16,9 @@
  *   SCRUM_SEAT_TOKEN_FILE         this seat's bearer token, one line             (required)
  *   SCRUM_GRAPH_EXECUTOR_URL      the graph executor                             (required)
  *   SCRUM_GRAPH_DATASET_ID        its dataset id                                 (required)
- *   SCRUM_EXTRACT_STATE_FILE      the cursor                                     (required)
+ *   SCRUM_EXTRACT_STATE_FILE      the cursor and its family (commit on a graph-served board, seq on a document-served
+ *                                 one; chosen by asking the board). ABSENT on a fresh install: the first tick begins
+ *                                 at the head and reads nothing older. Never seed it with "start" (#1837).   (required)
  *   SCRUM_EXTRACT_SOURCES_DIR     where fetched bytes are kept                   (required)
  *   SCRUM_EXTRACT_MODEL_KEY       the registry key of the model to run           (default deepseek-v4-flash, the owner's choice in 49176)
  *   SCRUM_EXTRACT_PROMPT          the extraction prompt text                     (default below)
