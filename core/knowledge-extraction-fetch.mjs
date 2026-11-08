@@ -101,7 +101,9 @@ export function pinnedRequest({ url, address, family, headers = {}, timeoutMs = 
     const mod = u.protocol === 'https:' ? https : http;
     const req = mod.request(u, {
       method: 'GET', headers,
-      lookup: (_host, _opts, cb) => cb(null, address, family),   // the address that was CHECKED; no resolver is consulted here
+      // the address that was CHECKED; no resolver is consulted here. Node ≥20 asks with {all:true} (autoSelectFamily) and
+      // expects an ARRAY; a string there is 'Invalid IP address: undefined' (51221, run on node 22 and 24)
+      lookup: (_host, opts, cb) => (opts && opts.all ? cb(null, [{ address, family }]) : cb(null, address, family)),
       servername: u.hostname, timeout: timeoutMs,
     }, (res) => {
       const declared = Number(res.headers['content-length']);

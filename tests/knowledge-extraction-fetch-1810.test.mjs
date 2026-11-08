@@ -17,6 +17,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import { createFetcher, isPrivateAddress, RefusedDestination } from '../core/knowledge-extraction-fetch.mjs';
 
 const PUBLIC_V4 = '93.184.216.34';
@@ -148,4 +149,16 @@ test('#1810 R9e-7 — the connection is PINNED to the checked address: a resolve
   assert.equal((await f2('https://flip.example.test/a')).text, 'b');
   assert.deepEqual(twice.calls.map((c) => c.address), [PUBLIC_V4, PUBLIC_V4]);
   assert.equal(asks, 2, 'one resolution per hop, none at connect');
+});
+
+test('#1810 R9e-8 — the DEFAULT request (no seam) reaches a real server by HOSTNAME through the pinned lookup: node asks the lookup with {all:true} and the checked address is what it connects to', async () => {
+  const srv = http.createServer((req, res) => { res.setHeader('content-type', 'text/plain'); res.end(`host header ${req.headers.host}`); });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  try {
+    let asks = 0;
+    const fetchSource = createFetcher({ allowHttp: true, allowPrivate: true, resolve: async () => { asks += 1; return [{ address: '127.0.0.1', family: 4 }]; } });
+    const r = await fetchSource(`http://pinned.example.test:${srv.address().port}/x`);
+    assert.equal(r.text, 'host header pinned.example.test:' + srv.address().port, 'the request went to the checked address with the url\'s host');
+    assert.equal(asks, 1, 'our resolver once; node\'s own lookup never ran (a name nobody can resolve was reached)');
+  } finally { await new Promise((r) => srv.close(r)); }
 });

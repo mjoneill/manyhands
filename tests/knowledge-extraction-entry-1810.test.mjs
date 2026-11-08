@@ -20,6 +20,7 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
+import dns from 'node:dns/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -57,6 +58,14 @@ async function fakeSite() {
   const srv = http.createServer((req, res) => { hits += 1; if (req.url === '/articles/harness') { res.setHeader('content-type', 'text/plain'); res.end(ARTICLE); } else { res.statusCode = 404; res.end('no'); } });
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   return { url: `http://127.0.0.1:${srv.address().port}/articles/harness`, hits: () => hits, stop: () => new Promise((r) => srv.close(r)) };
+}
+/** R14d: the same article behind a NAME. Bound to whatever `localhost` resolves to FIRST here, so the entry's real lookup path runs. */
+async function fakeSiteByName() {
+  let hits = 0;
+  const srv = http.createServer((req, res) => { hits += 1; if (req.url === '/articles/harness') { res.setHeader('content-type', 'text/plain'); res.end(ARTICLE); } else { res.statusCode = 404; res.end('no'); } });
+  const [first] = await dns.lookup('localhost', { all: true, verbatim: true });
+  await new Promise((r) => srv.listen(0, first.address, r));
+  return { url: `http://localhost:${srv.address().port}/articles/harness`, hits: () => hits, stop: () => new Promise((r) => srv.close(r)) };
 }
 
 const TOK = mintToken();
@@ -131,6 +140,21 @@ test('#1810 R14 — one shared link, one launch: exit 0, a summary naming the jo
   const s2 = JSON.parse(r2.stdout.trim().split('\n').pop());
   assert.equal(s2.started.length, 0, 'a second launch starts nothing');
   assert.equal(provider.seen.length, 1, 'and asks the provider nothing');
+});
+
+test('#1810 R14d — a link by HOSTNAME (not an IP literal): the entry resolves it, checks the address and connects through the pinned lookup; the article is fetched and the job completes', { skip: SKIP }, async () => {
+  const named = await fakeSiteByName();
+  try {
+  const p = await fetch(`${SRV.baseUrl}/api/conversations`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ author: 'person-a', body: `and by name: ${named.url}` }) }).then((r) => r.json());
+  assert.ok(p.id);
+  const r = await run({ ...baseEnv(), OPENROUTER_API_KEY: 'sk-or-test-not-a-real-key' });
+  assert.equal(r.status, 0, `exit 0 (stderr: ${r.stderr.slice(0, 800)})`);
+  const summary = JSON.parse(r.stdout.trim().split('\n').pop());
+  assert.equal(summary.started.length, 1, `one job started for the by-name link (${r.stdout.slice(0, 600)})`);
+  assert.equal(summary.started[0].url, named.url);
+  assert.equal(summary.started[0].outcome, 'complete', `fetched and extracted (${JSON.stringify(summary.started[0])})`);
+  assert.equal(named.hits(), 1, 'the article was fetched once, by name');
+  } finally { await named.stop(); }
 });
 
 test('#1810 R14b — without OPENROUTER_API_KEY the entry exits non-zero naming the variable, never a value, before any network call', { skip: SKIP }, async () => {

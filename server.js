@@ -2206,19 +2206,26 @@ async function denseCardSearch(q, k, S, thresholds) {
     } catch { /* the index is a cache of the model; failing to persist it costs re-embedding, not correctness */ }
     const coverage = { indexed: rankable.length, total: plan.coverage.total, stale: plan.coverage.stale - fresh.length };   // the pinned shape; sources ride beside it
     const embeddedSourceRows = rows.filter((r) => isSourceRowId(r.id) && !retainedSourceRows.includes(r)).length;
+    // stale PER KIND (51219): a doc with no row after this batch is stale; Sources count their own, never into the cards' number
+    const held = new Set(rows.map((r) => r.id));
+    const staleSources = docs.filter((d) => isSourceRowId(d.id) && !held.has(d.id)).length;
+    const staleCards = coverage.stale - staleSources;
     // documents = Sources read from the executor this call; embeddedRows = their rows in the index now (batching can lag);
     // retainedRows = rows kept unranked because the executor could not be asked (51190: the count names what it counts)
-    const sourcesIndexed = { documents: sources.length, embeddedRows: embeddedSourceRows, retainedRows: retainedSourceRows.length, unsearched: !!sourcesUnavailable, ...(sourcesNote ? { note: sourcesNote } : {}) };
+    const sourcesIndexed = { documents: sources.length, embeddedRows: embeddedSourceRows, retainedRows: retainedSourceRows.length, stale: staleSources, unsearched: !!sourcesUnavailable, ...(sourcesNote ? { note: sourcesNote } : {}) };
     const partial = coverage.stale > 0 || coverage.indexed < coverage.total || !!sourcesUnavailable;
     const ranked = S.rank(qv, rankable, { k });
+    // 51219: search/all ranks each surface AMONG ITSELF — a shared top-k split afterwards lets one kind crowd the other out at small k
+    const perKind = { cards: S.rank(qv, rankable.filter((r) => !isSourceRowId(r.id)), { k }), sources: S.rank(qv, rankable.filter((r) => isSourceRowId(r.id)), { k }) };
     const byId = new Map(docs.map((c) => [c.id, c]));
-    const results = ranked.map((r) => {
+    const toResult = (r) => {
       const c = byId.get(r.id);
       const score = Math.round(r.score * 1000) / 1000;
       if (c?.kind === 'source') return { id: r.id, kind: 'source', title: c.title ?? null, url: c.url ?? null, synopsis: (c.description ?? '').slice(0, 600), score };   // #1810 R10: the synopsis IS the reminder (51190 finding 1)
       return { id: r.id, shortId: c?.shortId ?? null, title: c?.title ?? null, column: c?.column ?? null, score };
-    });
-    return { available: true, S, ranked, results, coverage, partial, generation, byId, cards, sourcesIndexed };
+    };
+    const results = ranked.map(toResult);
+    return { available: true, S, ranked, results, coverage, partial, generation, byId, cards, sourcesIndexed, staleCards, perKindResults: { cards: perKind.cards.map(toResult), sources: perKind.sources.map(toResult) } };
 }
 
 async function handleSearch(req, res) {
@@ -2279,12 +2286,13 @@ async function handleSearch(req, res) {
       top: pick(d.top), contenders: d.contenders.map(pick).filter(Boolean),
       abstainBelow: d.abstainBelow, askWithin: d.askWithin,
       results, coverage, partial, reader, sources: dense.sourcesIndexed,   // #1810 R10: the Sources beside the card coverage
-      means: 'coverage counts cards AND the Sources the extraction service published (coverage.total includes both); a result with kind "source" is a published Source, addressed by its IRI, carrying the shared url and its synopsis. sources.unsearched true means the executor could not be asked this call: cards still answered, no Source was ranked, and their index rows were retained.',
       generation: { model: generation.model, dims: generation.dims, builtAt: generation.builtAt },
-      means: {
+      means: {   // ONE object (51219: a second `means` key shadowed the first and the delivered text said cards only)
+        coverage: 'coverage counts cards AND the Sources the extraction service published (coverage.total includes both; sources.stale is the Sources\' own un-embedded count). A result with kind "source" is a published Source, addressed by its IRI, carrying the shared url and its synopsis.',
+        sources: 'sources.unsearched true means the executor could not be asked this call: cards still answered, no Source was ranked, and their index rows were retained.',
         verdict: 'answer = a clear top hit · ask = ≥2 candidates within askWithin of the top (they are the question) · abstain = top cosine below abstainBelow, or an empty index',
         reader: 'null unless the request said read:true. Then a local model READS the top-k and gives its own answer/ask/abstain with the cards it names and one sentence why — a second instrument beside the cosine verdict, never a replacement. available:false with a reason when no model is configured, the model cannot be reached, or its reply could not be read: that is "could not read", never "found nothing". ledgerId is the model-call row that made it (#1202).',
-        partial: 'true when cards remain un-embedded; the answer was computed over `coverage.indexed` of `coverage.total` cards — could-not-search-everything is not found-nothing',
+        partial: 'true when cards or Sources remain un-embedded, or the Sources could not be asked for; the answer was computed over `coverage.indexed` of `coverage.total` documents — could-not-search-everything is not found-nothing',
       },
     };
     // The verbatim query log — ask.py's guard 2: the first month's questions
@@ -2364,14 +2372,15 @@ async function handleSearchAll(req, res) {
       const S = await loadSearchModule();
       const dense = await denseCardSearch(q, k, S, { abstainBelow: SEARCH_ABSTAIN_BELOW, askWithin: SEARCH_ASK_WITHIN });
       if (dense.available) {
-        cardHits = dense.results.filter((r) => r.kind !== 'source').map((r) => ({ id: String(r.shortId ?? r.id), score: r.score, title: r.title, column: r.column }));
-        sourceHits = dense.results.filter((r) => r.kind === 'source').map((r) => ({ id: r.id, kind: 'source', score: r.score, title: r.title, url: r.url, synopsis: r.synopsis }));   // #1810 R10
+        // each kind ranked AMONG ITSELF (51219): not a shared top-k split afterwards, which at k=1 left cards.hits empty when a Source won
+        cardHits = dense.perKindResults.cards.map((r) => ({ id: String(r.shortId ?? r.id), score: r.score, title: r.title, column: r.column }));
+        sourceHits = dense.perKindResults.sources.map((r) => ({ id: r.id, kind: 'source', score: r.score, title: r.title, url: r.url, synopsis: r.synopsis }));   // #1810 R10
         const S0 = dense.sourcesIndexed ?? {};
         const cardsOnly = dense.coverage.total - S0.documents;
-        cardCoverage = { method: 'dense', model: SEARCH_EMBED_MODEL, searched: Math.max(0, dense.coverage.indexed - S0.embeddedRows), total: cardsOnly, stale: dense.coverage.stale };
+        cardCoverage = { method: 'dense', model: SEARCH_EMBED_MODEL, searched: Math.max(0, dense.coverage.indexed - S0.embeddedRows), total: cardsOnly, stale: dense.staleCards };   // cards' own stale (51219)
         sourceCoverage = S0.unsearched
           ? { method: 'dense', searched: 0, total: null, retainedRows: S0.retainedRows, error: S0.note ?? 'sources not indexed' }
-          : { method: 'dense', model: SEARCH_EMBED_MODEL, searched: S0.embeddedRows, total: S0.documents };
+          : { method: 'dense', model: SEARCH_EMBED_MODEL, searched: S0.embeddedRows, total: S0.documents, stale: S0.stale };
       } else {
         cardCoverage = { method: 'dense', searched: 0, total: (data.cards || []).length, error: dense.reason };
       }
@@ -2391,7 +2400,7 @@ async function handleSearchAll(req, res) {
         posts: { method: 'bm25-scan', searched: scanned.searched, total: conversations.length, ms: scanMs },
         decisions: decisionError ? { method: 'bm25-scan', searched: 0, error: decisionError } : { method: 'bm25-scan', searched: wires.length, total: wires.length },
       },
-      means: 'Each surface is ranked by its own method; scores are NOT comparable across surfaces. `searched: 0` with an `error` means that surface was NOT searched — never read it as "nothing found". sources.hits are Sources the extraction service published, addressed by IRI (not a graph_neighbors id), each with the shared url and its synopsis. Talk posts are included; a hit inside a talk carries `talk`. Every hit id is in graph_neighbors\' grammar.',
+      means: 'Each surface is ranked by its own method; scores are NOT comparable across surfaces. `searched: 0` with an `error` means that surface was NOT searched — never read it as "nothing found". sources.hits are Sources the extraction service published, addressed by IRI (not a graph_neighbors id), each with the shared url and its synopsis. Talk posts are included; a hit inside a talk carries `talk`. Card, post and decision hit ids are in graph_neighbors\' grammar; a Source hit is its IRI.',
     });
   } catch (e) {
     console.error('POST /api/search/all:', e.message);

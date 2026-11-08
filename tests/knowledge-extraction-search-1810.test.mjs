@@ -76,6 +76,12 @@ test('#1810 R10 — the published Source is found by the search people already u
   assert.match(found.results[0].synopsis ?? '', /^An article on harnesses/, 'the synopsis travels with the hit: it IS the reminder (51190 finding 1)');
   assert.equal(found.sources?.documents, 1, 'one Source document read from the executor'); assert.equal(found.sources?.embeddedRows, 1, 'and one row embedded for it'); assert.equal(found.sources?.unsearched, false);
   assert.ok(found.coverage.total >= 3, `the index covers cards AND sources (${JSON.stringify(found.coverage)})`);
+  // 51219: the explanation of the widened coverage must be the one DELIVERED, inside the one means object, not shadowed by a second key
+  assert.equal(typeof found.means, 'object', 'means is one object');
+  assert.match(found.means.verdict ?? '', /answer = a clear top hit/, 'the verdict explanation is still there');
+  assert.match(found.means.coverage ?? '', /Sources/, 'the coverage explanation names Sources');
+  assert.match(found.means.partial ?? '', /Source/, 'partial speaks of Sources too, not cards only');
+  assert.equal(found.sources?.stale, 0, 'sources carry their OWN stale count');
 
   const control = await search('the push gate refused my push');
   assert.notEqual(control.results[0]?.id, src.iri, 'a control query on another axis does not put the Source first');
@@ -95,7 +101,7 @@ test('#1810 R10b — the SourceVersion carries name, abstract and url in the gra
   assert.equal(none.length, 0, 'a non-string title is not written as a name');
 });
 
-const searchAll = (q) => fetch(`${SRV.baseUrl}/api/search/all`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ q, k: 5 }) }).then((r) => r.json());
+const searchAll = (q, k = 5) => fetch(`${SRV.baseUrl}/api/search/all`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ q, k }) }).then((r) => r.json());
 
 test('#1810 R10c — search/all gives Sources their own typed surface: sources.hits with kind, url and synopsis, their own coverage, and never a Source IRI inside cards.hits', { skip: SKIP }, async () => {
   const all = await searchAll(OWNER_SENTENCE);
@@ -107,6 +113,13 @@ test('#1810 R10c — search/all gives Sources their own typed surface: sources.h
   assert.ok(all.cards.hits.every((h) => !/^https?:\/\//.test(String(h.id))), 'no Source IRI masquerades as a card hit');
   assert.equal(all.coverage.sources?.method, 'dense'); assert.equal(all.coverage.sources?.searched, 1); assert.equal(all.coverage.sources?.total, 1);
   assert.match(all.means ?? '', /source/i, 'the means line says what a source hit is and how it is addressed');
+  assert.ok(!/Every hit id is in graph_neighbors/.test(all.means), 'and does not then say every id is graph_neighbors grammar (a Source IRI is not)');
+  assert.equal(all.coverage.sources?.stale, 0, 'sources have their own stale count'); assert.equal(all.coverage.cards?.stale, 0);
+  // 51219: each surface ranked on its own. A query the Source wins outright, k=1: the card that matches is STILL cards.hits[0]
+  const one = await searchAll('search search the gate', 1);
+  assert.equal(one.sources.hits.length, 1); assert.equal(one.sources.hits[0].kind, 'source');
+  assert.equal(one.cards.hits.length, 1, `cards are ranked among themselves, not left over from a shared top-k (${JSON.stringify(one.cards)})`);
+  assert.equal(one.cards.hits[0].id, '1', 'the gate card');
 });
 
 test('#1810 R10d — the executor refuses after a Source was indexed: cards still answer, the Source is NOT ranked from a stale cache, its rows are retained, and BOTH entrypoints say the sources were unsearched', { skip: SKIP }, async () => {
