@@ -439,3 +439,38 @@ test('#1810 R11c — two assertions quoting the SAME span survive the post-write
   assert.deepEqual([...runs.runs[0].generated].sort(), [...byIri.keys()].sort(), 'the run record names both, each by its own IRI');
   assert.equal(model.bodies.length, 1);
 });
+
+// ── #1839: the first real specimen published 0 of 44 because the model named its relations in plain words ─────
+test('#1839 R12 — a predicate in plain words ("enables", "is_defined_as") is a PROPOSED predicate (decision 4cfd9497): published under the generic relation with the word kept, never rejected as bad-shape', { skip: SKIP }, async () => {
+  const src = ingestSource({ text: FIXTURE, url: FIXTURE_URL });
+  const { extractor } = extractorWith({ model: fakeModel([reply(
+    item(3, 'empirical', 'Tools are how the harness lets the model act', 'tool', 'enables', 'harness'),
+    item(1, 'definition', 'A harness is the layer between a model and the world.', 'harness', 'is_defined_as', 'layer'),
+  )]) });
+  const r = await extractor.run({ source: src, modelKey: 'fake-a', prompt: 'p' });
+  assert.equal(r.rejected.length, 0, `nothing rejected (${JSON.stringify(r.rejected)})`);
+  assert.equal(r.outcome, 'complete');
+  assert.deepEqual(r.published.map((p) => [p.predicate, p.proposedPredicate]), [['scrum:relatedTo', 'enables'], ['scrum:relatedTo', 'is_defined_as']]);
+  const pp = await q(`SELECT ?pp WHERE { <${r.published[0].iri}> <${RS}proposedPredicate> ?pp ; <${RDF}reifies> <<( ?s <${RS}relatedTo> ?o )>> }`);
+  assert.equal(pp[0]?.pp?.value, 'enables', 'the reifier quotes relatedTo and keeps the model\'s word as the literal');
+});
+
+test('#1839 R12b — what is neither a known prefixed term nor one plain word is still bad-shape: unknown prefix, extra colon, spaces, empty, leading digit', { skip: SKIP }, async () => {
+  const src = ingestSource({ text: FIXTURE, url: FIXTURE_URL });
+  const junk = ['foo:bar', 'scrum:a:b', 'is part of', '', '9lives'];
+  const { extractor } = extractorWith({ model: fakeModel([reply(...junk.map((p) => item(1, 'definition', 'A harness is the layer between a model and the world.', 'harness', p, 'layer')))]) });
+  const r = await extractor.run({ source: src, modelKey: 'fake-a', prompt: 'p' });
+  assert.equal(r.published.length, 0, `nothing published (${JSON.stringify(r.published)})`);
+  assert.deepEqual(r.rejected.map((x) => x.reason), junk.map(() => 'bad-shape'));
+});
+
+test('#1839 R12c — the model is told the registered predicates it was handed, and to use one plain word when none fits', { skip: SKIP }, async () => {
+  const src = ingestSource({ text: FIXTURE, url: FIXTURE_URL });
+  const model = fakeModel([reply(...goodItems())]);
+  const registry = new Set(['scrum:relatedTo', 'scrum:dependsOn', 'schema:isPartOf', 'scrum:unusualTermForThisRow']);
+  const { extractor } = extractorWith({ model, registry });
+  await extractor.run({ source: src, modelKey: 'fake-a', prompt: 'p' });
+  const system = model.bodies[0].messages.find((m) => m.role === 'system').content;
+  for (const term of registry) assert.ok(system.includes(term), `the system prompt names ${term}`);
+  assert.match(system, /one plain word/i, 'the fallback is stated');
+});
