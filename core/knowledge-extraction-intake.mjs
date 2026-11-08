@@ -23,9 +23,10 @@ const ENTITY = 'https://scrumboard.local/entity/';
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
 
 /** The https links in a text, in order, deduplicated, trailing punctuation stripped. http:// is not a source. */
-export function linksOf(text) {
+export function linksOf(text, { allowHttp = false } = {}) {
   const out = [];
-  for (const m of String(text ?? '').matchAll(/https:\/\/[^\s<>()[\]"']+/g)) {
+  const re = allowHttp ? /https?:\/\/[^\s<>()[\]"']+/g : /https:\/\/[^\s<>()[\]"']+/g;   // http only when a caller says so (a loopback test site); production never does
+  for (const m of String(text ?? '').matchAll(re)) {
     const url = m[0].replace(/[.,;:!?]+$/, '');
     if (url.length > 'https://'.length && !out.includes(url)) out.push(url);
   }
@@ -33,7 +34,7 @@ export function linksOf(text) {
 }
 export const jobIdFor = (url) => `job-${sha256(url)}`;
 
-export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fetchSource, extractor, modelKey, prompt, limit = 200, fetchImpl = fetch, now = () => new Date().toISOString() } = {}) {
+export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fetchSource, extractor, modelKey, prompt, limit = 200, allowHttp = false, fetchImpl = fetch, now = () => new Date().toISOString() } = {}) {
   for (const [k, v] of Object.entries({ boardUrl, stateFile, sourcesDir, fetchSource, extractor, modelKey })) if (!v) throw new Error(`createIntake needs ${k}`);
   if (typeof prompt !== 'string') throw new Error('createIntake needs the prompt text');
   const base = String(boardUrl).replace(/\/$/, '');
@@ -72,7 +73,7 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
     const seenThisTick = new Set();
     for (const post of conversations) {
       if (NON_SOURCE_AUTHORS.includes(String(post.author))) continue;
-      for (const url of linksOf(post.body)) {
+      for (const url of linksOf(post.body, { allowHttp })) {
         const jobId = jobIdFor(url);
         if (seenThisTick.has(jobId)) { skipped.push({ url, jobId, reason: 'same tick: already handled' }); continue; }
         seenThisTick.add(jobId);

@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  #1810 — the knowledge-extraction service, one tick per launch (scripts/extract-once.mjs).
+
+  TEMPLATE: fill the placeholders, never a value for the key.
+    __NODE__     the node binary the board's jobs use (e.g. the same one com.scrumboard.rest runs)
+    __SERVE__    the served tree (the folder com.scrumboard.rest runs from)
+    __DATA__     the board's data folder (state file and fetched sources live under it)
+    __TOKEN__    this seat's bearer-token file (issued like any guest seat's)
+    __EXECUTOR__ the graph executor's url, and __DATASET__ its dataset id (both as com.scrumboard.rest has them)
+    __LOGS__     a folder for stdout/stderr
+
+  The key: loaded from the Keychain at launch by the shell line below, into the environment, and nowhere else.
+  The item is the same one the board's other OpenRouter job uses:  security find-generic-password -s OPENROUTER_API_KEY -w
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.scrumboard.extractor</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>OPENROUTER_API_KEY="$(security find-generic-password -s OPENROUTER_API_KEY -w)" exec "__NODE__" "__SERVE__/scripts/extract-once.mjs"</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
+    <key>SCRUM_BOARD_URL</key>
+    <string>http://127.0.0.1:3141</string>
+    <key>SCRUM_SEAT_TOKEN_FILE</key>
+    <string>__TOKEN__</string>
+    <key>SCRUM_GRAPH_EXECUTOR_URL</key>
+    <string>__EXECUTOR__</string>
+    <key>SCRUM_GRAPH_DATASET_ID</key>
+    <string>__DATASET__</string>
+    <key>SCRUM_EXTRACT_STATE_FILE</key>
+    <string>__DATA__/extract-state.json</string>
+    <key>SCRUM_EXTRACT_SOURCES_DIR</key>
+    <string>__DATA__/sources</string>
+    <key>SCRUM_EXTRACT_MODEL_KEY</key>
+    <string>deepseek-v4-flash</string>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>__SERVE__</string>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>__LOGS__/extractor.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOGS__/extractor.err.log</string>
+</dict>
+</plist>
