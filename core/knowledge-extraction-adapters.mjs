@@ -16,6 +16,7 @@
  *   can record a call is the place that made it). The key is read into the header and nowhere else: never logged,
  *   never on the ledger row, never in an error message.
  */
+import crypto from 'node:crypto';
 
 const need = (v, what) => { if (typeof v !== 'string' || !v.trim()) throw new Error(`${what} is required`); return v.trim(); };
 
@@ -85,24 +86,26 @@ export function createOpenRouterModel({ apiKey, baseUrl = 'https://openrouter.ai
 
   async function send(body) {
     const t0 = Date.now();
+    // #1843: ONE id per call, on every row this call writes. The graph ledger (#1582) refuses a row without one.
+    const requestId = `kx-${crypto.randomUUID()}`;
     const wire = { ...body, model: id };
     let res, text = '';
     try {
       res = await fetchImpl(`${base}/chat/completions`, { method: 'POST', headers: { 'content-type': 'application/json', Authorization: `Bearer ${key}` }, body: JSON.stringify(wire) });
       text = await res.text();
     } catch (e) {
-      await ledgerRow({ by, agent: by, model: id, provider: 'openrouter', protocol: 'openai-completions', ok: false, error: `transport: ${e?.message ?? e}`.slice(0, 300), latencyMs: Date.now() - t0, at: now() });
+      await ledgerRow({ requestId, by, agent: by, model: id, provider: 'openrouter', protocol: 'openai-completions', ok: false, error: `transport: ${e?.message ?? e}`.slice(0, 300), latencyMs: Date.now() - t0, at: now() });
       throw e;
     }
     const latencyMs = Date.now() - t0;
     let json = null; try { json = text ? JSON.parse(text) : null; } catch { /* not json */ }
     if (res.status !== 200) {
-      await ledgerRow({ by, agent: by, model: id, provider: 'openrouter', protocol: 'openai-completions', ok: false, error: `http ${res.status}: ${(json?.error?.message ?? text).slice(0, 200)}`, latencyMs, at: now() });
+      await ledgerRow({ requestId, by, agent: by, model: id, provider: 'openrouter', protocol: 'openai-completions', ok: false, error: `http ${res.status}: ${(json?.error?.message ?? text).slice(0, 200)}`, latencyMs, at: now() });
       return { status: res.status, json: null };
     }
     const content = json?.choices?.[0]?.message?.content;
     let parsed = null; try { parsed = typeof content === 'string' ? JSON.parse(content) : content ?? null; } catch { parsed = null; }
-    await ledgerRow({ by, agent: by, model: id, provider: 'openrouter', protocol: 'openai-completions', ok: true,
+    await ledgerRow({ requestId, by, agent: by, model: id, provider: 'openrouter', protocol: 'openai-completions', ok: true,
       tokensIn: json?.usage?.prompt_tokens ?? null, tokensOut: json?.usage?.completion_tokens ?? null,
       stopReason: json?.choices?.[0]?.finish_reason ?? null, latencyMs, at: now() });
     return { status: 200, json: parsed };

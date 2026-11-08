@@ -130,3 +130,26 @@ test('#1810 R13b — every OpenRouter call, refused ones included, lands ONE mod
   assert.equal(ledgerWrites.length, 2);
   for (const w of ledgerWrites) assert.ok(!JSON.stringify(w.body).includes('sk-or-test'), 'the key never reaches the board');
 });
+
+// #1843: production stores model calls in the graph (#1582), which REFUSES a row without a requestId. The document-mode
+// server above accepts one, so R13b could not see the gap. This ledger refuses exactly as the graph path does.
+test('#1843 R13c — every OpenRouter ledger row carries ONE requestId in the shape the graph ledger requires, distinct per call', async () => {
+  const { REQUEST_ID_RE } = await import('../core/unit3-graph.mjs');
+  const rows = []; const refused = [];
+  const ledger = { async recordModelCall(row) {
+    if (row.requestId == null || !REQUEST_ID_RE.test(row.requestId)) { refused.push(row); throw new Error('POST /api/model-calls → 400: requestId is required'); }
+    rows.push(row);
+  } };
+  let n = 0;
+  const fakeFetch = async () => {
+    n += 1;
+    if (n === 2) return new Response(JSON.stringify({ error: { message: 'rate limited' } }), { status: 429, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify({ id: 'gen-1', choices: [{ message: { role: 'assistant', content: '{"items":[]}' } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const model = createOpenRouterModel({ apiKey: 'sk-or-test-not-a-real-key', baseUrl: 'https://openrouter.test/api/v1', modelId: 'm/x', fetchImpl: fakeFetch, ledger });
+  const body = { model: 'k', messages: [{ role: 'user', content: 'u' }] };
+  await model.send(body); await model.send(body);
+  assert.equal(refused.length, 0, `no row refused (${JSON.stringify(refused)})`);
+  assert.equal(rows.length, 2, 'one row per call, the refused 429 included');
+  assert.notEqual(rows[0].requestId, rows[1].requestId, 'two calls are two requestIds');
+});
