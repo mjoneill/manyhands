@@ -122,6 +122,17 @@ test('the refusal names the SAFE fix: a linked (shared) tree gets its own instal
   assert.match(own.out, /fix: npm ci in .*shared-src \(this checkout's own tree\)/);
 });
 
+test('fail-closed: a checker that exits 0 WITHOUT its verdict line is refused, not read as an all-clear', async () => {
+  // The header's claim is "an unchecked tree must not read as an all-clear". A checker that crashed quietly, or a
+  // future one that returns early, can exit 0 having printed nothing. Without the verdict-line clause that would run.
+  const { dir, marker } = fixture('silent-checker');
+  fs.writeFileSync(path.join(dir, 'scripts', 'deploy-deps-check.mjs'), 'process.exit(0);\n');
+  const r = await runTests(dir);
+  assert.equal(r.code, 2, `a silent exit 0 must refuse: ${r.out.slice(0, 400)}`);
+  assert.match(r.out, /REFUSED/);
+  assert.equal(fs.existsSync(marker), false, 'no test ran on an unchecked tree');
+});
+
 test('run-tests.sh runs as before when the tree matches the lockfile', async () => {
   const { dir, marker } = fixture('instep');
   const r = await runTests(dir);
