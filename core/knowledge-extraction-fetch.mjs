@@ -8,13 +8,14 @@
  * answer among several is enough). Redirects are followed BY HAND (redirect: 'manual'), each hop checked the same
  * way, at most MAX_HOPS. The body is bounded in bytes and must be a text type; HTML is reduced to lines.
  *
- * Stated gap: the check and the connection are two steps, so a resolver that answers differently to the client's own
- * lookup moments later could swap the address (a DNS rebinding). Closing it means connecting to the address that was
- * checked: `https.request` takes a `lookup` option that does exactly that without a new dependency (51203); until then
- * the sharers are a configured, trusted list, and this paragraph names what is not yet pinned.
+ * THE CONNECTION IS PINNED to the address that was checked (51204/51205): the request is made with http(s).request
+ * and a `lookup` that returns that address, so there is no second resolution and a resolver that answers differently
+ * moments later cannot swap the destination. A `request` seam is injected in tests; the default is the pinned one.
  */
 import dns from 'node:dns/promises';
 import net from 'node:net';
+import http from 'node:http';
+import https from 'node:https';
 
 export const MAX_HOPS = 5;
 export const DEFAULT_MAX_BYTES = 3_000_000;
@@ -58,7 +59,8 @@ export function v6Bytes(text) {
 const dotted = (b) => b.join('.');
 
 /** Not public: a non-address, or any address in the ranges above, or an IPv6 that EMBEDS a non-public IPv4 (mapped ::ffff:0:0/96,
- *  compatible ::/96, NAT64 64:ff9b::/96, 6to4 2002::/16). A public v4 embedded any of those ways stays public. */
+ *  compatible ::/96, NAT64 64:ff9b::/96 and local-use 64:ff9b:1::/48, 6to4 2002::/16, Teredo 2001::/32 whose tail is complemented).
+ *  A public v4 embedded any of those ways stays public: the EMBEDDED address is what is judged, never the prefix. */
 export function isPrivateAddress(ip) {
   if (typeof ip !== 'string' || !ip.trim()) return true;
   const a = ip.trim().replace(/^\[|\]$/g, '');
@@ -71,6 +73,8 @@ export function isPrivateAddress(ip) {
   if (zero(0, 12)) return isPrivateAddress(dotted(b.slice(12)));                                           // ::a.b.c.d (compatible)
   if (b[0] === 0x00 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b && zero(4, 12)) return isPrivateAddress(dotted(b.slice(12)));   // 64:ff9b::/96 NAT64
   if (b[0] === 0x20 && b[1] === 0x02) return isPrivateAddress(dotted(b.slice(2, 6)));                       // 2002::/16 6to4
+  if (b[0] === 0x00 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b && b[4] === 0x00 && b[5] === 0x01) return isPrivateAddress(dotted(b.slice(12)));   // 64:ff9b:1::/48 local-use NAT64 (RFC 8215)
+  if (b[0] === 0x20 && b[1] === 0x01 && b[2] === 0x00 && b[3] === 0x00) return isPrivateAddress(dotted(b.slice(12).map((x) => x ^ 0xff)));   // 2001::/32 Teredo: the client v4 is the COMPLEMENTED tail (RFC 4380 §4)
   return false;
 }
 
@@ -86,49 +90,60 @@ export function htmlToText(html) {
 
 const defaultResolve = (host) => dns.lookup(host, { all: true, verbatim: true });
 
-export function createFetcher({ allowHttp = false, allowPrivate = false, maxBytes = DEFAULT_MAX_BYTES, maxHops = MAX_HOPS, resolve = defaultResolve, fetchImpl = fetch, timeoutMs = 30_000, userAgent = 'manyhands-extractor/1810' } = {}) {
-  /** The check: scheme, then the literal or every resolved address. Throws RefusedDestination; never connects. */
+/**
+ * The default request: http(s).request to `url`, CONNECTED TO `address` through a `lookup` that returns it and nothing
+ * else, with TLS still verifying the url's hostname (servername is the hostname, not the address). Bytes are bounded
+ * while streaming. Returns { status, headers: { get }, text }.
+ */
+export function pinnedRequest({ url, address, family, headers = {}, timeoutMs = 30_000, maxBytes = DEFAULT_MAX_BYTES }) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const mod = u.protocol === 'https:' ? https : http;
+    const req = mod.request(u, {
+      method: 'GET', headers,
+      lookup: (_host, _opts, cb) => cb(null, address, family),   // the address that was CHECKED; no resolver is consulted here
+      servername: u.hostname, timeout: timeoutMs,
+    }, (res) => {
+      const declared = Number(res.headers['content-length']);
+      if (Number.isFinite(declared) && declared > maxBytes) { res.destroy(); return reject(new Error(`fetch: body is ${declared} bytes, over the ${maxBytes}-byte cap`)); }
+      const chunks = []; let size = 0;
+      res.on('data', (c) => { size += c.length; if (size > maxBytes) { res.destroy(); reject(new Error(`fetch: body exceeds the ${maxBytes}-byte cap`)); return; } chunks.push(c); });
+      res.on('end', () => resolve({ status: res.statusCode, headers: { get: (k) => res.headers[String(k).toLowerCase()] ?? null }, text: Buffer.concat(chunks).toString('utf8') }));
+      res.on('error', reject);
+    });
+    req.on('timeout', () => { req.destroy(new Error('fetch: timeout')); });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+export function createFetcher({ allowHttp = false, allowPrivate = false, maxBytes = DEFAULT_MAX_BYTES, maxHops = MAX_HOPS, resolve = defaultResolve, request = pinnedRequest, timeoutMs = 30_000, userAgent = 'manyhands-extractor/1810' } = {}) {
+  /** The check: scheme, then the literal or every resolved address. Returns the url AND the address to connect to. Never connects. */
   async function check(urlText) {
     let u;
     try { u = new URL(urlText); } catch { throw new RefusedDestination(urlText, 'not a url'); }
     if (u.protocol !== 'https:' && !(allowHttp && u.protocol === 'http:')) throw new RefusedDestination(urlText, `scheme ${u.protocol} (https only)`);
     if (u.username || u.password) throw new RefusedDestination(urlText, 'credentials in the url');
     const host = u.hostname.replace(/^\[|\]$/g, '');
-    if (!allowPrivate) {
-      if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) throw new RefusedDestination(urlText, `host ${host} is local`);
-      if (net.isIP(host)) { if (isPrivateAddress(host)) throw new RefusedDestination(urlText, `address ${host} is not public`); return u; }
-      let answers;
-      try { answers = await resolve(host); } catch (e) { throw new Error(`fetch: could not resolve ${host} (${e?.code ?? e?.message ?? e})`); }
-      const addrs = (answers || []).map((x) => (typeof x === 'string' ? x : x.address)).filter(Boolean);
-      if (!addrs.length) throw new Error(`fetch: could not resolve ${host} (no addresses)`);
-      const bad = addrs.find(isPrivateAddress);
-      if (bad) throw new RefusedDestination(urlText, `${host} resolves to ${bad}, which is not public`);
+    if (!allowPrivate && (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local'))) throw new RefusedDestination(urlText, `host ${host} is local`);
+    if (net.isIP(host)) {
+      if (!allowPrivate && isPrivateAddress(host)) throw new RefusedDestination(urlText, `address ${host} is not public`);
+      return { u, address: host, family: net.isIPv6(host) ? 6 : 4 };
     }
-    return u;
-  }
-
-  async function readBounded(res) {
-    const declared = Number(res.headers.get('content-length'));
-    if (Number.isFinite(declared) && declared > maxBytes) throw new Error(`fetch: body is ${declared} bytes, over the ${maxBytes}-byte cap`);
-    if (!res.body) return '';
-    const reader = res.body.getReader();
-    const chunks = []; let size = 0;
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > maxBytes) { try { await reader.cancel(); } catch { /* closing */ } throw new Error(`fetch: body exceeds the ${maxBytes}-byte cap`); }
-      chunks.push(value);
-    }
-    return Buffer.concat(chunks.map((c) => Buffer.from(c))).toString('utf8');
+    let answers;
+    try { answers = await resolve(host); } catch (e) { throw new Error(`fetch: could not resolve ${host} (${e?.code ?? e?.message ?? e})`); }
+    const addrs = (answers || []).map((x) => (typeof x === 'string' ? { address: x, family: x.includes(':') ? 6 : 4 } : x)).filter((x) => x && x.address);
+    if (!addrs.length) throw new Error(`fetch: could not resolve ${host} (no addresses)`);
+    if (!allowPrivate) { const bad = addrs.find((x) => isPrivateAddress(x.address)); if (bad) throw new RefusedDestination(urlText, `${host} resolves to ${bad.address}, which is not public`); }
+    return { u, address: addrs[0].address, family: addrs[0].family ?? (addrs[0].address.includes(':') ? 6 : 4) };   // CONNECT TO THIS ONE
   }
 
   /** Fetch a shared link safely. Returns { text, encodingFormat, finalUrl }. */
   return async function fetchSource(urlText) {
     let current = String(urlText);
     for (let hop = 0; hop <= maxHops; hop++) {
-      const u = await check(current);   // before EVERY connection, the first included
-      const res = await fetchImpl(u.href, { redirect: 'manual', headers: { accept: 'text/html, text/plain;q=0.9, */*;q=0.1', 'user-agent': userAgent }, signal: AbortSignal.timeout(timeoutMs) });
+      const { u, address, family } = await check(current);   // before EVERY connection, the first included
+      const res = await request({ url: u.href, address, family, headers: { accept: 'text/html, text/plain;q=0.9, */*;q=0.1', 'user-agent': userAgent }, timeoutMs, maxBytes });
       if ([301, 302, 303, 307, 308].includes(res.status)) {
         const loc = res.headers.get('location');
         if (!loc) throw new Error(`fetch: ${res.status} without a Location`);
@@ -136,10 +151,11 @@ export function createFetcher({ allowHttp = false, allowPrivate = false, maxByte
         current = new URL(loc, u.href).href;   // a relative Location resolves against the hop; it is CHECKED on the next pass
         continue;
       }
-      if (!res.ok) throw new Error(`fetch: ${res.status}`);
+      if (res.status < 200 || res.status >= 300) throw new Error(`fetch: ${res.status}`);
       const type = (res.headers.get('content-type') || '').trim();
       if (type && !TEXT_TYPES.test(type)) throw new Error(`fetch: unsupported content type ${type.split(';')[0]} (text only)`);
-      const body = await readBounded(res);
+      const body = String(res.text ?? '');
+      if (Buffer.byteLength(body, 'utf8') > maxBytes) throw new Error(`fetch: body exceeds the ${maxBytes}-byte cap`);
       const html = /html/i.test(type) || /^\s*<(!doctype|html)/i.test(body);
       return { text: html ? htmlToText(body) : body, encodingFormat: html ? 'text/html' : 'text/plain', finalUrl: u.href };
     }
