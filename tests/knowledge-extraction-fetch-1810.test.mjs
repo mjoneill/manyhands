@@ -111,3 +111,17 @@ test('#1810 R9e-5 — the happy path: a public name, text/html reduced to lines,
   assert.equal((await local('http://127.0.0.1:1/local')).text, 'local text', 'the knobs admit a loopback test server');
   await assert.rejects(() => local('https://192.168.1.9/x'), (e) => !(e instanceof RefusedDestination), 'with allowPrivate the private literal is not refused as a destination (it is simply not in the fake table: 404)');
 });
+
+test('#1810 R9e-6 — an IPv4 embedded in an IPv6 literal (mapped, compatible, NAT64, 6to4) is refused before any request, in the hex form the URL parser produces; the dotted shorthands are refused too', async () => {
+  const { calls, fetch } = fetchOf({});
+  const fetchSource = createFetcher({ fetchImpl: fetch, resolve: resolverOf({}) });
+  // the URL parser rewrites a mapped v4 into hex: `[::ffff:127.0.0.1]` → hostname `[::ffff:7f00:1]` (51203, run not read)
+  for (const u of ['https://[::ffff:127.0.0.1]/', 'https://[::ffff:192.168.7.68]/', 'https://[::ffff:7f00:1]/', 'https://[::ffff:c0a8:744]/',
+    'https://[::127.0.0.1]/', 'https://[::7f00:1]/', 'https://[64:ff9b::7f00:1]/', 'https://[64:ff9b::c0a8:1]/', 'https://[2002:7f00:1::1]/', 'https://[2002:c0a8:101::1]/',
+    'https://127.1/', 'https://2130706433/', 'https://0x7f000001/', 'https://[::]/', 'https://[0:0:0:0:0:0:0:1]/']) {
+    await assert.rejects(() => fetchSource(u), (e) => e instanceof RefusedDestination, `${u} refused as a destination`);
+  }
+  assert.equal(calls.length, 0, 'not one request was made');
+  for (const ip of ['::ffff:7f00:1', '::ffff:c0a8:744', '::7f00:1', '64:ff9b::7f00:1', '2002:c0a8:101::1', '::ffff:10.0.0.1']) assert.equal(isPrivateAddress(ip), true, `${ip} is not public`);
+  for (const ip of ['::ffff:5db8:d822', '64:ff9b::5db8:d822', '2001:db8::1', '2607:f8b0:4005:80a::200e']) assert.equal(isPrivateAddress(ip), false, `${ip} is public (a mapped or NAT64 PUBLIC v4 stays public; documentation and a real global address are not refused by shape)`);
+});
