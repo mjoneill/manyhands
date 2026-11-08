@@ -49,7 +49,16 @@ if [ -f package-lock.json ] && [ -f scripts/deploy-deps-check.mjs ]; then
     echo "── REFUSED: node_modules does not match package-lock.json (#1835); no test has run ──"
     echo "$deps_out" | head -20
     echo "── the installed tree is ${nm:-absent}; a red from it would be the TREE, not the code"
-    echo "── fix: rebuild it from this lockfile (npm ci; if others share it, build beside and swap, and announce first) ──"
+    # The two fixes are NOT interchangeable. A symlinked node_modules is SHARED: rebuilding it from THIS branch's
+    # lockfile would break every other tree that links it, which is #1835's own failure one step removed. So a
+    # linked tree gets its own install, and only a tree that is this checkout's own gets rebuilt in place.
+    if [ -L node_modules ]; then
+      echo "── node_modules here is a LINK to a shared tree. Do NOT rebuild the shared tree for one branch."
+      echo "── fix: give this checkout its own tree: rm node_modules (removes the link only) && npm ci"
+      echo "── (if the SHARED tree itself is behind main's lockfile, rebuild it beside and swap, and announce first) ──"
+    else
+      echo "── fix: npm ci in $(pwd -P) (this checkout's own tree) ──"
+    fi
     exit 2
   fi
 else

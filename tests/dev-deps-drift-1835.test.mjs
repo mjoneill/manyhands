@@ -104,6 +104,24 @@ test('run-tests.sh REFUSES when a locked package is absent (the 11-08 specimen: 
   assert.equal(fs.existsSync(marker), false);
 });
 
+test('the refusal names the SAFE fix: a linked (shared) tree gets its own install, never a rebuild of the shared one', async () => {
+  // An older branch whose lockfile differs from the shared tree is refused. If the message said "rebuild it", following
+  // it would rebuild the SHARED tree from that branch's lockfile and break every other tree linking it.
+  const shared = fixture('shared-src', { installed: { prodpkg: '1.0.0', devpkg: '1.9.0' } });
+  const { dir: linked, marker } = fixture('linked', { installed: {} });
+  fs.symlinkSync(path.join(shared.dir, 'node_modules'), path.join(linked, 'node_modules'));
+  const r = await runTests(linked);
+  assert.equal(r.code, 2);
+  assert.match(r.out, /LINK to a shared tree\. Do NOT rebuild the shared tree for one branch/);
+  assert.match(r.out, /rm node_modules \(removes the link only\) && npm ci/);
+  assert.equal(fs.existsSync(marker), false);
+
+  const own = await runTests(shared.dir);
+  assert.equal(own.code, 2);
+  assert.doesNotMatch(own.out, /LINK to a shared tree/, 'a tree the checkout owns is not told it is shared');
+  assert.match(own.out, /fix: npm ci in .*shared-src \(this checkout's own tree\)/);
+});
+
 test('run-tests.sh runs as before when the tree matches the lockfile', async () => {
   const { dir, marker } = fixture('instep');
   const r = await runTests(dir);
