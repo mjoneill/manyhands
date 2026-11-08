@@ -2764,6 +2764,13 @@ export const EXECUTOR_ONLY_VOCABULARY = new Set([
   'scrum:onBehalfOf', 'scrum:glyph', 'scrum:aliases', 'scrum:originalAuthorToken', 'scrum:authorCorrectedBy',
   'scrum:authorCorrectedAt',
   'scrum:DeliveryStep', 'scrum:CardImport', 'scrum:MemoryRevision', 'scrum:PendingAnnouncement',
+  // #1810 — the knowledge-extraction service: a published item is an RDF 1.2 reifier (scrum:Assertion), its source a
+  // SourceVersion (pointer + hash), what it could not publish a RejectedProposal on the run, and the run's numbers an
+  // ExtractionReport. Executor-only: the old in-process copy never projects them.
+  'scrum:Assertion', 'scrum:SourceVersion', 'scrum:RejectedProposal', 'scrum:ExtractionReport',
+  'scrum:contentHash', 'schema:contentUrl', 'schema:encodingFormat', 'scrum:retrievedAt',
+  'scrum:assertionType', 'scrum:assertedBy', 'scrum:expressedIn', 'scrum:anchorText', 'scrum:ofRun', 'scrum:rejectedOf',
+  'scrum:proposedPredicate', 'scrum:gist', 'scrum:proposals', 'scrum:inventions', 'scrum:providerFailures', 'scrum:publishedCount',
 ]);
 // the executor gate's own set: graph_query on the executor is judged against it, and so is the vocabulary drift the
 // executor route reports (#1645), so the two can never disagree about which terms are known

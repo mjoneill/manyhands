@@ -528,7 +528,7 @@ export function staticCheck(sparql, opId) {
 // =====================================================================================
 
 export const RECORD_V = 2;   // 2: memory.revise records the identity it replaces (a MemoryRevision node)
-export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create', 'card.write', 'entity.put', 'origin.prepare', 'refusal.record']);
+export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create', 'card.write', 'entity.put', 'origin.prepare', 'refusal.record', 'extraction.publish']);
 
 const RS = 'https://scrumboard.local/ns#';
 const RSC = 'https://schema.org/';
@@ -575,6 +575,14 @@ export const LOGBORN_TERMS = Object.freeze({
   RefusalRecord: `${RS}RefusalRecord`, refusedAction: `${RS}refusedAction`, route: `${RS}route`, status: `${RS}status`, code: `${RS}code`, rule: `${RS}rule`,
   entityKind: `${RS}entityKind`, entityId: `${RS}entityId`,
   wasAssociatedWith: 'http://www.w3.org/ns/prov#wasAssociatedWith', startedAtTime: 'http://www.w3.org/ns/prov#startedAtTime',
+  // #1810 — the knowledge-extraction service (core/knowledge-extraction.mjs). An Assertion is an RDF 1.2 REIFIER: the
+  // quoted triple is a term under rdf:reifies, never a fact; ASK on the bare triple stays false by construction.
+  Assertion: `${RS}Assertion`, SourceVersion: `${RS}SourceVersion`, RejectedProposal: `${RS}RejectedProposal`, ExtractionReport: `${RS}ExtractionReport`,
+  reifies: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies', wasDerivedFrom: 'http://www.w3.org/ns/prov#wasDerivedFrom',
+  contentHash: `${RS}contentHash`, contentUrl: `${RSC}contentUrl`, retrievedAt: `${RS}retrievedAt`,
+  assertionType: `${RS}assertionType`, assertedBy: `${RS}assertedBy`, expressedIn: `${RS}expressedIn`, anchorText: `${RS}anchorText`,
+  ofRun: `${RS}ofRun`, rejectedOf: `${RS}rejectedOf`, proposedPredicate: `${RS}proposedPredicate`, gist: `${RS}gist`,
+  outcome: `${RS}outcome`, proposals: `${RS}proposals`, inventions: `${RS}inventions`, providerFailures: `${RS}providerFailures`, publishedCount: `${RS}publishedCount`,
 });
 const TM = LOGBORN_TERMS;
 
@@ -598,6 +606,7 @@ const RECORD_FIELDS = {
   'entity.put': ['entity'],                 // #1624 — one generic storage primitive; the `kind` field selects the projection
   'origin.prepare': ['origin', 'plan'],     // #1629 s2 — the Prepared record of one origin: its descriptor and its frozen business plan
   'refusal.record': ['refusal'],            // #1762 S2 — one content-free refusal, fresh at the IRI its opId derives; never history
+  'extraction.publish': ['run', 'source', 'assertions', 'rejected', 'report'],   // #1810 — one run's whole output (source, reifiers, rejected, report) in ONE guarded update
 };
 
 // #1762 S1b — the record kinds whose write records ONE ChangeActivity (part 0) when the intention carries `history`. The
@@ -771,6 +780,43 @@ function canonicalizeRecord(i) {
     } };
     const D = record.decision;
     if ([...D.supersedes, ...D.duplicateOf].includes(D.iri)) fail('a decision cannot relate to itself');
+  } else if (i.kind === 'extraction.publish') {
+    // #1810 — one run's whole output. The WRITER (core/knowledge-extraction.mjs) has already refused any quoted predicate
+    // outside the registered set; the compiler checks shape only. Assertion and rejected IRIs are fresh (uuids, or
+    // <run>/rejected/<n>); the SourceVersion's IRI is derived from its hash and is deliberately NOT fresh, so the same
+    // bytes published by a second run re-assert the same triples instead of failing the precondition.
+    const run = checkIri(i.run, 'run');
+    const sv = obj(i.source, ['iri', 'contentHash', 'contentUrl', 'encodingFormat', 'retrievedAt', 'wasDerivedFrom'], 'source');
+    const source = {
+      iri: checkIri(sv.iri, 'source.iri'), contentHash: rStr(sv.contentHash, 'source.contentHash'), contentUrl: rStr(sv.contentUrl, 'source.contentUrl'),
+      encodingFormat: rOpt(sv.encodingFormat, 'source.encodingFormat'), retrievedAt: rOpt(sv.retrievedAt, 'source.retrievedAt'),
+      wasDerivedFrom: rOptIri(sv.wasDerivedFrom, 'source.wasDerivedFrom'),
+    };
+    const quoted = (t, what) => {
+      const q = obj(t, ['subject', 'predicate', 'object', 'literal'], what);
+      if ((q.object == null) === (q.literal == null)) fail(`${what} names exactly one of object (an IRI) or literal`);
+      return { subject: checkIri(q.subject, `${what}.subject`), predicate: checkIri(q.predicate, `${what}.predicate`),
+        object: q.object == null ? null : checkIri(q.object, `${what}.object`), literal: q.literal == null ? null : rStr(q.literal, `${what}.literal`) };
+    };
+    const assertions = rList(i.assertions, 'assertions', (a, k) => {
+      const x = obj(a, ['iri', 'triple', 'type', 'passage', 'span', 'gist', 'proposedPredicate'], `assertions[${k}]`);
+      return { iri: checkIri(x.iri, `assertions[${k}].iri`), triple: quoted(x.triple, `assertions[${k}].triple`), type: rStr(x.type, `assertions[${k}].type`),
+        passage: checkIri(x.passage, `assertions[${k}].passage`), span: rStr(x.span, `assertions[${k}].span`),
+        gist: rOpt(x.gist, `assertions[${k}].gist`), proposedPredicate: rOpt(x.proposedPredicate, `assertions[${k}].proposedPredicate`) };
+    });
+    const rejected = rList(i.rejected, 'rejected', (r, k) => {
+      const x = obj(r, ['iri', 'reason', 'passage', 'span', 'type', 'detail'], `rejected[${k}]`);
+      return { iri: checkIri(x.iri, `rejected[${k}].iri`), reason: rStr(x.reason, `rejected[${k}].reason`), passage: rOptIri(x.passage, `rejected[${k}].passage`),
+        span: rOpt(x.span, `rejected[${k}].span`), type: rOpt(x.type, `rejected[${k}].type`), detail: rOpt(x.detail, `rejected[${k}].detail`) };
+    });
+    const rp = obj(i.report, ['iri', 'outcome', 'proposals', 'inventions', 'providerFailures', 'published', 'at'], 'report');
+    const num = (v, what) => { if (!Number.isInteger(v) || v < 0) fail(`${what} must be a non-negative integer`); return String(v); };
+    const report = { iri: checkIri(rp.iri, 'report.iri'), outcome: rStr(rp.outcome, 'report.outcome'), proposals: num(rp.proposals, 'report.proposals'),
+      inventions: num(rp.inventions, 'report.inventions'), providerFailures: num(rp.providerFailures, 'report.providerFailures'),
+      published: num(rp.published, 'report.published'), at: rStr(rp.at, 'report.at') };
+    if (!['complete', 'partial', 'failed'].includes(report.outcome)) fail('report.outcome must be complete, partial or failed');
+    if (report.outcome === 'complete' && assertions.length === 0) fail('a run that published nothing is never complete');
+    record = { run, source, assertions, rejected, report };
   } else if (i.kind === 'post.create') {
     // #1574 C3c — every field comes from the outbox entry's frozen payload plus the two values the server fixed once
     // at the first publish attempt (publicationAt, postSeq). All of it is in `record`, so all of it is digest-covered.
@@ -1057,6 +1103,38 @@ function planRecord(c) {
     for (const t of [R.target, ...R.supersedes, ...R.duplicateOf]) pre.push(`    ${I(t)} ${I(TM.type)} ${I(TM.Decision)} .`);
     for (const t of R.supersedes) add(R.target, TM.supersedes, I(t));
     for (const t of R.duplicateOf) add(R.target, TM.duplicateOf, I(t));
+  } else if (c.kind === 'extraction.publish') {
+    const X = R; target = null;
+    const S = X.source.iri;
+    add(S, TM.type, I(TM.SourceVersion)); add(S, TM.contentHash, L(X.source.contentHash)); add(S, TM.contentUrl, L(X.source.contentUrl));
+    add(S, TM.encodingFormat, X.source.encodingFormat == null ? null : L(X.source.encodingFormat));
+    add(S, TM.retrievedAt, X.source.retrievedAt == null ? null : L(X.source.retrievedAt));
+    add(S, TM.wasDerivedFrom, X.source.wasDerivedFrom && I(X.source.wasDerivedFrom));
+    add(S, TM.recordedBy, ref(c.opId));
+    for (const a of X.assertions) {
+      fresh.push(a.iri);
+      const t = a.triple;
+      add(a.iri, TM.type, I(TM.Assertion));
+      // the quoted triple as a TERM: `<<( s p o )>>` rides the ok-guarded BIND like any other object text (probed on
+      // pyoxigraph 0.5.11: accepted inside IF(BOUND(?ok), …, ?u); the bare triple is never asserted)
+      add(a.iri, TM.reifies, `<<( ${I(t.subject)} ${I(t.predicate)} ${t.object != null ? I(t.object) : L(t.literal)} )>>`);
+      add(a.iri, TM.assertionType, L(a.type)); add(a.iri, TM.status, L('machine-extracted')); add(a.iri, TM.assertedBy, I(c.actor));
+      add(a.iri, TM.expressedIn, I(a.passage)); add(a.iri, TM.anchorText, L(a.span)); add(a.iri, TM.ofRun, I(X.run));
+      add(a.iri, TM.gist, a.gist == null ? null : L(a.gist)); add(a.iri, TM.proposedPredicate, a.proposedPredicate == null ? null : L(a.proposedPredicate));
+      add(a.iri, TM.dateCreated, L(X.report.at)); add(a.iri, TM.recordedBy, ref(c.opId));
+    }
+    for (const r of X.rejected) {
+      fresh.push(r.iri);
+      add(r.iri, TM.type, I(TM.RejectedProposal)); add(r.iri, TM.rejectedOf, I(X.run)); add(r.iri, TM.reason, L(r.reason));
+      add(r.iri, TM.expressedIn, r.passage && I(r.passage)); add(r.iri, TM.anchorText, r.span == null ? null : L(r.span));
+      add(r.iri, TM.assertionType, r.type == null ? null : L(r.type)); add(r.iri, TM.note, r.detail == null ? null : L(r.detail));
+      add(r.iri, TM.recordedBy, ref(c.opId));
+    }
+    const P = X.report;
+    fresh.push(P.iri);
+    add(P.iri, TM.type, I(TM.ExtractionReport)); add(P.iri, TM.ofRun, I(X.run)); add(P.iri, TM.outcome, L(P.outcome));
+    add(P.iri, TM.proposals, L(P.proposals)); add(P.iri, TM.inventions, L(P.inventions)); add(P.iri, TM.providerFailures, L(P.providerFailures));
+    add(P.iri, TM.publishedCount, L(P.published)); add(P.iri, TM.at, L(P.at)); add(P.iri, TM.recordedBy, ref(c.opId));
   } else if (c.kind === 'post.create') {
     const P = R.post; target = null;   // a create: the post IRI must be fresh
     dispatchHold = `${P.mutationId}:${P.slot}`;   // #1749 A8: the announcement is a dispatch of this obligation
