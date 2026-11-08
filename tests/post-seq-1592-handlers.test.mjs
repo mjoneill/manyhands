@@ -19,9 +19,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { freePort, waitForHttp, makeBoardFixture, PROJECT_DIR } from './helpers/harness.mjs';
+import { spawnBoardServer, makeBoardFixture } from './helpers/harness.mjs';
 
 const T0 = '2026-10-04T12:00:00.000Z';
 async function api(base, method, route, body) {
@@ -30,18 +28,15 @@ async function api(base, method, route, body) {
   return { status: res.status, body: json, text };
 }
 async function spawnServer(file, barrierDir) {
-  const port = await freePort();
-  const instance = `ps1592h-${randomUUID()}`;
-  const env = { ...process.env, SCRUM_BOARD_FILE: file, SCRUM_PORT: String(port), SCRUM_MCP_NOTIFY_URL: '', SCRUM_ATTACHMENTS_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'ps1592h-attach-')),
-    SCRUM_CHANNEL_CONFIG_FILE: path.join(os.tmpdir(), `ps1592h-chan-${process.pid}-${port}.json`), SCRUM_INSTANCE_ID: instance, SCRUM_TEST_BARRIER_DIR: barrierDir };
-  const child = spawn('node', ['server.js'], { cwd: PROJECT_DIR, env, stdio: ['ignore', 'pipe', 'pipe'] });
-  const err = []; child.stderr.on('data', (d) => err.push(String(d)));
-  const base = `http://127.0.0.1:${port}`;
-  // #1713 — readiness means OUR child answered (#1259): freePort() hands the number back unheld, so without the
-  // instance check a stranger already on the port satisfies the poll and every request below goes to its board.
-  try { await waitForHttp(`${base}/api/board`, 15000, { expectHeader: ['x-scrum-instance', instance] }); }
-  catch (e) { child.kill('SIGKILL'); e.message += `\n--- child stderr ---\n${err.join('')}`; throw e; }
-  return { base, stop: () => { try { child.kill('SIGKILL'); } catch { /* gone */ } }, stderr: () => err.join('') };
+  // #1833 — through the harness: readiness means OUR child answered (#1259, #1713), and a stranger on the port is a
+  // retry on a fresh one (#1140), not a red test. Hand-rolled, this file failed CI on a lost race (PR #161, row H).
+  const attach = fs.mkdtempSync(path.join(os.tmpdir(), 'ps1592h-attach-'));
+  const s = await spawnBoardServer({
+    readyTimeoutMs: 15000, label: 'post-seq-1592 handlers server',
+    env: (port) => ({ ...process.env, SCRUM_BOARD_FILE: file, SCRUM_MCP_NOTIFY_URL: '', SCRUM_ATTACHMENTS_DIR: attach,
+      SCRUM_CHANNEL_CONFIG_FILE: path.join(os.tmpdir(), `ps1592h-chan-${process.pid}-${port}.json`), SCRUM_TEST_BARRIER_DIR: barrierDir }),
+  });
+  return { base: s.baseUrl, stop: s.stop, stderr: s.stderr };
 }
 const posts = async (base) => (await api(base, 'GET', '/api/conversations')).body;
 const post = (base, body) => api(base, 'POST', '/api/conversations', { body, author: 'ada' });

@@ -139,7 +139,7 @@ function waitForHttpOrExit(url, proc, timeoutMs = 8000, opts = {}) {
  * an explicit port gets exactly one attempt and a refusal that names the
  * conflict.
  */
-async function startOnPort({ port: explicitPort, allocatePort = freePort, readyPath, label, spawnOnce }) {
+async function startOnPort({ port: explicitPort, allocatePort = freePort, readyPath, label, spawnOnce, readyTimeoutMs = 8000 }) {
   const attempts = explicitPort == null ? START_ATTEMPTS : 1;
   let lastErr = null;
   for (let i = 0; i < attempts; i++) {
@@ -154,7 +154,7 @@ async function startOnPort({ port: explicitPort, allocatePort = freePort, readyP
     const { proc, stderr } = started;
     const baseUrl = `http://127.0.0.1:${port}`;
     try {
-      await waitForHttpOrExit(`${baseUrl}${readyPath}`, proc, 8000, { expectHeader: ['x-scrum-instance', nonce] });
+      await waitForHttpOrExit(`${baseUrl}${readyPath}`, proc, readyTimeoutMs, { expectHeader: ['x-scrum-instance', nonce] });
       return { ...started, port, baseUrl };
     } catch (e) {
       proc.kill('SIGKILL');
@@ -175,6 +175,38 @@ async function startOnPort({ port: explicitPort, allocatePort = freePort, readyP
     }
   }
   throw lastErr;
+}
+
+/**
+ * #1833 — spawn `node server.js` (or another entry) with YOUR env, on a port the
+ * harness allocates, through the same #1140/#1259 path startRestServer uses: one
+ * instance nonce per attempt, readiness = OUR child answered, and a stranger on
+ * the port costs a retry on a fresh port instead of failing the test.
+ *
+ * Twenty test files had hand-rolled this as freePort() + spawn + waitForHttp with
+ * the instance check and NO retry, so #1259 detected the lost race correctly and
+ * the test failed anyway (PR #161, 2026-11-07, post-seq-1592-handlers row H).
+ *
+ *   env:  an object, or (port) => object when a path in it depends on the port.
+ *         SCRUM_PORT and SCRUM_INSTANCE_ID are set by the helper and override it.
+ * Returns { proc, port, baseUrl, stderr(), stop() }.
+ */
+export async function spawnBoardServer({ env = {}, args = ['server.js'], cwd = PROJECT_DIR, readyPath = '/api/board', allocatePort, label = 'board server', readyTimeoutMs = 8000 } = {}) {
+  const started = await startOnPort({
+    allocatePort, readyPath, label, readyTimeoutMs,
+    spawnOnce: (port, nonce) => {
+      const base = typeof env === 'function' ? env(port) : env;
+      const proc = spawn(process.execPath, args, {
+        cwd, env: { ...base, SCRUM_PORT: String(port), SCRUM_INSTANCE_ID: nonce }, stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      const stderr = [];
+      proc.stderr.on('data', (d) => stderr.push(String(d)));
+      proc.stdout.on('data', () => {});
+      return { proc, stderr };
+    },
+  });
+  const { proc, stderr, port, baseUrl } = started;
+  return { proc, port, baseUrl, stderr: () => stderr.join(''), stop: () => { try { proc.kill('SIGKILL'); } catch { /* gone */ } } };
 }
 
 /**
