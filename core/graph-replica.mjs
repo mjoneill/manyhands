@@ -2768,7 +2768,7 @@ export const EXECUTOR_ONLY_VOCABULARY = new Set([
   // SourceVersion (pointer + hash), what it could not publish a RejectedProposal on the run, and the run's numbers an
   // ExtractionReport. Executor-only: the old in-process copy never projects them.
   'scrum:Assertion', 'scrum:SourceVersion', 'scrum:RejectedProposal', 'scrum:ExtractionReport',
-  'scrum:contentHash', 'schema:contentUrl', 'schema:encodingFormat', 'scrum:retrievedAt',
+  'scrum:contentHash', 'schema:contentUrl', 'schema:encodingFormat', 'scrum:retrievedAt', 'schema:url', 'schema:abstract',
   'scrum:assertionType', 'scrum:assertedBy', 'scrum:expressedIn', 'scrum:anchorText', 'scrum:ofRun', 'scrum:rejectedOf',
   'scrum:proposedPredicate', 'scrum:gist', 'scrum:proposals', 'scrum:spanInventions', 'scrum:providerFailures', 'scrum:publishedCount',
 ]);

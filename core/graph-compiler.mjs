@@ -579,7 +579,7 @@ export const LOGBORN_TERMS = Object.freeze({
   // quoted triple is a term under rdf:reifies, never a fact; ASK on the bare triple stays false by construction.
   Assertion: `${RS}Assertion`, SourceVersion: `${RS}SourceVersion`, RejectedProposal: `${RS}RejectedProposal`, ExtractionReport: `${RS}ExtractionReport`,
   reifies: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies', wasDerivedFrom: 'http://www.w3.org/ns/prov#wasDerivedFrom',
-  contentHash: `${RS}contentHash`, contentUrl: `${RSC}contentUrl`, retrievedAt: `${RS}retrievedAt`,
+  contentHash: `${RS}contentHash`, contentUrl: `${RSC}contentUrl`, retrievedAt: `${RS}retrievedAt`, url: `${RSC}url`, abstract: `${RSC}abstract`,
   assertionType: `${RS}assertionType`, assertedBy: `${RS}assertedBy`, expressedIn: `${RS}expressedIn`, anchorText: `${RS}anchorText`,
   ofRun: `${RS}ofRun`, rejectedOf: `${RS}rejectedOf`, proposedPredicate: `${RS}proposedPredicate`, gist: `${RS}gist`,
   outcome: `${RS}outcome`, proposals: `${RS}proposals`, spanInventions: `${RS}spanInventions`, providerFailures: `${RS}providerFailures`, publishedCount: `${RS}publishedCount`,
@@ -786,11 +786,12 @@ function canonicalizeRecord(i) {
     // <run>/rejected/<n>); the SourceVersion's IRI is derived from its hash and is deliberately NOT fresh, so the same
     // bytes published by a second run re-assert the same triples instead of failing the precondition.
     const run = checkIri(i.run, 'run');
-    const sv = obj(i.source, ['iri', 'contentHash', 'contentUrl', 'encodingFormat', 'retrievedAt', 'wasDerivedFrom'], 'source');
+    const sv = obj(i.source, ['iri', 'contentHash', 'contentUrl', 'encodingFormat', 'retrievedAt', 'wasDerivedFrom', 'url', 'name', 'abstract'], 'source');
     const source = {
       iri: checkIri(sv.iri, 'source.iri'), contentHash: rStr(sv.contentHash, 'source.contentHash'), contentUrl: rStr(sv.contentUrl, 'source.contentUrl'),
       encodingFormat: rOpt(sv.encodingFormat, 'source.encodingFormat'), retrievedAt: rOpt(sv.retrievedAt, 'source.retrievedAt'),
       wasDerivedFrom: rOptIri(sv.wasDerivedFrom, 'source.wasDerivedFrom'),
+      url: rOpt(sv.url, 'source.url'), name: rOpt(sv.name, 'source.name'), abstract: rOpt(sv.abstract, 'source.abstract'),
     };
     const quoted = (t, what) => {
       const q = obj(t, ['subject', 'predicate', 'object', 'literal'], what);
@@ -1110,6 +1111,8 @@ function planRecord(c) {
     add(S, TM.encodingFormat, X.source.encodingFormat == null ? null : L(X.source.encodingFormat));
     add(S, TM.retrievedAt, X.source.retrievedAt == null ? null : L(X.source.retrievedAt));
     add(S, TM.wasDerivedFrom, X.source.wasDerivedFrom && I(X.source.wasDerivedFrom));
+    add(S, TM.url, X.source.url == null ? null : L(X.source.url));
+    add(S, TM.name, X.source.name == null ? null : L(X.source.name)); add(S, TM.abstract, X.source.abstract == null ? null : L(X.source.abstract));
     add(S, TM.recordedBy, ref(c.opId));
     for (const a of X.assertions) {
       fresh.push(a.iri);
