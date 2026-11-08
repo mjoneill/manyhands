@@ -187,7 +187,7 @@ export function createExtractor({ graphClient, runs, model, registry, actor = 'e
 
   // ── the three nodes ─────────────────────────────────────────────────────────────────────────────────────────────
   async function record(st) {
-    const performedUsing = await runs.ensureProcedureVersion({ chain, modelKey: st.modelKey, promptSha: sha256(st.prompt) });
+    const performedUsing = await runs.ensureProcedureVersion({ chain, modelKey: st.modelKey, promptSha: sha256(SYSTEM_PROMPT(st.prompt, registry)) });   // #1844: what the model is TOLD, registry included
     const runId = await runs.createRun({ op: 'extract', by: actor, performedUsing, used: [st.source.iri] });
     return { runId, performedUsing };
   }

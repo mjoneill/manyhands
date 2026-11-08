@@ -223,7 +223,8 @@ test('#1810 R1 — ingest: a SourceVersion with sha256 hash, file:// url and for
 test('#1810 R2 — the run record: op extract, performedUsing a version naming chain + model key + prompt sha, used the source, generated every assertion; the model key is per-run config', { skip: SKIP }, async () => {
   const src = ingestSource({ text: FIXTURE, url: FIXTURE_URL });
   const runs = fakeRuns();
-  const { extractor } = extractorWith({ model: fakeModel([reply(...goodItems()), reply(...goodItems())]), runs });
+  const r2model = fakeModel([reply(...goodItems()), reply(...goodItems())]);
+  const { extractor } = extractorWith({ model: r2model, runs });
   const a = await extractor.run({ source: src, modelKey: 'deepseek-v4-flash', prompt: 'extract v1' });
   const b = await extractor.run({ source: src, modelKey: 'fake-b', prompt: 'extract v1' });
   assert.equal(runs.runs.length, 2);
@@ -234,7 +235,8 @@ test('#1810 R2 — the run record: op extract, performedUsing a version naming c
   assert.notEqual(runs.runs[0].performedUsing, runs.runs[1].performedUsing, 'a different model key is a different ProcedureVersion');
   const v1 = runs.versions.find((v) => v.iri === runs.runs[0].performedUsing), v2 = runs.versions.find((v) => v.iri === runs.runs[1].performedUsing);
   assert.match(v1.body, /model=deepseek-v4-flash/); assert.match(v2.body, /model=fake-b/);
-  assert.match(v1.body, new RegExp(`prompt=sha256:${sha256('extract v1')}`), 'the version names the prompt by hash');
+  // #1844: the hash is of the system message the model received (operator prompt + instructions + registry), not the short prompt alone
+  assert.match(v1.body, new RegExp(`prompt=sha256:${sha256(r2model.bodies[0].messages.find((m) => m.role === 'system').content)}`), 'the version names, by hash, what the model was told');
   assert.deepEqual([...runs.runs[0].generated].sort(), a.published.map((p) => p.iri).sort(), 'the run generated exactly what was published');
   assert.deepEqual([...runs.runs[1].generated].sort(), b.published.map((p) => p.iri).sort());
   // and the graph agrees: each assertion points at its run
@@ -473,4 +475,22 @@ test('#1839 R12c — the model is told the registered predicates it was handed, 
   const system = model.bodies[0].messages.find((m) => m.role === 'system').content;
   for (const term of registry) assert.ok(system.includes(term), `the system prompt names ${term}`);
   assert.match(system, /one plain word/i, 'the fallback is stated');
+});
+
+// ── #1844: the procedure version names what the model was TOLD, not only the short operator prompt ────────────────
+test('#1844 R2b — the version\'s prompt hash is the system message actually sent: same prompt + registry → one version; one more registered term → a new version', { skip: SKIP }, async () => {
+  const src = ingestSource({ text: FIXTURE, url: FIXTURE_URL });
+  const runs = fakeRuns();
+  const m1 = fakeModel([reply(...goodItems()), reply(...goodItems())]);
+  const a = extractorWith({ model: m1, runs }).extractor;
+  await a.run({ source: src, modelKey: 'fake-a', prompt: 'extract v1' });
+  await a.run({ source: src, modelKey: 'fake-a', prompt: 'extract v1' });
+  assert.equal(runs.runs[0].performedUsing, runs.runs[1].performedUsing, 'same prompt, same registry: one version');
+  const sent = m1.bodies[0].messages.find((m) => m.role === 'system').content;
+  const v = runs.versions.find((x) => x.iri === runs.runs[0].performedUsing);
+  assert.match(v.body, new RegExp(`prompt=sha256:${sha256(sent)}`), 'the version names the system message the model received');
+  const m2 = fakeModel([reply(...goodItems())]);
+  const wider = new Set([...REGISTRY, 'scrum:addedAfterwards']);
+  await extractorWith({ model: m2, runs, registry: wider }).extractor.run({ source: src, modelKey: 'fake-a', prompt: 'extract v1' });
+  assert.notEqual(runs.runs[2].performedUsing, runs.runs[0].performedUsing, 'a registry with one more term is a different version');
 });
