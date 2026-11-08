@@ -65,8 +65,8 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
       const s = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
       const cursor = typeof s.cursor === 'string' && s.cursor && s.cursor !== 'start' ? s.cursor : null;
       const mode = s.mode === 'commit' || s.mode === 'seq' ? s.mode : (cursor && cursor.startsWith('ps1.') ? 'seq' : cursor && /^g[bc]1\./.test(cursor) ? 'commit' : null);
-      return { cursor: mode ? cursor : null, mode, pending: Array.isArray(s.pending) ? s.pending : [], resyncs: Array.isArray(s.resyncs) ? s.resyncs : [], updatedAt: typeof s.updatedAt === 'string' ? s.updatedAt : null };
-    } catch { return { cursor: null, mode: null, pending: [], resyncs: [], updatedAt: null }; }
+      return { cursor: mode ? cursor : null, mode, pending: Array.isArray(s.pending) ? s.pending : [], resyncs: Array.isArray(s.resyncs) ? s.resyncs : [], updatedAt: typeof s.updatedAt === 'string' ? s.updatedAt : null, lastReadAt: typeof s.lastReadAt === 'string' ? s.lastReadAt : null };
+    } catch { return { cursor: null, mode: null, pending: [], resyncs: [], updatedAt: null, lastReadAt: null }; }
   }
   function writeState(st) {
     fs.mkdirSync(path.dirname(stateFile), { recursive: true });
@@ -120,7 +120,9 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
    */
   async function resync(st, refused) {
     const h = await head();
-    const record = { at: now(), from: st.cursor, to: h.cursor, mode: h.mode, reason: `${refused.status}${refused.code ? ` ${refused.code}` : ''}`, skippedSince: st.updatedAt ?? null, announced: false, announcedAt: null };
+    // the window opens at the last successful READ (`lastReadAt`), never at the file's last write: an owed-notice retry
+    // or a pending-job record also writes the file, and a window measured from those would understate itself
+    const record = { at: now(), from: st.cursor, to: h.cursor, mode: h.mode, reason: `${refused.status}${refused.code ? ` ${refused.code}` : ''}`, skippedSince: st.lastReadAt ?? st.updatedAt ?? null, announced: false, announcedAt: null };
     log(`extract-once: the board refused the saved cursor (${record.reason}); re-seeded at the head (${h.mode}). Posts since ${record.skippedSince ?? 'an unknown time'} were not read; a link shared in that window needs re-sharing.`);
     await announce(record);
     return { ...h, record };
@@ -158,8 +160,8 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
     // 0. NO CURSOR (a fresh install, or a file saying "start"): begin at the head. Nothing before this moment is read.
     if (!st.cursor) {
       const h = await head();
-      st = { ...st, mode: h.mode, cursor: h.cursor };
-      writeState({ cursor: st.cursor, mode: st.mode, pending, resyncs: st.resyncs });
+      st = { ...st, mode: h.mode, cursor: h.cursor, lastReadAt: now() };   // the seed is a read of the head
+      writeState({ cursor: st.cursor, mode: st.mode, pending, resyncs: st.resyncs, lastReadAt: st.lastReadAt });
     }
 
     // 0b. OWED NOTICES first: a skipped window whose commons post failed is announced before anything else is read
@@ -167,7 +169,7 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
     for (const r of st.resyncs) {
       if (r.announced === true) continue;
       if (await announce(r)) announced.push(r.at);
-      writeState({ cursor: st.cursor, mode: st.mode, pending, resyncs: st.resyncs });
+      writeState({ cursor: st.cursor, mode: st.mode, pending, resyncs: st.resyncs, lastReadAt: st.lastReadAt });
     }
 
     // 1. RESUME what died mid-run, before anything new: the checkpoint has the model's answer, so this costs no model call
@@ -181,7 +183,7 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
         if (attempts >= MAX_RESUME_ATTEMPTS) { failed.push({ url: p.url, jobId: p.jobId, reason: `resume gave up after ${attempts} attempts: ${e?.message ?? e}` }); pending = pending.filter((x) => x.jobId !== p.jobId); }
         else { failed.push({ url: p.url, jobId: p.jobId, reason: `resume: ${e?.message ?? e} (attempt ${attempts} of ${MAX_RESUME_ATTEMPTS}, still pending)` }); pending = pending.map((x) => (x.jobId === p.jobId ? { ...x, attempts } : x)); }
       }
-      writeState({ cursor: st.cursor, mode: st.mode, pending, resyncs: st.resyncs });
+      writeState({ cursor: st.cursor, mode: st.mode, pending, resyncs: st.resyncs, lastReadAt: st.lastReadAt });
     }
 
     // 2. NEW posts since the cursor — or, if the board refuses the cursor, re-seed at the head and report the window
@@ -189,7 +191,7 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
     if (got.refused) {
       const r = await resync(st, got.refused);
       const resyncs = [...st.resyncs, r.record];
-      writeState({ cursor: r.cursor, mode: r.mode, pending, resyncs });
+      writeState({ cursor: r.cursor, mode: r.mode, pending, resyncs, lastReadAt: r.record.at });   // the re-seed read the head
       if (r.record.announced) announced.push(r.record.at);
       return { started, resumed, skipped, failed, pending: pending.length, cursor: r.cursor, mode: r.mode, read: 0, resync: r.record, announced };
     }
@@ -215,7 +217,7 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
         const source = ingestSource({ text: got.text, url, contentUrl, encodingFormat: got.encodingFormat ?? 'text/plain', retrievedAt: now(), wasDerivedFrom: `${ENTITY}${post.id}` });
         // PENDING before the run, so a death mid-run leaves a record the next tick resumes from
         pending = [...pending, { jobId, url, postId: post.id, since: now(), attempts: 1 }];
-        writeState({ cursor: st.cursor, mode: st.mode, pending, resyncs: st.resyncs });
+        writeState({ cursor: st.cursor, mode: st.mode, pending, resyncs: st.resyncs, lastReadAt: st.lastReadAt });
         try {
           const r = await extractor.run({ source, modelKey, prompt, jobId });
           started.push({ url, jobId, runId: r.runId, outcome: r.outcome, published: r.published.length, rejected: r.rejected.length });
@@ -223,7 +225,7 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
         } catch (e) { failed.push({ url, jobId, reason: `run: ${e?.message ?? e} (pending: the next tick resumes it)` }); }
       }
     }
-    writeState({ cursor: next, mode: st.mode, pending, resyncs: st.resyncs });
+    writeState({ cursor: next, mode: st.mode, pending, resyncs: st.resyncs, lastReadAt: now() });   // a successful read
     return { started, resumed, skipped, failed, pending: pending.length, cursor: next, mode: st.mode, read: conversations.length, announced };
   }
 

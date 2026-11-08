@@ -226,6 +226,37 @@ test('#1810 R9i — the skip notice fails to post on the resync tick: the window
   assert.equal(posted.length, 1, 'a delivered notice is never posted again');
 });
 
+test('#1810 R9j — the skipped window starts at the last successful READ, not at the file\'s last write: an unrelated state write (an owed notice retried, a pending job recorded) does not move it', { skip: SKIP }, async () => {
+  const stateFile = path.join(DIR, `state-${crypto.randomUUID()}.json`);
+  const STALE = 'ps1.00000000-0000-4000-8000-000000000000.88';
+  const HEAD = 'ps1.33333333-3333-4333-8333-333333333333.600';
+  // the file was last WRITTEN at 10:10 (a retry of an older, already-delivered notice), but last READ the board at 10:00
+  fs.writeFileSync(stateFile, JSON.stringify({ cursor: STALE, mode: 'seq', pending: [], lastReadAt: '2026-11-08T10:00:00.000Z', updatedAt: '2026-11-08T10:10:00.000Z',
+    resyncs: [{ at: '2026-11-08T09:00:00.000Z', from: 'ps1.x.1', to: 'ps1.x.2', mode: 'seq', reason: '409 OLD', skippedSince: '2026-11-08T08:00:00.000Z', announced: true, announcedAt: '2026-11-08T10:10:00.000Z' }] }));
+  const posted = [];
+  const stub = recordingFetch(async (url, init = {}) => {
+    const u = String(url);
+    if (init.method === 'POST') { posted.push(JSON.parse(init.body)); return json(201, { id: `p-${posted.length}` }); }
+    if (/[?&]afterCommit=tip/.test(u)) return json(400, { code: 'GRAPH_DISCOVERY_OFF' });
+    if (/[?&]tail=1/.test(u)) return json(200, { conversations: [], nextAfterSeq: HEAD });
+    if (/[?&]afterSeq=/.test(u)) return decodeURIComponent(u).includes(HEAD) ? json(200, { conversations: [], nextAfterSeq: HEAD }) : json(409, { code: 'POST_CURSOR_EPOCH_CHANGED', resync: 'afterSeq=start' });
+    throw new Error(`unexpected request ${u}`);
+  });
+  const { intake } = intakeWith({ srv: DOC, fetchSource: serves('https://example.test/never'), fetchImpl: stub, stateFile });
+  const t1 = await intake.tick();
+  assert.equal(posted.length, 1, 'one notice for the new window; the delivered old one is not re-posted');
+  assert.equal(t1.resync?.skippedSince, '2026-11-08T10:00:00.000Z', `the window starts at the last READ, not the last write (${JSON.stringify(t1.resync)})`);
+  assert.match(posted[0].body, /2026-11-08T10:00/); assert.doesNotMatch(posted[0].body, /10:10/);
+  const s1 = state(stateFile);
+  assert.equal(s1.resyncs.length, 2); assert.equal(s1.resyncs[1].skippedSince, '2026-11-08T10:00:00.000Z');
+  assert.ok(s1.lastReadAt > '2026-11-08T10:10:00.000Z', `a successful read (the re-seed at the head counts as one) moves lastReadAt forward (${s1.lastReadAt})`);
+
+  const t2 = await intake.tick();   // a clean read at the head
+  assert.equal(t2.read, 0);
+  const s2 = state(stateFile);
+  assert.ok(s2.lastReadAt >= s1.lastReadAt, 'and every successful read keeps it current');
+});
+
 test('#1810 R9h — the tip probe fails with a server error (not GRAPH_DISCOVERY_OFF): the tick throws, writes no state, and does not fall back to the document path', { skip: SKIP }, async () => {
   const stateFile = path.join(DIR, `state-${crypto.randomUUID()}.json`);
   const stub = recordingFetch(async (url) => { if (/afterCommit=tip/.test(String(url))) return json(500, { error: 'boom' }); throw new Error(`unexpected request ${url}`); });
