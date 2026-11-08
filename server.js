@@ -10024,10 +10024,21 @@ async function handleReserveWindow(req, res) {
 // ── #1815 — the ceremony bell's reservation, state and events, as graph state decided under the write lock
 // (core/ceremony-bell-graph.mjs). Several MCP processes run the bell tick; REST is the one writer, so two ticks racing one
 // bell get one 201 and one 409, the same guarantee #1786 gives the tending window.
-async function readJSONBody(req) { const raw = await readBody(req); return raw ? JSON.parse(raw) : {}; }
+// #1815 (review of PR #165): a body that is not JSON is the client's error, so it is a 400, never the handler's 500.
+// Returns null after answering; the caller returns.
+async function readJSONBody(req, res) {
+  const raw = await readBody(req);
+  if (!raw) return {};
+  let body;
+  try { body = JSON.parse(raw); } catch { body = undefined; }
+  if (body && typeof body === 'object' && !Array.isArray(body)) return body;
+  sendJSON(res, 400, { error: 'invalid JSON: the body must be a JSON object' });
+  return null;
+}
 async function handleReserveBell(req, res) {
   try {
-    const { key, value, by } = await readJSONBody(req);
+    const body = await readJSONBody(req, res); if (!body) return;
+    const { key, value, by } = body;
     if (!parseBellKey(key)) return sendJSON(res, 400, { error: 'key must be `${kind}@${slotISO}`, the slot a canonical ISO instant' });
     const bad = unknownBellFields(value);
     if (bad.length) return sendJSON(res, 400, { error: `unknown bell field(s): ${bad.join(', ')}` });
@@ -10042,9 +10053,10 @@ async function handleReserveBell(req, res) {
     sendJSON(res, 500, { error: 'Failed to reserve the bell' });
   }
 }
-async function handlePutBell(req, res) {
+async function handlePatchBell(req, res) {
   try {
-    const { key, value, by } = await readJSONBody(req);
+    const body = await readJSONBody(req, res); if (!body) return;
+    const { key, value, by } = body;
     if (!parseBellKey(key)) return sendJSON(res, 400, { error: 'key must be `${kind}@${slotISO}`' });
     const bad = unknownBellFields(value);
     if (bad.length) return sendJSON(res, 400, { error: `unknown bell field(s): ${bad.join(', ')}` });
@@ -10072,7 +10084,8 @@ function handleGetBell(req, res) {
 }
 async function handleRecordBellEvent(req, res) {
   try {
-    const { key, event, by } = await readJSONBody(req);
+    const body = await readJSONBody(req, res); if (!body) return;
+    const { key, event, by } = body;
     if (!event || typeof event !== 'object' || typeof event.type !== 'string') return sendJSON(res, 400, { error: 'event with a type is required' });
     if (key !== undefined && key !== null && !parseBellKey(key)) return sendJSON(res, 400, { error: 'key must be `${kind}@${slotISO}`' });
     const ent = bellEventEntity({ key: key || null, event, receivedAt: new Date().toISOString() });
@@ -13849,7 +13862,7 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/tending\/claims$/,       fn: (req, res) => handleClaimWhisper(req, res) },    // #1786
   { method: 'GET',    re: /^\/api\/tending\/claims$/,       fn: (req, res) => handleGetClaims(req, res) },       // #1786
   { method: 'POST',   re: /^\/api\/ceremony-bells$/,       fn: (req, res) => handleReserveBell(req, res) },     // #1815
-  { method: 'PATCH',  re: /^\/api\/ceremony-bells$/,       fn: (req, res) => handlePutBell(req, res) },         // #1815
+  { method: 'PATCH',  re: /^\/api\/ceremony-bells$/,       fn: (req, res) => handlePatchBell(req, res) },         // #1815
   { method: 'GET',    re: /^\/api\/ceremony-bells$/,       fn: (req, res) => handleGetBell(req, res) },         // #1815
   { method: 'POST',   re: /^\/api\/ceremony-bells\/events$/, fn: (req, res) => handleRecordBellEvent(req, res) }, // #1815
   { method: 'POST',   re: /^\/api\/tending-config$/,       fn: (req, res) => handleSetTendingConfig(req, res) },
