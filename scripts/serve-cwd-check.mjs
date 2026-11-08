@@ -52,16 +52,30 @@ export function parseLsofCwd(text) {
   return { inode, name };
 }
 
+/** True when `p` is `dir` itself or lies under it. Both are real paths; the trailing slash stops `serve2/` matching. */
+const within = (p, dir) => !!p && !!dir && (p === dir || p.startsWith(dir.endsWith('/') ? dir : `${dir}/`));
+
 /**
- * The verdict for one job. `nameInode` is what the cached path holds NOW (null if the path does not exist).
- * Order matters: serve and previous are decided by inode alone, before the path is consulted at all.
+ * The verdict for one job. `nameInode` is what the cached path holds NOW (null if the path does not exist), and
+ * `nameReal` is that path's realpath.
+ * - The serve and .previous folders THEMSELVES are matched by inode alone.
+ * - A SUBFOLDER of either (the executor runs from `<serve>/graph-executor`) is matched by the realpath prefix, but
+ *   only once the name is proven TRUE, i.e. the path holds the cwd's own inode. A stale name proves nothing, so it
+ *   falls through to GONE.
+ * Found in review: matching by folder inode alone called `<.previous>/graph-executor` `other` (exit 0). That was
+ * the executor's real state on the day it began running from a folder the next deploy deletes.
  */
-export function classify({ pid, cwdInode, nameInode }, { serveInode, previousInode }) {
+export function classify({ pid, cwdInode, nameInode, nameReal = null },
+  { serveInode, previousInode, serveReal = null, previousReal = null }) {
   if (pid === null || pid === undefined) return 'not-running';
   if (cwdInode === null || cwdInode === undefined) return 'unknown';
   if (cwdInode === serveInode) return 'serve';
   if (previousInode !== null && cwdInode === previousInode) return 'previous';
-  if (nameInode !== null && nameInode === cwdInode) return 'other';
+  if (nameInode !== null && nameInode === cwdInode) {
+    if (within(nameReal, serveReal)) return 'serve';
+    if (within(nameReal, previousReal)) return 'previous';
+    return 'other';
+  }
   return 'GONE';
 }
 
@@ -73,6 +87,7 @@ export function exitCodeFor(verdicts) {
 }
 
 const inodeOf = (p) => { try { return fs.statSync(p).ino; } catch { return null; } };
+const realOrNull = (p) => { try { return fs.realpathSync(p); } catch { return null; } };
 
 const real = (p) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
 if (process.argv[1] && real(process.argv[1]) === real(fileURLToPath(import.meta.url))) {
@@ -95,8 +110,9 @@ if (process.argv[1] && real(process.argv[1]) === real(fileURLToPath(import.meta.
       try { cwd = parseLsofCwd(execFileSync('lsof', ['-a', '-p', String(job.pid), '-d', 'cwd', '-Fin'], { encoding: 'utf8' })); }
       catch (e) { cwd = parseLsofCwd(String(e.stdout ?? '')); }
     }
-    const verdict = classify({ pid: job.pid, cwdInode: cwd.inode, nameInode: cwd.name ? inodeOf(cwd.name) : null },
-      { serveInode, previousInode });
+    const verdict = classify(
+      { pid: job.pid, cwdInode: cwd.inode, nameInode: cwd.name ? inodeOf(cwd.name) : null, nameReal: cwd.name ? realOrNull(cwd.name) : null },
+      { serveInode, previousInode, serveReal: realOrNull(serve), previousReal: realOrNull(`${serve}.previous`) });
     verdicts.push(verdict);
     if (verdict === 'not-running') continue;
     console.log(`${verdict} ${job.label} pid=${job.pid} cwd=${cwd.name ?? '?'} (inode ${cwd.inode ?? '?'})`);

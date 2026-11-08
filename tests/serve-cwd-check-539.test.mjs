@@ -45,6 +45,25 @@ test('the specimen: the cached path EXISTS but holds another folder, so the cwd 
   assert.equal(classify({ pid: 7, cwdInode: 55, nameInode: null }, TREES), 'GONE');
 });
 
+// Found in review: matching the two folders by their OWN inode missed a cwd that is a SUBFOLDER of them.
+const REAL = { ...TREES, serveReal: '/srv/app', previousReal: '/srv/app.previous' };
+
+test('a SUBFOLDER of .previous whose name is true is `previous` (the day the executor problem began), exit 1', () => {
+  const v = classify({ pid: 1756, cwdInode: 77, nameInode: 77, nameReal: '/srv/app.previous/graph-executor' }, REAL);
+  assert.equal(v, 'previous', 'running from a folder the next deploy deletes must not read as fine');
+  assert.equal(exitCodeFor([v]), 1);
+});
+
+test('a SUBFOLDER of serve whose name is true is `serve` (a healthy executor after the restart)', () => {
+  assert.equal(classify({ pid: 1756, cwdInode: 88, nameInode: 88, nameReal: '/srv/app/graph-executor' }, REAL), 'serve');
+});
+
+test('the prefix match is by folder: `/srv/app2` is not under `/srv/app`, and a STALE name still reads GONE', () => {
+  assert.equal(classify({ pid: 3, cwdInode: 99, nameInode: 99, nameReal: '/srv/app2/x' }, REAL), 'other');
+  // the name points into .previous, but that path now holds another inode: the name proves nothing
+  assert.equal(classify({ pid: 4, cwdInode: 66, nameInode: 67, nameReal: '/srv/app.previous/graph-executor' }, REAL), 'GONE');
+});
+
 test('a cwd outside serve that still exists is `other`, not GONE (a job that runs from `/`)', () => {
   assert.equal(classify({ pid: 1768, cwdInode: 2, nameInode: 2 }, TREES), 'other');
 });
