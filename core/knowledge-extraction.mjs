@@ -24,9 +24,9 @@
  *                construction). A model item naming an unregistered relation is published under the generic registered
  *                relation with the model's term kept as `scrum:proposedPredicate`, a literal a seat can promote (49172).
  *
- * Two counters are kept apart (R6): `inventions` counts items that ended REJECTED for a span that does not match the
- * source — the quality signal scored against model and prompt; `providerFailures` counts transport errors and is not a
- * quality score. Every outbound body carries OpenRouter's per-request ZDR fields (R7); a non-200 is never retried
+ * Two counters are kept apart (R6): `spanInventions` counts items that ended REJECTED for a span the source does not
+ * contain — a SPAN failure count, not the gold set's invention rate (that one is about meaning and is scored against the
+ * gold set, never here); `providerFailures` counts transport errors and is not a quality score. Every outbound body carries OpenRouter's per-request ZDR fields (R7); a non-200 is never retried
  * without them.
  */
 import crypto from 'node:crypto';
@@ -38,6 +38,8 @@ export const ZDR_PROVIDER = Object.freeze({ zdr: true, data_collection: 'deny' }
 export const OUTCOMES = Object.freeze(['complete', 'partial', 'failed']);
 /** The registered relation an unregistered model term is published UNDER, with the term kept as proposedPredicate. */
 export const GENERIC_RELATION = 'scrum:relatedTo';
+/** A span is at least this many words, or the whole block (51171 finding 3). */
+export const SPAN_MIN_WORDS = 3;
 /** The saver scope every extraction job's checkpoints live in. */
 export const SAVER_SCOPE = 'knowledge-extraction';
 
@@ -78,6 +80,8 @@ export function validateItem(item, blocks) {
   if (!Number.isInteger(item.block) || item.block < 0 || item.block >= blocks.length) return { ok: false, reason: 'bad-block', detail: `block ${JSON.stringify(item.block)} is not in 0..${blocks.length - 1}` };
   if (typeof item.span !== 'string' || !item.span.trim()) return { ok: false, reason: 'span-mismatch', detail: 'the span is empty' };
   if (!blocks[item.block].includes(item.span)) return { ok: false, reason: 'span-mismatch', detail: `the span is not a verbatim substring of block ${item.block}` };
+  // the floor (PO, 51171 finding 3): a one-word span anchors anything, so a span is at least three words, or the whole block
+  if (item.span.trim().split(/\s+/).length < SPAN_MIN_WORDS && item.span.trim() !== blocks[item.block].trim()) return { ok: false, reason: 'span-mismatch', detail: `the span is shorter than three words and is not the whole block: a degenerate span anchors nothing` };
   for (const f of ['subject', 'object']) if (typeof item[f] !== 'string' || !item[f].trim()) return { ok: false, reason: 'bad-shape', detail: `${f} is required` };
   if (typeof item.predicate !== 'string' || !TERM_RE.test(item.predicate)) return { ok: false, reason: 'bad-shape', detail: `predicate must be a prefixed term, got ${JSON.stringify(item.predicate)}` };
   return { ok: true };
@@ -153,7 +157,7 @@ export function createExtractor({ graphClient, runs, model, registry, actor = 'e
     return {
       kind: 'extraction.publish', opId: id, actor: actorIri,
       run, source: sourceRecord, assertions, rejected: rej,
-      report: { iri: `${run}/extraction`, outcome: report.outcome, proposals: report.proposals ?? 0, inventions: report.inventions,
+      report: { iri: `${run}/extraction`, outcome: report.outcome, proposals: report.proposals ?? 0, spanInventions: report.spanInventions,
         providerFailures: report.providerFailures, published: assertions.length, at: report.at ?? now() },
     };
   }
@@ -182,7 +186,7 @@ export function createExtractor({ graphClient, runs, model, registry, actor = 'e
 
   async function extract(st) {
     const { source, modelKey, prompt } = st;
-    const counters = { inventions: 0, providerFailures: 0 };
+    const counters = { spanInventions: 0, providerFailures: 0 };
     const items = []; const rejected = [];
     const first = await send(body(modelKey, prompt, numbered(source.blocks)));
     if (!first.ok) counters.providerFailures += 1;
@@ -197,10 +201,11 @@ export function createExtractor({ graphClient, runs, model, registry, actor = 'e
           + `exactly from the block, as {"items":[item]}.\n\nItem: ${JSON.stringify(it)}`));
         if (!again.ok) counters.providerFailures += 1;
         const fixed = again.ok && Array.isArray(again.json?.items) ? again.json.items[0] : null;
-        if (fixed) { const cand = { ...it, ...fixed, block: it.block }; const v2 = validateItem(cand, source.blocks); if (v2.ok) { final = cand; v = v2; } }
+        // the repair may change ONLY the span (51171 finding 2): subject, predicate, object and type stay the item's own
+        if (fixed && typeof fixed.span === 'string') { const cand = { ...it, span: fixed.span }; const v2 = validateItem(cand, source.blocks); if (v2.ok) { final = cand; v = v2; } }
       }
       if (!v.ok) {
-        if (v.reason === 'span-mismatch') counters.inventions += 1;
+        if (v.reason === 'span-mismatch') counters.spanInventions += 1;
         rejected.push({ reason: v.reason, detail: v.detail, item: it });
         continue;
       }
@@ -211,7 +216,32 @@ export function createExtractor({ graphClient, runs, model, registry, actor = 'e
     return { proposals: proposed.length, items, rejected, counters, outcome };
   }
 
+  /** The assertions the graph already holds for a run, matched back to the state's items by (block, span). */
+  async function alreadyPublished(st) {
+    const RS = PREFIXES.scrum, RDF = PREFIXES.rdf;
+    const has = await graphClient.ask(`ASK { <${st.runId}/extraction> <${RDF}type> <${RS}ExtractionReport> }`);
+    if (!has.ok) throw new Error(`publish: could not read the run's report: ${has.reason}`);
+    if (!has.boolean) return null;
+    const r = await graphClient.query(`SELECT ?a ?p ?span ?ty ?pp WHERE { ?a <${RS}ofRun> <${st.runId}> ; <${RDF}type> <${RS}Assertion> ; <${RS}expressedIn> ?p ; <${RS}anchorText> ?span ; <${RS}assertionType> ?ty OPTIONAL { ?a <${RS}proposedPredicate> ?pp } }`);
+    if (!r.ok) throw new Error(`publish: could not read the run's assertions: ${r.reason}`);
+    const byKey = new Map(r.rows.map((x) => [`${x.p.value.split('/block/')[1]}|${x.span.value}`, x]));
+    const published = st.items.map((it) => {
+      const x = byKey.get(`${it.block}|${it.span}`);
+      if (!x) throw new Error(`publish: the graph holds this run's report but not its item at block ${it.block}: refusing to guess`);
+      return { iri: x.a.value, block: it.block, type: x.ty.value, predicate: it.predicate, ...(x.pp ? { proposedPredicate: x.pp.value } : {}) };
+    });
+    return published;
+  }
+
   async function publish(st) {
+    // 51171 finding 1: a death AFTER the write (the run record blipped) must not re-publish — the fresh report
+    // precondition would refuse it forever. If the graph already holds this run's report, finish the record instead.
+    const prior = await alreadyPublished(st);
+    if (prior) {
+      await runs.generated({ run: st.runId, iris: prior.map((p) => p.iri) });
+      return { result: { runId: st.runId, outcome: st.outcome, published: prior, counters: st.counters, proposals: st.proposals,
+        rejected: st.rejected.map((r, k) => ({ iri: `${st.runId}/rejected/${k + 1}`, reason: r.reason, item: r.item, detail: r.detail })) } };
+    }
     const intention = await intentionFor({
       source: st.source, run: st.runId, items: st.items, rejected: st.rejected,
       report: { outcome: st.outcome, proposals: st.proposals, ...st.counters, at: now() },

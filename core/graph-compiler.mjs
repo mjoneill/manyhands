@@ -582,7 +582,7 @@ export const LOGBORN_TERMS = Object.freeze({
   contentHash: `${RS}contentHash`, contentUrl: `${RSC}contentUrl`, retrievedAt: `${RS}retrievedAt`,
   assertionType: `${RS}assertionType`, assertedBy: `${RS}assertedBy`, expressedIn: `${RS}expressedIn`, anchorText: `${RS}anchorText`,
   ofRun: `${RS}ofRun`, rejectedOf: `${RS}rejectedOf`, proposedPredicate: `${RS}proposedPredicate`, gist: `${RS}gist`,
-  outcome: `${RS}outcome`, proposals: `${RS}proposals`, inventions: `${RS}inventions`, providerFailures: `${RS}providerFailures`, publishedCount: `${RS}publishedCount`,
+  outcome: `${RS}outcome`, proposals: `${RS}proposals`, spanInventions: `${RS}spanInventions`, providerFailures: `${RS}providerFailures`, publishedCount: `${RS}publishedCount`,
 });
 const TM = LOGBORN_TERMS;
 
@@ -809,10 +809,10 @@ function canonicalizeRecord(i) {
       return { iri: checkIri(x.iri, `rejected[${k}].iri`), reason: rStr(x.reason, `rejected[${k}].reason`), passage: rOptIri(x.passage, `rejected[${k}].passage`),
         span: rOpt(x.span, `rejected[${k}].span`), type: rOpt(x.type, `rejected[${k}].type`), detail: rOpt(x.detail, `rejected[${k}].detail`) };
     });
-    const rp = obj(i.report, ['iri', 'outcome', 'proposals', 'inventions', 'providerFailures', 'published', 'at'], 'report');
+    const rp = obj(i.report, ['iri', 'outcome', 'proposals', 'spanInventions', 'providerFailures', 'published', 'at'], 'report');
     const num = (v, what) => { if (!Number.isInteger(v) || v < 0) fail(`${what} must be a non-negative integer`); return String(v); };
     const report = { iri: checkIri(rp.iri, 'report.iri'), outcome: rStr(rp.outcome, 'report.outcome'), proposals: num(rp.proposals, 'report.proposals'),
-      inventions: num(rp.inventions, 'report.inventions'), providerFailures: num(rp.providerFailures, 'report.providerFailures'),
+      spanInventions: num(rp.spanInventions, 'report.spanInventions'), providerFailures: num(rp.providerFailures, 'report.providerFailures'),
       published: num(rp.published, 'report.published'), at: rStr(rp.at, 'report.at') };
     if (!['complete', 'partial', 'failed'].includes(report.outcome)) fail('report.outcome must be complete, partial or failed');
     if (report.outcome === 'complete' && assertions.length === 0) fail('a run that published nothing is never complete');
@@ -1133,7 +1133,7 @@ function planRecord(c) {
     const P = X.report;
     fresh.push(P.iri);
     add(P.iri, TM.type, I(TM.ExtractionReport)); add(P.iri, TM.ofRun, I(X.run)); add(P.iri, TM.outcome, L(P.outcome));
-    add(P.iri, TM.proposals, L(P.proposals)); add(P.iri, TM.inventions, L(P.inventions)); add(P.iri, TM.providerFailures, L(P.providerFailures));
+    add(P.iri, TM.proposals, L(P.proposals)); add(P.iri, TM.spanInventions, L(P.spanInventions)); add(P.iri, TM.providerFailures, L(P.providerFailures));
     add(P.iri, TM.publishedCount, L(P.published)); add(P.iri, TM.at, L(P.at)); add(P.iri, TM.recordedBy, ref(c.opId));
   } else if (c.kind === 'post.create') {
     const P = R.post; target = null;   // a create: the post IRI must be fresh

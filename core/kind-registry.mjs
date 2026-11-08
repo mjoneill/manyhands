@@ -167,8 +167,9 @@ export const KIND_DECLARATIONS = Object.freeze([
     name: 'scrum:ExtractionReport', eventKind: null, collection: null,
     createdBy: 'the knowledge-extraction service, one per run, at <run>/extraction (compiler kind extraction.publish)',
     definition: 'How one extraction Run ENDED: `scrum:outcome` (complete · partial · failed — zero usable items is FAILED, '
-      + 'never success), `scrum:proposals` (items before validation), `scrum:publishedCount`, `scrum:inventions` (items '
-      + 'rejected for a span the source does not contain: the quality signal scored against model and prompt) and '
+      + 'never success), `scrum:proposals` (items before validation), `scrum:publishedCount`, `scrum:spanInventions` (items '
+      + 'rejected for a span the source does not contain — a SPAN failure count, NOT the gold set\'s invention rate, which is about '
+      + 'meaning and is scored against the gold set, never here) and '
       + '`scrum:providerFailures` (transport errors, counted apart and never a quality score). Written in the same guarded '
       + 'update as the run\'s assertions, so a crash mid-run leaves no report and no half-published run.',
   },

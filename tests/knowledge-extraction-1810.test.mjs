@@ -59,6 +59,7 @@ const FIXTURE = [
   'Most harnesses expose a loop: read, decide, act, observe.',                          // 7
   'Nothing here is specific to one vendor.',                                            // 8
   'Thanks for reading.',                                                                // 9
+  'Fin.',                                                                               // 10 (shorter than the span minimum: the whole block is the span)
 ].join('\n');
 const FIXTURE_URL = 'https://example.test/articles/harness';
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
@@ -140,7 +141,7 @@ test('#1810 R0 — the writer is the guard: an unregistered quoted predicate is 
   // THE GUARD: a writer call that names an unregistered quoted predicate is refused, naming it, and writes nothing
   const unregistered = { ...goodItems()[0], predicate: 'scrum:exposes' };
   await assert.rejects(
-    () => extractor.intentionFor({ source: src, run: 'https://scrumboard.local/activity/run-x', items: [unregistered], rejected: [], report: { outcome: 'complete', proposals: 1, inventions: 0, providerFailures: 0 } }),
+    () => extractor.intentionFor({ source: src, run: 'https://scrumboard.local/activity/run-x', items: [unregistered], rejected: [], report: { outcome: 'complete', proposals: 1, spanInventions: 0, providerFailures: 0 } }),
     (e) => e instanceof PredicateRefused && /scrum:exposes/.test(e.message) && /not registered/.test(e.message),
     'the refusal names the term and says it is not registered',
   );
@@ -163,7 +164,7 @@ test('#1810 R0 — the writer is the guard: an unregistered quoted predicate is 
   // NEGATIVE CONTROL, so the finding is explicit: the SAME quoted triple with the unregistered predicate, sent RAW to the
   // executor with the client's own headers, is accepted. Built by compiling a registered write and swapping the predicate.
   const compiled = compile(await extractor.intentionFor({
-    source: src, run: `https://scrumboard.local/activity/run-raw-${crypto.randomUUID()}`, items: [goodItems()[0]], rejected: [], report: { outcome: 'complete', proposals: 1, inventions: 0, providerFailures: 0 },
+    source: src, run: `https://scrumboard.local/activity/run-raw-${crypto.randomUUID()}`, items: [goodItems()[0]], rejected: [], report: { outcome: 'complete', proposals: 1, spanInventions: 0, providerFailures: 0 },
     opId: `urn:ex:op/raw-${crypto.randomUUID()}`,
   }));
   const raw = compiled.sparql.replaceAll(`<${RS}relatedTo>`, `<${RS}exposes>`);
@@ -241,7 +242,7 @@ test('#1810 R3 — anchors: one bounded repair; repaired → published, not repa
   const hopeless = item(7, 'empirical', 'a harness is a loop of four verbs', 'harness', 'scrum:relatedTo', 'loop');            // wrong span, stays wrong
   const model = fakeModel([
     reply(good, fixable, hopeless),
-    reply({ ...fixable, span: 'all a language model can do is generate text' }),   // the repair for `fixable` (one re-ask)
+    reply({ ...fixable, span: 'all a language model can do is generate text', object: 'kitchen', type: 'analogy' }),   // the repair for `fixable`: a good span, but it ALSO tries to change the object and the type
     reply({ ...hopeless, span: 'still not in the block' }),                        // the repair for `hopeless` fails too
   ]);
   const { extractor } = extractorWith({ model });
@@ -250,6 +251,12 @@ test('#1810 R3 — anchors: one bounded repair; repaired → published, not repa
   assert.equal(r.rejected.length, 1, 'the hopeless one is kept, not dropped');
   assert.equal(r.rejected[0].reason, 'span-mismatch');
   assert.equal(r.rejected[0].item.block, 7);
+  // the repair took ONLY the span: subject, predicate, object and type are the original item's (review finding 2)
+  const repaired = r.published.find((p) => p.block === 2);
+  assert.ok(repaired, 'the repaired item was published');
+  assert.equal(repaired.type, 'empirical', 'the type is the original, not the re-ask\'s');
+  const tri = (await q(`SELECT ?o WHERE { <${repaired.iri}> <${RDF}reifies> <<( <https://scrumboard.local/concept/language-model> <${RS}relatedTo> ?o )>> }`))[0];
+  assert.equal(tri?.o?.value, 'https://scrumboard.local/concept/text', 'the object is the original, not the re-ask\'s');
   assert.equal(model.bodies.length, 3, 'one extraction ask + exactly one re-ask per mismatch, no loop');
   const kept = await q(`SELECT ?x ?why WHERE { ?x <${RS}rejectedOf> <${r.runId}> ; <${RS}reason> ?why }`);
   assert.equal(kept.length, 1, 'the rejected proposal is on the Run in the graph');
@@ -293,21 +300,21 @@ test('#1810 R5 — outcomes: zero usable → failed (never complete); some rejec
   assert.equal(onGraph[0]?.o?.value, 'failed', 'the outcome is recorded on the run\'s extraction report in the graph');
 });
 
-test('#1810 R6 — two counters kept apart: a span mismatch is an invention; a thrown or non-200 transport is a provider failure and NOT an invention', { skip: SKIP }, async () => {
+test('#1810 R6 — two counters kept apart: a span mismatch is a SPAN invention; a thrown or non-200 transport is a provider failure and NOT an invention', { skip: SKIP }, async () => {
   const src = ingestSource({ text: FIXTURE, url: FIXTURE_URL });
   const bad = item(8, 'empirical', 'not a span of block eight', 'x', 'scrum:relatedTo', 'y');
   // one mismatch (its repair returns a 502), then the run is over: inventions 1, providerFailures 1
   const { extractor } = extractorWith({ model: fakeModel([reply(goodItems()[0], bad), { status: 502, json: { error: 'bad gateway' } }]) });
   const r = await extractor.run({ source: src, modelKey: 'fake-a', prompt: 'p' });
-  assert.equal(r.counters.inventions, 1, `one invention (${JSON.stringify(r.counters)})`);
+  assert.equal(r.counters.spanInventions, 1, `one invention (${JSON.stringify(r.counters)})`);
   assert.equal(r.counters.providerFailures, 1, 'one provider failure');
   assert.equal(r.rejected[0].reason, 'span-mismatch', 'the item stays rejected for ITS reason; the 502 is not blamed on the model\'s quality');
   // a thrown transport on the FIRST ask: provider failure, zero inventions, the run is failed
   const { extractor: e2 } = extractorWith({ model: fakeModel([new Error('ECONNRESET')]) });
   const r2 = await e2.run({ source: src, modelKey: 'fake-a', prompt: 'p' });
-  assert.deepEqual(r2.counters, { inventions: 0, providerFailures: 1 });
+  assert.deepEqual(r2.counters, { spanInventions: 0, providerFailures: 1 });
   assert.equal(r2.outcome, 'failed');
-  const g = (await q(`SELECT ?i ?f WHERE { <${r.runId}/extraction> <${RS}inventions> ?i ; <${RS}providerFailures> ?f }`))[0];
+  const g = (await q(`SELECT ?i ?f WHERE { <${r.runId}/extraction> <${RS}spanInventions> ?i ; <${RS}providerFailures> ?f }`))[0];
   assert.equal(Number(g.i.value), 1); assert.equal(Number(g.f.value), 1);
 });
 
@@ -336,7 +343,7 @@ test('#1810 R8 — source text is data: an instruction-shaped block is recorded 
   assert.equal(r.published.length, 2, 'the good item and the QUOTED instruction are published');
   assert.equal(r.rejected.length, 1, 'the unanchored category claim is refused');
   assert.equal(r.rejected[0].reason, 'span-mismatch');
-  assert.equal(r.counters.inventions, 1);
+  assert.equal(r.counters.spanInventions, 1);
   const S = '<https://scrumboard.local/concept/harness>', O = '<https://scrumboard.local/concept/kitchen>';
   assert.equal(await ask(`ASK { ${S} <${SC}isPartOf> ${O} }`), false, 'the instruction was NOT acted on: nothing in the asserted graph says harness isPartOf kitchen');
   const q1 = await q(`SELECT ?a ?st WHERE { ?a <${RDF}reifies> <<( ${S} <${SC}isPartOf> ${O} )>> ; <${RS}status> ?st ; <${RS}expressedIn> <${src.iri}/block/5> }`);
@@ -365,4 +372,42 @@ test('#1810 R11 — a run is a checkpointed LangGraph: a crash between extractio
   const { extractor: fresh } = extractorWith({ model: fakeModel([]), runs, graphClient: client });
   const st = await fresh.state({ jobId });
   assert.equal(st.outcome, 'complete'); assert.equal(st.runId, r.runId);
+});
+
+test('#1810 R3b — a degenerate span anchors nothing: fewer than three words is a span error unless the span IS the whole block', { skip: SKIP }, async () => {
+  const blocks = blocksOf(FIXTURE);
+  const short = validateItem(item(1, 'definition', 'harness', 'harness', 'scrum:relatedTo', 'model'), blocks);
+  assert.equal(short.ok, false); assert.equal(short.reason, 'span-mismatch'); assert.match(short.detail, /three words|whole block/);
+  const two = validateItem(item(1, 'definition', 'A harness', 'harness', 'scrum:relatedTo', 'model'), blocks);
+  assert.equal(two.ok, false, 'two words is still too short');
+  const three = validateItem(item(1, 'definition', 'A harness is', 'harness', 'scrum:relatedTo', 'model'), blocks);
+  assert.equal(three.ok, true, 'three words is the floor');
+  const whole = validateItem(item(10, 'recommendation', 'Fin.', 'reader', 'scrum:relatedTo', 'end'), blocks);
+  assert.equal(whole.ok, true, 'a block shorter than the floor is anchored by quoting it whole');
+  // and through the run: the one-word span is rejected, not published
+  const src = ingestSource({ text: FIXTURE, url: FIXTURE_URL });
+  const { extractor } = extractorWith({ model: fakeModel([reply(goodItems()[0], item(1, 'definition', 'harness', 'harness', 'scrum:relatedTo', 'model')), reply(item(1, 'definition', 'harness', 'harness', 'scrum:relatedTo', 'model'))]) });
+  const r = await extractor.run({ source: src, modelKey: 'fake-a', prompt: 'p' });
+  assert.equal(r.published.length, 1); assert.equal(r.rejected.length, 1); assert.equal(r.rejected[0].reason, 'span-mismatch');
+});
+
+test('#1810 R11b — a death AFTER the graph write (in the run record) resumes too: the write is not repeated, the record is completed, the model is not asked again', { skip: SKIP }, async () => {
+  const src = ingestSource({ text: FIXTURE, url: FIXTURE_URL });
+  const model = fakeModel([reply(...goodItems())]);
+  const runs = fakeRuns();
+  let armed = true;
+  const flaky = { ...runs, async generated(args) { if (armed) { armed = false; throw new Error('injected: REST blip in generated'); } return runs.generated(args); } };
+  const { extractor } = extractorWith({ model, runs: flaky });
+  const jobId = `job-${crypto.randomUUID()}`;
+  await assert.rejects(() => extractor.run({ source: src, modelKey: 'fake-a', prompt: 'extract v1', jobId }), /injected: REST blip in generated/);
+  assert.equal(model.bodies.length, 1);
+  const runId = runs.runs[0].iri;
+  assert.equal(await count(`<${runId}/extraction> <${RDF}type> <${RS}ExtractionReport>`), 1, 'the graph write APPLIED before the blip');
+  assert.deepEqual(runs.runs[0].generated, [], 'but the run record never learned what was generated');
+  const r = await extractor.resume({ jobId });
+  assert.equal(model.bodies.length, 1, 'the model was not asked again');
+  assert.equal(r.runId, runId); assert.equal(r.outcome, 'complete'); assert.equal(r.published.length, 2);
+  assert.equal(await count(`<${runId}/extraction> <${RDF}type> <${RS}ExtractionReport>`), 1, 'ONE report: the write was not repeated');
+  assert.equal(await count(`?a <${RS}ofRun> <${runId}> ; <${RDF}type> <${RS}Assertion>`), 2, 'two assertions, not four');
+  assert.deepEqual([...runs.runs[0].generated].sort(), r.published.map((p) => p.iri).sort(), 'the run record now carries exactly what the graph holds');
 });

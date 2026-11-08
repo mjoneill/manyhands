@@ -2770,7 +2770,7 @@ export const EXECUTOR_ONLY_VOCABULARY = new Set([
   'scrum:Assertion', 'scrum:SourceVersion', 'scrum:RejectedProposal', 'scrum:ExtractionReport',
   'scrum:contentHash', 'schema:contentUrl', 'schema:encodingFormat', 'scrum:retrievedAt',
   'scrum:assertionType', 'scrum:assertedBy', 'scrum:expressedIn', 'scrum:anchorText', 'scrum:ofRun', 'scrum:rejectedOf',
-  'scrum:proposedPredicate', 'scrum:gist', 'scrum:proposals', 'scrum:inventions', 'scrum:providerFailures', 'scrum:publishedCount',
+  'scrum:proposedPredicate', 'scrum:gist', 'scrum:proposals', 'scrum:spanInventions', 'scrum:providerFailures', 'scrum:publishedCount',
 ]);
 // the executor gate's own set: graph_query on the executor is judged against it, and so is the vocabulary drift the
 // executor route reports (#1645), so the two can never disagree about which terms are known
