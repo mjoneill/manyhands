@@ -77,7 +77,7 @@ test('#1810 R12 — the REST run-record adapter: one version per (chain, model k
   assert.throws(() => createRestBoard({ baseUrl: SRV.baseUrl, token: TOK, by: '' }), /by/, 'no actor: refused to start');
 });
 
-test('#1810 R13 — the OpenRouter adapter: chat/completions with the key in the header (present, never read), the body passed through, content parsed as JSON, a non-200 returned untouched; every call lands one model-call row', async () => {
+test('#1810 R13 — the OpenRouter adapter: chat/completions with the key in the header (present, never read), the body passed through, content parsed as JSON, a non-200 returned untouched', async () => {
   const wire = [];
   const fakeFetch = async (url, opts) => {
     wire.push({ url: String(url), headers: { ...(opts.headers || {}) }, body: JSON.parse(opts.body) });
@@ -105,7 +105,21 @@ test('#1810 R13 — the OpenRouter adapter: chat/completions with the key in the
   assert.equal(r2.status, 429, 'a non-200 comes back as its status, not as an exception and not as a 200 with empty items');
   assert.equal(r2.json, null);
 
-  const calls = (await get('/api/model-calls')).calls.filter((c) => c.agent === 'extractor' || c.by === 'extractor');
+});
+
+test('#1810 R13b — every OpenRouter call, refused ones included, lands ONE model-call row with the usage, and the key never reaches the board', async () => {
+  let n = 0;
+  const fakeFetch = async () => {
+    n += 1;
+    if (n === 2) return new Response(JSON.stringify({ error: { message: 'rate limited' } }), { status: 429, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify({ id: 'gen-1', choices: [{ message: { role: 'assistant', content: '{"items":[]}' } }], usage: { prompt_tokens: 120, completion_tokens: 40 } }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const rec = recordingFetch();
+  const board = createRestBoard({ baseUrl: SRV.baseUrl, token: TOK, by: 'extractor', fetchImpl: rec.fetch });
+  const model = createOpenRouterModel({ apiKey: 'sk-or-test-not-a-real-key', baseUrl: 'https://openrouter.test/api/v1', modelId: 'deepseek/deepseek-v4-flash-0731', fetchImpl: fakeFetch, ledger: board, by: 'extractor-r13b' });
+  const body = { model: 'deepseek-v4-flash', provider: { zdr: true, data_collection: 'deny' }, messages: [{ role: 'user', content: 'u' }] };
+  await model.send(body); await model.send(body);
+  const calls = (await get('/api/model-calls')).calls.filter((c) => c.agent === 'extractor-r13b');
   assert.equal(calls.length, 2, `two ledger rows, one per call including the refused one (${calls.length})`);
   const ok = calls.find((c) => c.ok !== false && c.tokensIn === 120);
   assert.ok(ok, 'the 200 row carries the usage');
