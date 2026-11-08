@@ -194,8 +194,11 @@ test('#1810 R0b — the compiler emits a reifier: the bare triple is NOT asserte
 });
 
 test('#1810 R1 — ingest: a SourceVersion with sha256 hash, file:// url and format; the article text is NOT in the graph; the same bytes twice → ONE SourceVersion', { skip: SKIP }, async () => {
-  const src = ingestSource({ text: FIXTURE, url: FIXTURE_URL, contentUrl: 'file:///var/manyhands/research/2026-11-08-harness.txt' });
-  assert.equal(src.contentHash, `sha256:${sha256(FIXTURE)}`);
+  // R1's OWN bytes: every other row ingests FIXTURE, and the same bytes are ONE SourceVersion by design, so a second
+  // contentUrl on that shared node would be a second pointer, not a defect. This row wants a node with exactly its own.
+  const TEXT = `${FIXTURE}\nRead by R1 only.`;
+  const src = ingestSource({ text: TEXT, url: FIXTURE_URL, contentUrl: 'file:///var/manyhands/research/2026-11-08-harness.txt' });
+  assert.equal(src.contentHash, `sha256:${sha256(TEXT)}`);
   assert.match(src.contentUrl, /^file:\/\/.*research\//);
   assert.equal(src.encodingFormat, 'text/plain');
   const { extractor } = extractorWith({ model: fakeModel([reply(...goodItems())]) });
