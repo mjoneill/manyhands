@@ -2142,6 +2142,21 @@ function graphWatermark(projectedThrough) {
 // #1485 — the dense card ranking, shared by board_search and search_all. It
 // returns what the old handler computed inline; every early exit is an
 // `available:false` with its reason, exactly as board_search reported it.
+// #1810 R10 — the Sources the extraction service published, read from the executor, as search documents beside cards:
+// {id, title, description} is what planIndexUpdate ranks, plus kind and the shared url for the answer. Executor down or
+// unset ⇒ no sources and a note, never a failed search: cards still answer.
+async function searchableSources() {
+  if (!process.env.SCRUM_GRAPH_EXECUTOR_URL) return { sources: [], note: 'no executor: sources not indexed' };
+  try {
+    const c = createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 15000, label: 'search-sources' });
+    const r = await c.query('SELECT ?s ?n ?a ?u WHERE { ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://scrumboard.local/ns#SourceVersion> ; '
+      + '<https://schema.org/name> ?n ; <https://schema.org/abstract> ?a OPTIONAL { ?s <https://schema.org/url> ?u } } ORDER BY ?s');
+    if (!r.ok) return { sources: [], note: `sources not indexed: ${r.reason}` };
+    const seen = new Map();   // one document per Source: the first (name, abstract) pair, so a re-run never doubles a row
+    for (const x of r.rows) if (!seen.has(x.s.value)) seen.set(x.s.value, { id: x.s.value, kind: 'source', title: x.n.value, description: x.a.value, url: x.u?.value ?? null });
+    return { sources: [...seen.values()], note: null };
+  } catch (e) { return { sources: [], note: `sources not indexed: ${e?.message ?? e}` }; }
+}
 async function denseCardSearch(q, k, S, thresholds) {
   if (!SEARCH_EMBED_URL || !SEARCH_EMBED_MODEL) {
     return {
@@ -2152,6 +2167,8 @@ async function denseCardSearch(q, k, S, thresholds) {
   }
     const data = readBoard();
     const cards = data.cards.filter((c) => c && c.id);
+    const { sources, note: sourcesNote } = await searchableSources();   // #1810 R10
+    const docs = [...cards, ...sources];
     // Load the index under the model this server runs; a different generation
     // is refused with the remedy rather than silently mixed.
     let index;
@@ -2161,7 +2178,7 @@ async function denseCardSearch(q, k, S, thresholds) {
     } catch (e) {
       return { available: false, reason: e.message, ...thresholds, k };
     }
-    const plan = S.planIndexUpdate(cards, index.rows, { maxEmbed: SEARCH_MAX_EMBED, maxEmbedChars: SEARCH_MAX_EMBED_CHARS });
+    const plan = S.planIndexUpdate(docs, index.rows, { maxEmbed: SEARCH_MAX_EMBED, maxEmbedChars: SEARCH_MAX_EMBED_CHARS });
     // ONE embedder call: the query first, then this batch of changed cards.
     let vectors;
     try {
@@ -2180,15 +2197,18 @@ async function denseCardSearch(q, k, S, thresholds) {
     try {
       fs.writeFileSync(SEARCH_INDEX_FILE, S.serializeIndex(generation, rows));
     } catch { /* the index is a cache of the model; failing to persist it costs re-embedding, not correctness */ }
-    const coverage = { indexed: rows.length, total: plan.coverage.total, stale: plan.coverage.stale - fresh.length };
+    const coverage = { indexed: rows.length, total: plan.coverage.total, stale: plan.coverage.stale - fresh.length };   // the pinned shape; sources ride beside it
+    const sourcesIndexed = { count: sources.length, ...(sourcesNote ? { note: sourcesNote } : {}) };   // #1810 R10
     const partial = coverage.stale > 0 || coverage.indexed < coverage.total;
     const ranked = S.rank(qv, rows, { k });
-    const byId = new Map(cards.map((c) => [c.id, c]));
+    const byId = new Map(docs.map((c) => [c.id, c]));
     const results = ranked.map((r) => {
       const c = byId.get(r.id);
-      return { id: r.id, shortId: c?.shortId ?? null, title: c?.title ?? null, column: c?.column ?? null, score: Math.round(r.score * 1000) / 1000 };
+      const score = Math.round(r.score * 1000) / 1000;
+      if (c?.kind === 'source') return { id: r.id, kind: 'source', title: c.title ?? null, url: c.url ?? null, score };   // #1810 R10
+      return { id: r.id, shortId: c?.shortId ?? null, title: c?.title ?? null, column: c?.column ?? null, score };
     });
-    return { available: true, S, ranked, results, coverage, partial, generation, byId, cards };
+    return { available: true, S, ranked, results, coverage, partial, generation, byId, cards, sourcesIndexed };
 }
 
 async function handleSearch(req, res) {
@@ -2248,7 +2268,7 @@ async function handleSearch(req, res) {
       verdict: d.verdict, reason: d.reason,
       top: pick(d.top), contenders: d.contenders.map(pick).filter(Boolean),
       abstainBelow: d.abstainBelow, askWithin: d.askWithin,
-      results, coverage, partial, reader,
+      results, coverage, partial, reader, sources: dense.sourcesIndexed,   // #1810 R10: how many Sources the index holds, beside the card coverage
       generation: { model: generation.model, dims: generation.dims, builtAt: generation.builtAt },
       means: {
         verdict: 'answer = a clear top hit · ask = ≥2 candidates within askWithin of the top (they are the question) · abstain = top cosine below abstainBelow, or an empty index',
