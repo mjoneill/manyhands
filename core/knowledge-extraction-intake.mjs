@@ -120,15 +120,26 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
    */
   async function resync(st, refused) {
     const h = await head();
-    const record = { at: now(), from: st.cursor, to: h.cursor, mode: h.mode, reason: `${refused.status}${refused.code ? ` ${refused.code}` : ''}`, skippedSince: st.updatedAt ?? null, announced: false };
-    const since = record.skippedSince ?? 'an unknown time';
-    log(`extract-once: the board refused the saved cursor (${record.reason}); re-seeded at the head (${h.mode}). Posts since ${since} were not read; a link shared in that window needs re-sharing.`);
-    try {
-      const res = await fetchImpl(`${base}/api/conversations`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers() }, body: JSON.stringify({ author: actor, body: `Extraction skipped a window: the board refused my saved cursor (${record.reason}) and I resumed at the head at ${record.at}. Posts since ${since} were not read. If you shared a link in that window, please re-share it; nothing already queued was lost.` }) });
-      record.announced = res.status === 201;
-      if (!record.announced) log(`extract-once: the skip notice was refused by the board (${res.status})`);
-    } catch (e) { log(`extract-once: the skip notice could not be posted (${e?.message ?? e})`); }
+    const record = { at: now(), from: st.cursor, to: h.cursor, mode: h.mode, reason: `${refused.status}${refused.code ? ` ${refused.code}` : ''}`, skippedSince: st.updatedAt ?? null, announced: false, announcedAt: null };
+    log(`extract-once: the board refused the saved cursor (${record.reason}); re-seeded at the head (${h.mode}). Posts since ${record.skippedSince ?? 'an unknown time'} were not read; a link shared in that window needs re-sharing.`);
+    await announce(record);
     return { ...h, record };
+  }
+
+  /**
+   * The notice is OWED until the board takes it: a record stays `announced:false` in the state file and is retried at
+   * the start of every tick (the commons cue is the recovery; a line in a file is not). Delivered once, never again.
+   */
+  async function announce(record) {
+    const since = record.skippedSince ?? 'an unknown time';
+    const delayed = record.announcedAttempts ? ' (this notice was delayed: the board refused it when the window opened)' : '';
+    record.announcedAttempts = (record.announcedAttempts ?? 0) + 1;
+    try {
+      const res = await fetchImpl(`${base}/api/conversations`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers() }, body: JSON.stringify({ author: actor, body: `Extraction skipped a window: the board refused my saved cursor (${record.reason}) and I resumed at the head at ${record.at}. Posts since ${since} were not read. If you shared a link in that window, please re-share it; nothing already queued was lost.${delayed}` }) });
+      if (res.status === 201) { record.announced = true; record.announcedAt = now(); }
+      else log(`extract-once: the skip notice was refused by the board (${res.status}); it stays owed and is retried next tick`);
+    } catch (e) { log(`extract-once: the skip notice could not be posted (${e?.message ?? e}); it stays owed and is retried next tick`); }
+    return record.announced === true;
   }
 
   /** Keep the fetched bytes on disk; the Source points at them and carries their hash. */
@@ -148,6 +159,14 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
     if (!st.cursor) {
       const h = await head();
       st = { ...st, mode: h.mode, cursor: h.cursor };
+      writeState({ cursor: st.cursor, mode: st.mode, pending, resyncs: st.resyncs });
+    }
+
+    // 0b. OWED NOTICES first: a skipped window whose commons post failed is announced before anything else is read
+    const announced = [];
+    for (const r of st.resyncs) {
+      if (r.announced === true) continue;
+      if (await announce(r)) announced.push(r.at);
       writeState({ cursor: st.cursor, mode: st.mode, pending, resyncs: st.resyncs });
     }
 
@@ -171,7 +190,8 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
       const r = await resync(st, got.refused);
       const resyncs = [...st.resyncs, r.record];
       writeState({ cursor: r.cursor, mode: r.mode, pending, resyncs });
-      return { started, resumed, skipped, failed, pending: pending.length, cursor: r.cursor, mode: r.mode, read: 0, resync: r.record };
+      if (r.record.announced) announced.push(r.record.at);
+      return { started, resumed, skipped, failed, pending: pending.length, cursor: r.cursor, mode: r.mode, read: 0, resync: r.record, announced };
     }
     const { conversations, next } = got;
     const seenThisTick = new Set(pending.map((p) => p.jobId));
@@ -204,7 +224,7 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
       }
     }
     writeState({ cursor: next, mode: st.mode, pending, resyncs: st.resyncs });
-    return { started, resumed, skipped, failed, pending: pending.length, cursor: next, mode: st.mode, read: conversations.length };
+    return { started, resumed, skipped, failed, pending: pending.length, cursor: next, mode: st.mode, read: conversations.length, announced };
   }
 
   return { tick, readState };

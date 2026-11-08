@@ -174,6 +174,7 @@ test('#1810 R9g — graph path, the saved token is fenced by another executor in
   const s0 = state(stateFile);
   assert.match(String(s0.cursor), /^gc1\./); assert.notEqual(s0.cursor, FENCED, 'the fenced token was replaced');
   assert.equal(s0.resyncs?.length, 1, JSON.stringify(s0)); assert.equal(s0.resyncs[0].from, FENCED); assert.equal(s0.resyncs[0].skippedSince, '2026-11-08T15:00:00.000Z');
+  assert.equal(s0.resyncs[0].announced, true, 'delivered on the resync tick itself'); assert.ok(s0.resyncs[0].announcedAt);
   const ann = await announcements(GRAPH);
   assert.equal(ann.length, before + 1, 'one commons post by the service seat');
   assert.match(ann.at(-1).body, /2026-11-08T15:00/);
@@ -183,6 +184,46 @@ test('#1810 R9g — graph path, the saved token is fenced by another executor in
   const t1 = await intake.tick();
   assert.deepEqual(t1.started.map((j) => j.url), [U], `the re-seeded cursor is live (${JSON.stringify(t1)})`);
   assert.equal(model.bodies.length, 1);
+});
+
+test('#1810 R9i — the skip notice fails to post on the resync tick: the window is owed durably, the next tick delivers it naming the ORIGINAL window, and the tick after posts nothing again', { skip: SKIP }, async () => {
+  const stateFile = path.join(DIR, `state-${crypto.randomUUID()}.json`);
+  const STALE = 'ps1.00000000-0000-4000-8000-000000000000.77';
+  const HEAD = 'ps1.22222222-2222-4222-8222-222222222222.500';
+  fs.writeFileSync(stateFile, JSON.stringify({ cursor: STALE, mode: 'seq', pending: [], updatedAt: '2026-11-08T15:30:00.000Z' }));
+  const posted = [];
+  let boardAcceptsPosts = false;
+  const stub = recordingFetch(async (url, init = {}) => {
+    const u = String(url);
+    if (init.method === 'POST') { if (!boardAcceptsPosts) return json(500, { error: 'injected: the board cannot take a post right now' }); posted.push(JSON.parse(init.body)); return json(201, { id: `p-${posted.length}` }); }
+    if (/[?&]afterCommit=tip/.test(u)) return json(400, { code: 'GRAPH_DISCOVERY_OFF' });
+    if (/[?&]tail=1/.test(u)) return json(200, { conversations: [], nextAfterSeq: HEAD });
+    if (/[?&]afterSeq=/.test(u)) return decodeURIComponent(u).includes(HEAD) ? json(200, { conversations: [], nextAfterSeq: HEAD }) : json(409, { code: 'POST_CURSOR_EPOCH_CHANGED', resync: 'afterSeq=start' });
+    throw new Error(`unexpected request ${u}`);
+  });
+  const errs = [];
+  const { intake } = intakeWith({ srv: DOC, fetchSource: serves('https://example.test/never'), fetchImpl: stub, stateFile, log: (l) => errs.push(l) });
+
+  const t1 = await intake.tick();   // the resync tick: the notice cannot be posted
+  assert.equal(posted.length, 0, 'no post reached the board');
+  const s1 = state(stateFile);
+  assert.equal(s1.cursor, HEAD, 'the cursor still advanced to the head (refusing it would re-seed every tick)');
+  assert.equal(s1.resyncs?.length, 1); assert.equal(s1.resyncs[0].announced, false, `the notice is recorded as OWED (${JSON.stringify(s1.resyncs)})`);
+  assert.equal(t1.resync?.announced, false);
+  assert.ok(errs.some((l) => /notice/i.test(l) && /500/.test(l)), `the failure is logged (${JSON.stringify(errs)})`);
+
+  boardAcceptsPosts = true;
+  const t2 = await intake.tick();   // the board is back: the owed notice is delivered FIRST
+  assert.equal(posted.length, 1, 'the owed notice was posted');
+  assert.equal(posted[0].author, 'extractor');
+  assert.match(posted[0].body, /2026-11-08T15:30/, 'it names the ORIGINAL skipped window, not this tick');
+  assert.match(posted[0].body, /re-?share/i);
+  const s2 = state(stateFile);
+  assert.equal(s2.resyncs[0].announced, true); assert.ok(s2.resyncs[0].announcedAt, 'stamped when delivered');
+  assert.deepEqual(t2.announced ?? [], [s2.resyncs[0].at], `the tick's summary names what it delivered (${JSON.stringify(t2)})`);
+
+  await intake.tick();   // nothing owed any more
+  assert.equal(posted.length, 1, 'a delivered notice is never posted again');
 });
 
 test('#1810 R9h — the tip probe fails with a server error (not GRAPH_DISCOVERY_OFF): the tick throws, writes no state, and does not fall back to the document path', { skip: SKIP }, async () => {
