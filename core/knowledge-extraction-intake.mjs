@@ -196,6 +196,7 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
       return { started, resumed, skipped, failed, pending: pending.length, cursor: r.cursor, mode: r.mode, read: 0, resync: r.record, announced };
     }
     const { conversations, next } = got;
+    const readAt = now();   // the READ happened now; the runs below can take minutes, and the window must open here, not after them
     const seenThisTick = new Set(pending.map((p) => p.jobId));
     for (const post of conversations) {
       const author = String(post.author ?? '');
@@ -225,7 +226,7 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
         } catch (e) { failed.push({ url, jobId, reason: `run: ${e?.message ?? e} (pending: the next tick resumes it)` }); }
       }
     }
-    writeState({ cursor: next, mode: st.mode, pending, resyncs: st.resyncs, lastReadAt: now() });   // a successful read
+    writeState({ cursor: next, mode: st.mode, pending, resyncs: st.resyncs, lastReadAt: readAt });   // a successful read, stamped when it happened
     return { started, resumed, skipped, failed, pending: pending.length, cursor: next, mode: st.mode, read: conversations.length, announced };
   }
 

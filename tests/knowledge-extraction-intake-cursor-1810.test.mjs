@@ -71,10 +71,10 @@ function recordingFetch(impl = fetch) {
   return f;
 }
 const serves = (url) => async (u) => { if (u !== url) throw new Error(`fetch: not this row's url (${u})`); return { text: ARTICLE, encodingFormat: 'text/plain' }; };
-function intakeWith({ srv, fetchSource, fetchImpl = recordingFetch(), stateFile = path.join(DIR, `state-${crypto.randomUUID()}.json`), model = fakeModel(), sharers = ['person-a'], log }) {
+function intakeWith({ srv, fetchSource, fetchImpl = recordingFetch(), stateFile = path.join(DIR, `state-${crypto.randomUUID()}.json`), model = fakeModel(), sharers = ['person-a'], log, now }) {
   const runs = fakeRuns();
   const extractor = createExtractor({ graphClient: client, runs, model, registry: new Set(['scrum:relatedTo']), actor: 'extractor' });
-  const intake = createIntake({ boardUrl: srv.baseUrl, stateFile, sourcesDir: path.join(DIR, 'sources'), fetchSource, extractor, modelKey: 'fake-a', prompt: 'extract v1', sharers: new Set(sharers), fetchImpl, ...(log ? { log } : {}) });
+  const intake = createIntake({ boardUrl: srv.baseUrl, stateFile, sourcesDir: path.join(DIR, 'sources'), fetchSource, extractor, modelKey: 'fake-a', prompt: 'extract v1', sharers: new Set(sharers), fetchImpl, ...(log ? { log } : {}), ...(now ? { now } : {}) });
   return { intake, runs, model, stateFile, fetchImpl };
 }
 const state = (f) => JSON.parse(fs.readFileSync(f, 'utf8'));
@@ -255,6 +255,43 @@ test('#1810 R9j — the skipped window starts at the last successful READ, not a
   assert.equal(t2.read, 0);
   const s2 = state(stateFile);
   assert.ok(s2.lastReadAt >= s1.lastReadAt, 'and every successful read keeps it current');
+});
+
+test('#1810 R9k — lastReadAt is the moment the page was READ, not the end of the tick: a slow extraction after the read does not move it, and a refused next tick opens its window at the read', { skip: SKIP }, async () => {
+  const U = 'https://example.test/articles/slow-extraction';
+  const stateFile = path.join(DIR, `state-${crypto.randomUUID()}.json`);
+  const C0 = 'ps1.44444444-4444-4444-8444-444444444444.700', C1 = 'ps1.44444444-4444-4444-8444-444444444444.701';
+  fs.writeFileSync(stateFile, JSON.stringify({ cursor: C0, mode: 'seq', pending: [], lastReadAt: '2026-11-08T11:00:00.000Z' }));
+  // an injected clock: starts at 11:05:00; the fake model's answer takes 90 s of it
+  const clock = { ms: Date.parse('2026-11-08T11:05:00.000Z') };
+  const now = () => new Date(clock.ms).toISOString();
+  const model = { bodies: [], async send(body) { this.bodies.push(body); clock.ms += 90_000; return { status: 200, json: { items: [{ block: 1, type: 'definition', span: 'A cursor is a position the reader can resume from.', subject: 'cursor', predicate: 'scrum:relatedTo', object: 'position' }] } }; } };
+  let refuseNext = false;
+  const posted = [];
+  const stub = recordingFetch(async (url, init = {}) => {
+    const u = String(url);
+    if (init.method === 'POST') { posted.push(JSON.parse(init.body)); return json(201, { id: `p-${posted.length}` }); }
+    if (/[?&]afterCommit=tip/.test(u)) return json(400, { code: 'GRAPH_DISCOVERY_OFF' });
+    if (/[?&]tail=1/.test(u)) return json(200, { conversations: [], nextAfterSeq: 'ps1.55555555-5555-4555-8555-555555555555.1' });
+    if (/[?&]afterSeq=/.test(u)) {
+      if (refuseNext) return json(409, { code: 'POST_CURSOR_EPOCH_CHANGED', resync: 'afterSeq=start' });
+      clock.ms += 1_000;   // the read itself takes a second
+      return decodeURIComponent(u).includes(C0) ? json(200, { conversations: [{ id: 'post-slow', author: 'person-a', body: `read this ${U}`, createdAt: now() }], nextAfterSeq: C1 }) : json(200, { conversations: [], nextAfterSeq: C1 });
+    }
+    throw new Error(`unexpected request ${u}`);
+  });
+  const { intake } = intakeWith({ srv: DOC, fetchSource: serves(U), fetchImpl: stub, stateFile, model, now });
+  const t1 = await intake.tick();
+  assert.deepEqual(t1.started.map((j) => j.url), [U], JSON.stringify(t1));
+  assert.equal(model.bodies.length, 1);
+  const s1 = state(stateFile);
+  assert.equal(s1.lastReadAt, '2026-11-08T11:05:01.000Z', `stamped when the page was read, before the 90 s run (${s1.lastReadAt})`);
+  assert.equal(s1.updatedAt, '2026-11-08T11:06:31.000Z', 'while the file itself was written after the run');
+
+  refuseNext = true;
+  const t2 = await intake.tick();
+  assert.equal(t2.resync?.skippedSince, '2026-11-08T11:05:01.000Z', `the window opens at the read, not at the end of the previous tick (${JSON.stringify(t2.resync)})`);
+  assert.equal(posted.length, 1); assert.match(posted[0].body, /11:05:01/);
 });
 
 test('#1810 R9h — the tip probe fails with a server error (not GRAPH_DISCOVERY_OFF): the tick throws, writes no state, and does not fall back to the document path', { skip: SKIP }, async () => {
