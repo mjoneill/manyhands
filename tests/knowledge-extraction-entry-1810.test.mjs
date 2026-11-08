@@ -88,7 +88,8 @@ const baseEnv = () => ({
   SCRUM_BOARD_URL: SRV.baseUrl, SCRUM_SEAT_TOKEN_FILE: path.join(DIR, 'seat-token'),
   SCRUM_GRAPH_EXECUTOR_URL: exec.baseUrl, SCRUM_GRAPH_DATASET_ID: 'kx-entry',
   SCRUM_EXTRACT_STATE_FILE: path.join(DIR, 'extract-state.json'), SCRUM_EXTRACT_SOURCES_DIR: path.join(DIR, 'sources'),
-  SCRUM_EXTRACT_MODEL_KEY: 'fake-flash', SCRUM_EXTRACT_ALLOW_HTTP_SOURCES: '1',   // the fake article server is plain http on loopback; production never sets this
+  SCRUM_EXTRACT_MODEL_KEY: 'fake-flash', SCRUM_EXTRACT_SHARERS: 'person-a',
+  SCRUM_EXTRACT_ALLOW_HTTP_SOURCES: '1', SCRUM_EXTRACT_ALLOW_PRIVATE_SOURCES: '1',   // the fake article server is plain http on loopback; production never sets these
 });
 // ASYNC on purpose: the fake provider and article servers live in THIS process, and a spawnSync would block the event
 // loop they answer on (measured: the child's fetch timed out against a server that never got to run)
@@ -147,7 +148,8 @@ test('#1810 R14c — the launchd template names the Keychain item, the entry and
   const t = fs.readFileSync(TEMPLATE, 'utf8');
   assert.match(t, /security find-generic-password -s OPENROUTER_API_KEY -w/, 'the key is loaded from the Keychain at launch');
   assert.match(t, /scripts\/extract-once\.mjs/, 'runs the entry');
-  for (const v of ['SCRUM_BOARD_URL', 'SCRUM_SEAT_TOKEN_FILE', 'SCRUM_GRAPH_EXECUTOR_URL', 'SCRUM_GRAPH_DATASET_ID', 'SCRUM_EXTRACT_STATE_FILE', 'SCRUM_EXTRACT_SOURCES_DIR', 'SCRUM_EXTRACT_MODEL_KEY']) assert.ok(t.includes(v), `names ${v}`);
+  for (const v of ['SCRUM_BOARD_URL', 'SCRUM_SEAT_TOKEN_FILE', 'SCRUM_GRAPH_EXECUTOR_URL', 'SCRUM_GRAPH_DATASET_ID', 'SCRUM_EXTRACT_STATE_FILE', 'SCRUM_EXTRACT_SOURCES_DIR', 'SCRUM_EXTRACT_MODEL_KEY', 'SCRUM_EXTRACT_SHARERS']) assert.ok(t.includes(v), `names ${v}`);
+  assert.ok(!/SCRUM_EXTRACT_ALLOW_(HTTP|PRIVATE)_SOURCES/.test(t), 'the test-only knobs are NOT in the template');
   assert.match(t, /<key>StartInterval<\/key>/, 'runs on an interval, one tick per launch');
   assert.doesNotMatch(t, /sk-or-|\/Users\/[a-z]/, 'no secret, no home path');
   // no seat or person name, structurally: every <string> value is a placeholder, a system path, the loopback board url,

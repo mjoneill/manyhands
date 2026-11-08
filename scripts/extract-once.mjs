@@ -20,13 +20,17 @@
  *   SCRUM_EXTRACT_SOURCES_DIR     where fetched bytes are kept                   (required)
  *   SCRUM_EXTRACT_MODEL_KEY       the registry key of the model to run           (default deepseek-v4-flash, the owner's choice in 49176)
  *   SCRUM_EXTRACT_PROMPT          the extraction prompt text                     (default below)
- *   SCRUM_EXTRACT_ALLOW_HTTP_SOURCES=1  accept http:// links too                 (tests on loopback only; never set in production)
+ *   SCRUM_EXTRACT_SHARERS         comma-separated authors whose links become jobs (required: the PO's ruling, 51192 — the owner's
+ *                                 shares, not seats' links; the roster cannot tell a person from a seat, so this is configuration)
+ *   SCRUM_EXTRACT_ALLOW_HTTP_SOURCES=1     accept http:// links too          (tests on loopback only; never set in production)
+ *   SCRUM_EXTRACT_ALLOW_PRIVATE_SOURCES=1  accept loopback/private hosts     (tests on loopback only; never set in production)
  */
 import fs from 'node:fs';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { createExtractor } from '../core/knowledge-extraction.mjs';
 import { createRestBoard, createOpenRouterModel } from '../core/knowledge-extraction-adapters.mjs';
 import { createIntake } from '../core/knowledge-extraction-intake.mjs';
+import { createFetcher } from '../core/knowledge-extraction-fetch.mjs';
 
 const ACTOR = 'extractor';
 const DEFAULT_PROMPT = 'Extract what this source says: its concepts, the claims it makes about them, and a short synopsis.';
@@ -51,6 +55,8 @@ const SOURCES_DIR = need('SCRUM_EXTRACT_SOURCES_DIR');
 const MODEL_KEY = (process.env.SCRUM_EXTRACT_MODEL_KEY || 'deepseek-v4-flash').trim();
 const PROMPT = process.env.SCRUM_EXTRACT_PROMPT || DEFAULT_PROMPT;
 const ALLOW_HTTP = process.env.SCRUM_EXTRACT_ALLOW_HTTP_SOURCES === '1';
+const ALLOW_PRIVATE = process.env.SCRUM_EXTRACT_ALLOW_PRIVATE_SOURCES === '1';
+const SHARERS = new Set(need('SCRUM_EXTRACT_SHARERS', 'Comma-separated authors whose shared links become jobs (the owner\'s key). Nothing runs for nobody.').split(',').map((x) => x.trim()).filter(Boolean));
 
 let token;
 try { token = fs.readFileSync(tokenFile, 'utf8').trim(); } catch (e) { console.error(`extract-once: SCRUM_SEAT_TOKEN_FILE unreadable (${e.code || 'error'})`); process.exit(2); }
@@ -61,25 +67,6 @@ const getJson = async (path) => {
   if (!r.ok) throw new Error(`GET ${path} → ${r.status}`);
   return r.json();
 };
-
-/** A readable text from a fetched page: scripts and styles gone, block tags to line breaks, tags stripped, a few entities decoded. */
-export function htmlToText(html) {
-  return String(html)
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<\/(p|div|section|article|h[1-6]|li|blockquote|pre|tr|br)\s*>|<br\s*\/?>/gi, '\n')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, '\'')
-    .split('\n').map((l) => l.replace(/\s+/g, ' ').trim()).filter(Boolean).join('\n');
-}
-
-async function fetchSource(url) {
-  const res = await fetch(url, { redirect: 'follow', headers: { accept: 'text/html, text/plain;q=0.9, */*;q=0.1', 'user-agent': 'manyhands-extractor/1810' }, signal: AbortSignal.timeout(30_000) });
-  if (!res.ok) throw new Error(`fetch: ${res.status}`);
-  const type = res.headers.get('content-type') || '';
-  const body = await res.text();
-  if (/html/i.test(type) || /^\s*</.test(body)) return { text: htmlToText(body), encodingFormat: 'text/html' };
-  return { text: body, encodingFormat: 'text/plain' };
-}
 
 async function main() {
   // the model, from the board's registry by key: the provider's model id and base url (never the key)
@@ -96,7 +83,8 @@ async function main() {
   const board = createRestBoard({ baseUrl: BOARD, token, by: ACTOR });
   const model = createOpenRouterModel({ apiKey, baseUrl: entry.baseUrl, modelId: entry.model, ledger: board, by: ACTOR });
   const extractor = createExtractor({ graphClient, runs: board, model, registry, actor: ACTOR });
-  const intake = createIntake({ boardUrl: BOARD, token, stateFile: STATE_FILE, sourcesDir: SOURCES_DIR, fetchSource, extractor, modelKey: MODEL_KEY, prompt: PROMPT, allowHttp: ALLOW_HTTP });
+  const fetchSource = createFetcher({ allowHttp: ALLOW_HTTP, allowPrivate: ALLOW_PRIVATE });
+  const intake = createIntake({ boardUrl: BOARD, token, stateFile: STATE_FILE, sourcesDir: SOURCES_DIR, fetchSource, extractor, modelKey: MODEL_KEY, prompt: PROMPT, sharers: SHARERS, allowHttp: ALLOW_HTTP });
   const summary = await intake.tick();
   console.log(JSON.stringify({ at: new Date().toISOString(), modelKey: MODEL_KEY, model: entry.model, ...summary }));
 }

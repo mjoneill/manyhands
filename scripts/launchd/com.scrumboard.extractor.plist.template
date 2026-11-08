@@ -10,6 +10,7 @@
     __TOKEN__    this seat's bearer-token file (issued like any guest seat's)
     __EXECUTOR__ the graph executor's url, and __DATASET__ its dataset id (both as com.scrumboard.rest has them)
     __LOGS__     a folder for stdout/stderr
+    __SHARERS__  comma-separated authors whose shared links become jobs (the owner's key); nothing runs for anyone else
 
   The key: loaded from the Keychain at launch by the shell line below, into the environment, and nowhere else.
   The item is the same one the board's other OpenRouter job uses:  security find-generic-password -s OPENROUTER_API_KEY -w
@@ -42,6 +43,8 @@
     <string>__DATA__/sources</string>
     <key>SCRUM_EXTRACT_MODEL_KEY</key>
     <string>deepseek-v4-flash</string>
+    <key>SCRUM_EXTRACT_SHARERS</key>
+    <string>__SHARERS__</string>
   </dict>
   <key>WorkingDirectory</key>
   <string>__SERVE__</string>
