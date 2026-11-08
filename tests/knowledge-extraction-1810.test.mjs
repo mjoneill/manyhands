@@ -411,3 +411,25 @@ test('#1810 R11b — a death AFTER the graph write (in the run record) resumes t
   assert.equal(await count(`?a <${RS}ofRun> <${runId}> ; <${RDF}type> <${RS}Assertion>`), 2, 'two assertions, not four');
   assert.deepEqual([...runs.runs[0].generated].sort(), r.published.map((p) => p.iri).sort(), 'the run record now carries exactly what the graph holds');
 });
+
+test('#1810 R11c — two assertions quoting the SAME span survive the post-write death: each keeps its own identity on resume, and both reach the run record', { skip: SKIP }, async () => {
+  const src = ingestSource({ text: FIXTURE, url: FIXTURE_URL });
+  const span = 'A harness is the layer between a model and the world.';
+  const twin = [item(1, 'definition', span, 'harness', 'scrum:relatedTo', 'model'), item(1, 'definition', span, 'harness', 'scrum:relatedTo', 'world')];
+  const model = fakeModel([reply(...twin)]);
+  const runs = fakeRuns();
+  let armed = true;
+  const flaky = { ...runs, async generated(args) { if (armed) { armed = false; throw new Error('injected: REST blip in generated'); } return runs.generated(args); } };
+  const { extractor } = extractorWith({ model, runs: flaky });
+  const jobId = `job-${crypto.randomUUID()}`;
+  await assert.rejects(() => extractor.run({ source: src, modelKey: 'fake-a', prompt: 'p', jobId }), /injected/);
+  const r = await extractor.resume({ jobId });
+  assert.equal(r.published.length, 2);
+  assert.notEqual(r.published[0].iri, r.published[1].iri, 'two assertions, two identities');
+  const stored = await q(`SELECT ?a ?o WHERE { ?a <${RS}ofRun> <${r.runId}> ; <${RDF}reifies> <<( <https://scrumboard.local/concept/harness> <${RS}relatedTo> ?o )>> }`);
+  assert.equal(stored.length, 2);
+  const byIri = new Map(stored.map((x) => [x.a.value, x.o.value]));
+  for (const p of r.published) assert.ok(byIri.has(p.iri), `${p.iri} is one of the stored two`);
+  assert.deepEqual([...runs.runs[0].generated].sort(), [...byIri.keys()].sort(), 'the run record names both, each by its own IRI');
+  assert.equal(model.bodies.length, 1);
+});

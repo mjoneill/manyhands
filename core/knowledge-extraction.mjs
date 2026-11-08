@@ -141,7 +141,7 @@ export function createExtractor({ graphClient, runs, model, registry, actor = 'e
     const assertions = items.map((it) => {
       if (!registry.has(it.predicate)) throw new PredicateRefused(it.predicate, registry);
       return {
-        iri: `${ENTITY}assertion/${crypto.randomUUID()}`,
+        iri: it.iri ?? `${ENTITY}assertion/${crypto.randomUUID()}`,
         triple: { subject: conceptIri(it.subject), predicate: expandTerm(it.predicate), object: conceptIri(it.object) },
         type: it.type, passage: `${source.iri}/block/${it.block}`, span: it.span,
         ...(it.gist ? { gist: it.gist } : {}), ...(it.proposedPredicate ? { proposedPredicate: it.proposedPredicate } : {}),
@@ -210,27 +210,30 @@ export function createExtractor({ graphClient, runs, model, registry, actor = 'e
         continue;
       }
       const { predicate, proposedPredicate } = tripleOf(final);
-      items.push({ ...final, predicate, ...(proposedPredicate ? { proposedPredicate } : {}) });
+      // the assertion's IRI is minted HERE, in the checkpointed state, so publish writes exactly these and a resume after a
+      // death past the write checks exactly these: no matching, no guessing (51179)
+      items.push({ ...final, predicate, ...(proposedPredicate ? { proposedPredicate } : {}), iri: `${ENTITY}assertion/${crypto.randomUUID()}` });
     }
     const outcome = items.length === 0 ? 'failed' : rejected.length > 0 ? 'partial' : 'complete';
     return { proposals: proposed.length, items, rejected, counters, outcome };
   }
 
-  /** The assertions the graph already holds for a run, matched back to the state's items by (block, span). */
+  /**
+   * After a death PAST the write: does the graph already hold this run's report, and every assertion the state minted?
+   * The IRIs come from the checkpointed state (minted in `extract`), so nothing is matched or guessed (51179). A report
+   * with any of the state's assertions missing is refused: that is not a resume case, and guessing would publish twice.
+   */
   async function alreadyPublished(st) {
     const RS = PREFIXES.scrum, RDF = PREFIXES.rdf;
     const has = await graphClient.ask(`ASK { <${st.runId}/extraction> <${RDF}type> <${RS}ExtractionReport> }`);
     if (!has.ok) throw new Error(`publish: could not read the run's report: ${has.reason}`);
     if (!has.boolean) return null;
-    const r = await graphClient.query(`SELECT ?a ?p ?span ?ty ?pp WHERE { ?a <${RS}ofRun> <${st.runId}> ; <${RDF}type> <${RS}Assertion> ; <${RS}expressedIn> ?p ; <${RS}anchorText> ?span ; <${RS}assertionType> ?ty OPTIONAL { ?a <${RS}proposedPredicate> ?pp } }`);
+    const r = await graphClient.query(`SELECT ?a WHERE { ?a <${RS}ofRun> <${st.runId}> ; <${RDF}type> <${RS}Assertion> }`);
     if (!r.ok) throw new Error(`publish: could not read the run's assertions: ${r.reason}`);
-    const byKey = new Map(r.rows.map((x) => [`${x.p.value.split('/block/')[1]}|${x.span.value}`, x]));
-    const published = st.items.map((it) => {
-      const x = byKey.get(`${it.block}|${it.span}`);
-      if (!x) throw new Error(`publish: the graph holds this run's report but not its item at block ${it.block}: refusing to guess`);
-      return { iri: x.a.value, block: it.block, type: x.ty.value, predicate: it.predicate, ...(x.pp ? { proposedPredicate: x.pp.value } : {}) };
-    });
-    return published;
+    const stored = new Set(r.rows.map((x) => x.a.value));
+    const missing = st.items.filter((it) => !stored.has(it.iri));
+    if (missing.length) throw new Error(`publish: the graph holds this run's report but ${missing.length} of its ${st.items.length} assertions are absent: refusing to guess`);
+    return st.items.map((it) => ({ iri: it.iri, block: it.block, type: it.type, predicate: it.predicate, ...(it.proposedPredicate ? { proposedPredicate: it.proposedPredicate } : {}) }));
   }
 
   async function publish(st) {
