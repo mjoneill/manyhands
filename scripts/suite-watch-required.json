@@ -103,6 +103,7 @@
   "tests/knowledge-extraction-1810.test.mjs",
   "tests/knowledge-extraction-entry-1810.test.mjs",
   "tests/knowledge-extraction-intake-1810.test.mjs",
+  "tests/knowledge-extraction-intake-cursor-1810.test.mjs",
   "tests/knowledge-extraction-search-1810.test.mjs",
   "tests/knowledge-extraction-service-1810.test.mjs",
   "tests/logborn-change-feed-1561.test.mjs",
