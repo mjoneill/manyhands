@@ -178,6 +178,35 @@ test('R5: a boot after the window does not catch up — no post, and the miss is
   assert.equal(h.events.filter((e) => e.outcome === 'missed-past-window').length, 1, 'recorded once, not every tick');
 });
 
+// #1836 — production's store is REST, which REFUSES a write to a key that was never reserved (404 "a bell begins
+// only with a reservation"). The file store above accepts any put, so R5 passed while prod threw every minute.
+function restLikeStore(inner) {
+  const reserved = new Set();
+  return {
+    get: (k) => inner.get(k),
+    reserve(k, v) { const ok = inner.reserve(k, v); if (ok) reserved.add(k); return ok; },
+    put(k, v) {
+      if (!reserved.has(k)) throw new Error(`ceremony bell write: 404 no such bell: a bell begins only with a reservation (${k})`);
+      inner.put(k, v);
+    },
+  };
+}
+
+test('#1836 R5c: under a store that refuses unreserved writes, a slot missed before the bell existed is recorded once without throwing, and the ceremony after it still fires', async () => {
+  const RETRO = { kind: 'retro', weekday: 3, time: '17:00' };
+  const h = harness({ schedule: [REVIEW, RETRO] });
+  const store = restLikeStore(h.store);
+  // 17:00:30: Review's 16:00 slot is past its window with no record; Retro is in its window.
+  await h.tick(W(17, 0, 30), { store });
+  assert.equal(h.events.filter((e) => e.key === `review@${W(16, 0)}` && e.outcome === 'missed-past-window').length, 1, 'the miss is recorded');
+  assert.equal(openers(h).length, 1, 'retro still fires after the stale review entry');
+  assert.match(openers(h)[0].key, /^retro@/);
+  // The next tick neither throws nor records the miss again.
+  await h.tick(W(17, 1, 30), { store });
+  assert.equal(h.events.filter((e) => e.outcome === 'missed-past-window').length, 1, 'recorded once, not every tick');
+  assert.equal(openers(h).length, 1);
+});
+
 test('R5b: a boot at 16:03, inside the tolerance, still fires', async () => {
   const h = harness();
   await h.tick(W(16, 3));

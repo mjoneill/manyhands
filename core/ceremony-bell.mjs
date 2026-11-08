@@ -268,8 +268,13 @@ export async function ceremonyBellTick({ now, schedule, seatState, store, post, 
 
     // After the window: check once whether the opener landed, and on time.
     if (!prior) {
-      await store.put(key, { state: 'missed', at: tickAt, checked: true });
-      record({ ...base, outcome: 'missed-past-window', opener: null, openerSource: null });
+      // #1836 — a slot that passed with no record (the bell was not running, or did not exist yet) is recorded by
+      // RESERVING it, never by a bare write: REST refuses a write to a key that was never reserved, and that throw
+      // ended every tick at this entry, so the ceremonies after it were never looked at. A false reserve means another
+      // tick recorded it first; nothing to say twice.
+      if (await store.reserve(key, { state: 'missed', at: tickAt, checked: true })) {
+        record({ ...base, outcome: 'missed-past-window', opener: null, openerSource: null });
+      }
       continue;
     }
     if (prior.checked) continue;
