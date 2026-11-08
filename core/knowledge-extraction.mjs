@@ -7,9 +7,16 @@
  * repair, never a loop; a run ends explicitly as complete, partial or failed, and zero usable items is
  * FAILED, never success (card #1810, outcomes agreed 49181/49183).
  *
+ * THE RUN IS A LANGGRAPH (R11): three nodes — record (the board's run record), extract (the model, the
+ * anchor check, the one repair), publish (ONE guarded graph update) — compiled with core/langgraph-saver.mjs
+ * as the checkpointer, so a job that dies between extraction and publish resumes from the checkpoint and
+ * never asks the model twice. A job is addressed by `jobId` (the LangGraph thread id); `resume({jobId})`
+ * continues it and `state({jobId})` reads it from the saver, from any process.
+ *
  * Seams, all injected so the rows run with a fake model and no REST:
  *   graphClient  core/graph-client.mjs — update(intention) is ONE guarded SPARQL update per run
- *                (kind `extraction.publish`, core/graph-compiler.mjs): source, reifiers, rejected, report
+ *                (kind `extraction.publish`, core/graph-compiler.mjs): source, reifiers, rejected, report.
+ *                The saver's checkpoints ride the same client.
  *   runs         { ensureProcedureVersion, createRun, generated } — the board's run record (REST adapter separate)
  *   model        { send(body) → {status, json} } — a thrown error or a non-200 is a PROVIDER failure, never quality
  *   registry     Set of registered prefixed predicate names — THE WRITER IS THE GUARD (R0): nothing today can write a
@@ -23,12 +30,16 @@
  * without them.
  */
 import crypto from 'node:crypto';
+import { StateGraph, Annotation, START, END } from '@langchain/langgraph';
+import { OxigraphSaver } from './langgraph-saver.mjs';
 
 export const ALLOWED_TYPES = Object.freeze(['definition', 'empirical', 'analogy', 'recommendation']);
 export const ZDR_PROVIDER = Object.freeze({ zdr: true, data_collection: 'deny' });
 export const OUTCOMES = Object.freeze(['complete', 'partial', 'failed']);
 /** The registered relation an unregistered model term is published UNDER, with the term kept as proposedPredicate. */
 export const GENERIC_RELATION = 'scrum:relatedTo';
+/** The saver scope every extraction job's checkpoints live in. */
+export const SAVER_SCOPE = 'knowledge-extraction';
 
 const ENTITY = 'https://scrumboard.local/';
 const PREFIXES = Object.freeze({
@@ -97,6 +108,14 @@ const ITEM_SCHEMA = Object.freeze({
       predicate: { type: 'string' }, object: { type: 'string' }, gist: { type: 'string' } } } } },
 });
 
+/** The job's state: everything a later node, or a resumed process, needs. Plain JSON, so the saver can hold it. */
+const JobState = Annotation.Root({
+  source: Annotation(), modelKey: Annotation(), prompt: Annotation(),
+  runId: Annotation(), performedUsing: Annotation(),
+  proposals: Annotation(), items: Annotation(), rejected: Annotation(), counters: Annotation(), outcome: Annotation(),
+  result: Annotation(),
+});
+
 export function createExtractor({ graphClient, runs, model, registry, actor = 'extractor', chain = 'kx-slice1', now = () => new Date().toISOString() } = {}) {
   for (const [k, v] of Object.entries({ graphClient, runs, model, registry })) if (!v) throw new Error(`createExtractor needs ${k}`);
   const actorIri = `${ENTITY}person/${actor}`;
@@ -107,10 +126,7 @@ export function createExtractor({ graphClient, runs, model, registry, actor = 'e
     const registered = registry.has(item.predicate);
     const predicate = registered ? item.predicate : GENERIC_RELATION;
     if (!registry.has(predicate)) throw new PredicateRefused(predicate, registry);   // the generic relation itself must be registered
-    return {
-      triple: { subject: conceptIri(item.subject), predicate: expandTerm(predicate), object: conceptIri(item.object) },
-      ...(registered ? {} : { proposedPredicate: item.predicate }),
-    };
+    return { predicate, ...(registered ? {} : { proposedPredicate: item.predicate }) };
   }
 
   /**
@@ -157,22 +173,21 @@ export function createExtractor({ graphClient, runs, model, registry, actor = 'e
   });
   const numbered = (blocks) => blocks.map((b, i) => `[${i}] ${b}`).join('\n');
 
-  async function run({ source, modelKey, prompt }) {
-    if (!source?.iri || !Array.isArray(source.blocks)) throw new Error('run needs an ingested source');
-    if (typeof modelKey !== 'string' || !modelKey) throw new Error('run needs a modelKey: the model is per-run config, never a constant');
-    if (typeof prompt !== 'string') throw new Error('run needs the prompt text');
-    const performedUsing = await runs.ensureProcedureVersion({ chain, modelKey, promptSha: sha256(prompt) });
-    const runId = await runs.createRun({ op: 'extract', by: actor, performedUsing, used: [source.iri] });
-    const counters = { inventions: 0, providerFailures: 0 };
-    const published = []; const rejected = [];
-    let proposals = 0;
+  // ── the three nodes ─────────────────────────────────────────────────────────────────────────────────────────────
+  async function record(st) {
+    const performedUsing = await runs.ensureProcedureVersion({ chain, modelKey: st.modelKey, promptSha: sha256(st.prompt) });
+    const runId = await runs.createRun({ op: 'extract', by: actor, performedUsing, used: [st.source.iri] });
+    return { runId, performedUsing };
+  }
 
+  async function extract(st) {
+    const { source, modelKey, prompt } = st;
+    const counters = { inventions: 0, providerFailures: 0 };
+    const items = []; const rejected = [];
     const first = await send(body(modelKey, prompt, numbered(source.blocks)));
     if (!first.ok) counters.providerFailures += 1;
-    const items = first.ok && Array.isArray(first.json?.items) ? first.json.items : [];
-    proposals = items.length;
-
-    for (const it of items) {
+    const proposed = first.ok && Array.isArray(first.json?.items) ? first.json.items : [];
+    for (const it of proposed) {
       let v = validateItem(it, source.blocks);
       let final = it;
       if (!v.ok && v.reason === 'span-mismatch') {
@@ -182,30 +197,65 @@ export function createExtractor({ graphClient, runs, model, registry, actor = 'e
           + `exactly from the block, as {"items":[item]}.\n\nItem: ${JSON.stringify(it)}`));
         if (!again.ok) counters.providerFailures += 1;
         const fixed = again.ok && Array.isArray(again.json?.items) ? again.json.items[0] : null;
-        if (fixed) { const v2 = validateItem({ ...it, ...fixed, block: it.block }, source.blocks); if (v2.ok) { final = { ...it, ...fixed, block: it.block }; v = v2; } }
+        if (fixed) { const cand = { ...it, ...fixed, block: it.block }; const v2 = validateItem(cand, source.blocks); if (v2.ok) { final = cand; v = v2; } }
       }
       if (!v.ok) {
         if (v.reason === 'span-mismatch') counters.inventions += 1;
         rejected.push({ reason: v.reason, detail: v.detail, item: it });
         continue;
       }
-      const { triple, proposedPredicate } = tripleOf(final);
-      const predicate = proposedPredicate ? GENERIC_RELATION : final.predicate;
-      published.push({ ...final, predicate, ...(proposedPredicate ? { proposedPredicate } : {}), _triple: triple });
+      const { predicate, proposedPredicate } = tripleOf(final);
+      items.push({ ...final, predicate, ...(proposedPredicate ? { proposedPredicate } : {}) });
     }
-
-    const outcome = published.length === 0 ? 'failed' : rejected.length > 0 ? 'partial' : 'complete';
-    const intention = await intentionFor({ source, run: runId, items: published, rejected, report: { outcome, proposals, ...counters, at: now() } });
-    const w = await graphClient.update(intention);
-    if (w.outcome !== 'APPLIED') throw new Error(`publish failed: ${w.outcome} ${w.reason ?? ''}`.trim());
-    const out = intention.assertions.map((a, k) => ({ iri: a.iri, block: published[k].block, type: a.type, predicate: published[k].predicate,
-      ...(a.proposedPredicate ? { proposedPredicate: a.proposedPredicate } : {}) }));
-    await runs.generated({ run: runId, iris: out.map((p) => p.iri) });
-    return {
-      runId, outcome, published: out, counters, proposals,
-      rejected: intention.rejected.map((r, k) => ({ iri: r.iri, reason: r.reason, item: rejected[k].item, detail: rejected[k].detail })),
-    };
+    const outcome = items.length === 0 ? 'failed' : rejected.length > 0 ? 'partial' : 'complete';
+    return { proposals: proposed.length, items, rejected, counters, outcome };
   }
 
-  return { intentionFor, run };
+  async function publish(st) {
+    const intention = await intentionFor({
+      source: st.source, run: st.runId, items: st.items, rejected: st.rejected,
+      report: { outcome: st.outcome, proposals: st.proposals, ...st.counters, at: now() },
+    });
+    const w = await graphClient.update(intention);
+    if (w.outcome !== 'APPLIED') throw new Error(`publish failed: ${w.outcome} ${w.reason ?? ''}`.trim());
+    const published = intention.assertions.map((a, k) => ({ iri: a.iri, block: st.items[k].block, type: a.type, predicate: st.items[k].predicate,
+      ...(a.proposedPredicate ? { proposedPredicate: a.proposedPredicate } : {}) }));
+    await runs.generated({ run: st.runId, iris: published.map((p) => p.iri) });
+    const result = {
+      runId: st.runId, outcome: st.outcome, published, counters: st.counters, proposals: st.proposals,
+      rejected: intention.rejected.map((r, k) => ({ iri: r.iri, reason: r.reason, item: st.rejected[k].item, detail: st.rejected[k].detail })),
+    };
+    return { result };
+  }
+
+  const saver = new OxigraphSaver({ client: graphClient, scope: SAVER_SCOPE, actor: actorIri });
+  const graph = new StateGraph(JobState)
+    .addNode('record', record).addNode('extract', extract).addNode('publish', publish)
+    .addEdge(START, 'record').addEdge('record', 'extract').addEdge('extract', 'publish').addEdge('publish', END)
+    .compile({ checkpointer: saver });
+  const config = (jobId) => ({ configurable: { thread_id: jobId, checkpoint_ns: '' }, durability: 'sync' });
+
+  /** Start a job. Dies where it dies; the checkpoint after each node survives, so `resume` continues it. */
+  async function run({ source, modelKey, prompt, jobId = `job-${crypto.randomUUID()}` }) {
+    if (!source?.iri || !Array.isArray(source.blocks)) throw new Error('run needs an ingested source');
+    if (typeof modelKey !== 'string' || !modelKey) throw new Error('run needs a modelKey: the model is per-run config, never a constant');
+    if (typeof prompt !== 'string') throw new Error('run needs the prompt text');
+    const out = await graph.invoke({ source, modelKey, prompt }, config(jobId));
+    return { ...out.result, jobId };
+  }
+  /** Continue a job from its last checkpoint: the nodes that finished do not run again. */
+  async function resume({ jobId }) {
+    if (!jobId) throw new Error('resume needs the jobId');
+    const out = await graph.invoke(null, config(jobId));
+    if (!out?.result) throw new Error(`job ${jobId} has no result after resume (did it ever start?)`);
+    return { ...out.result, jobId };
+  }
+  /** What the saver holds for a job, from any process: the state values as last checkpointed. */
+  async function state({ jobId }) {
+    const snap = await graph.getState(config(jobId));
+    const v = snap?.values ?? {};
+    return { jobId, runId: v.runId ?? null, outcome: v.result?.outcome ?? v.outcome ?? null, next: snap?.next ?? [], values: v };
+  }
+
+  return { intentionFor, run, resume, state };
 }

@@ -116,8 +116,16 @@ const q = async (sparql) => { const r = await client.query(sparql); assert.ok(r.
 const ask = async (sparql) => { const r = await client.ask(sparql); assert.ok(r.ok, `ask failed: ${r.reason}`); return r.boolean; };
 const count = async (where) => Number((await q(`SELECT (COUNT(*) AS ?n) WHERE { ${where} }`))[0].n.value);
 
-function extractorWith({ model, runs = fakeRuns(), registry = REGISTRY, actor = 'extractor' } = {}) {
-  return { runs, extractor: createExtractor({ graphClient: client, runs, model, registry, actor, now: () => '2026-11-08T03:00:00.000Z' }) };
+function extractorWith({ model, runs = fakeRuns(), registry = REGISTRY, actor = 'extractor', graphClient = client } = {}) {
+  return { runs, extractor: createExtractor({ graphClient, runs, model, registry, actor, now: () => '2026-11-08T03:00:00.000Z' }) };
+}
+/** A graph client whose FIRST extraction.publish fails (the crash between extraction and publish); the saver's own writes pass. */
+function publishFailsOnce(base) {
+  let armed = true;
+  return { ...base, async update(intention, opts) {
+    if (armed && intention?.kind === 'extraction.publish') { armed = false; throw new Error('injected: executor unreachable at publish'); }
+    return base.update(intention, opts);
+  } };
 }
 const goodItems = () => [
   item(1, 'definition', 'A harness is the layer between a model and the world.', 'harness', 'scrum:relatedTo', 'model'),
@@ -331,4 +339,27 @@ test('#1810 R8 — source text is data: an instruction-shaped block is recorded 
   const q1 = await q(`SELECT ?a ?st WHERE { ?a <${RDF}reifies> <<( ${S} <${SC}isPartOf> ${O} )>> ; <${RS}status> ?st ; <${RS}expressedIn> <${src.iri}/block/5> }`);
   assert.equal(q1.length, 1, 'exactly one reifier records that block 5 SAYS it');
   assert.equal(q1[0].st.value, 'machine-extracted', 'and it is a machine proposal, not room endorsement');
+});
+
+test('#1810 R11 — a run is a checkpointed LangGraph: a crash between extraction and publish resumes from the checkpoint and does NOT ask the model again', { skip: SKIP }, async () => {
+  const src = ingestSource({ text: FIXTURE, url: FIXTURE_URL });
+  const model = fakeModel([reply(...goodItems())]);
+  const runs = fakeRuns();
+  const { extractor } = extractorWith({ model, runs, graphClient: publishFailsOnce(client) });
+  const jobId = `job-${crypto.randomUUID()}`;
+  await assert.rejects(() => extractor.run({ source: src, modelKey: 'fake-a', prompt: 'extract v1', jobId }), /injected: executor unreachable at publish/, 'the first attempt dies at publish');
+  assert.equal(model.bodies.length, 1, 'the model was asked once');
+  assert.equal(runs.runs.length, 1, 'the run record was created once');
+  assert.equal(await count(`?r <${RS}ofRun> <${runs.runs[0].iri}>`), 0, 'nothing of this run was published');
+  // resume the SAME job: the saver holds the checkpoint after extraction, so only publish runs
+  const r = await extractor.resume({ jobId });
+  assert.equal(model.bodies.length, 1, 'the model was NOT asked again');
+  assert.equal(runs.runs.length, 1, 'no second run record');
+  assert.equal(r.runId, runs.runs[0].iri);
+  assert.equal(r.outcome, 'complete'); assert.equal(r.published.length, 2);
+  assert.equal(await count(`?a <${RS}ofRun> <${r.runId}> ; <${RDF}type> <${RS}Assertion>`), 2, 'the two assertions are in the graph after the resume');
+  // and a fresh extractor instance (nothing in memory) can read the finished job's state through the saver
+  const { extractor: fresh } = extractorWith({ model: fakeModel([]), runs, graphClient: client });
+  const st = await fresh.state({ jobId });
+  assert.equal(st.outcome, 'complete'); assert.equal(st.runId, r.runId);
 });

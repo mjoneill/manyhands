@@ -132,6 +132,46 @@ export const KIND_DECLARATIONS = Object.freeze([
       + 'and never sent by the caller. Every successful update appends one; none is ever rewritten. It keeps '
       + 'the history the event log used to keep. Executor-only: the old in-process copy never projects it.',
   },
+  // #1810 — the knowledge-extraction service (core/knowledge-extraction.mjs). Written by ONE compiler kind,
+  // `extraction.publish`, as a run's whole output in one guarded update. Executor-only: the old copy never projects them.
+  {
+    name: 'scrum:Assertion', eventKind: null, collection: null,
+    createdBy: 'the knowledge-extraction service, one per item it publishes (compiler kind extraction.publish)',
+    definition: 'A MACHINE-EXTRACTED CLAIM, kept as an RDF 1.2 REIFIER: `rdf:reifies` holds the quoted triple as a TERM, so '
+      + 'the claim is recorded without being asserted — ASK on the bare triple stays false, and nothing a model said '
+      + 'becomes a fact of the graph by being extracted. It carries `scrum:assertionType` (definition · empirical · analogy · '
+      + 'recommendation), `scrum:status` (machine-extracted at birth; a seat may confirm or dispute), `scrum:assertedBy` the '
+      + 'service actor, `scrum:expressedIn` the source block, `scrum:anchorText` the verbatim span, `scrum:ofRun` the Run, and '
+      + 'optionally `scrum:proposedPredicate`: the model\'s own relation when it was not a registered predicate, published '
+      + 'under the generic registered relation so an unregistered term is quoted NOWHERE. Discoverable at once; implies no '
+      + 'room endorsement.',
+  },
+  {
+    name: 'scrum:SourceVersion', eventKind: null, collection: null,
+    createdBy: 'the knowledge-extraction service, when it ingests a source (compiler kind extraction.publish)',
+    definition: 'OUR COPY of a source as the service read it: POINTER AND HASH, never payload — `scrum:contentHash` '
+      + '(sha256), `schema:contentUrl` (where the bytes live, under research/), `schema:encodingFormat`, `scrum:retrievedAt`, '
+      + 'and `prov:wasDerivedFrom` the commons post that shared it. Its IRI is DERIVED from the hash, so the same bytes '
+      + 'ingested twice are one node; a different fetch of the same URL with different bytes is a second version. The text '
+      + 'itself is not in the graph: a passage is addressed as `<source>/block/<n>`.',
+  },
+  {
+    name: 'scrum:RejectedProposal', eventKind: null, collection: null,
+    createdBy: 'the knowledge-extraction service, for each item it could not publish (compiler kind extraction.publish)',
+    definition: 'An item the model proposed that the writer REFUSED, kept on its Run at `<run>/rejected/<n>` with '
+      + '`scrum:reason` (span-mismatch · bad-type · bad-block · bad-shape) and what it tried to anchor to. Kept rather than '
+      + 'dropped so a run\'s invention rate is a count over nodes, never a log grep; outside the published knowledge view '
+      + '(no rdf:reifies). A refused item got ONE bounded repair before landing here, never a loop.',
+  },
+  {
+    name: 'scrum:ExtractionReport', eventKind: null, collection: null,
+    createdBy: 'the knowledge-extraction service, one per run, at <run>/extraction (compiler kind extraction.publish)',
+    definition: 'How one extraction Run ENDED: `scrum:outcome` (complete · partial · failed — zero usable items is FAILED, '
+      + 'never success), `scrum:proposals` (items before validation), `scrum:publishedCount`, `scrum:inventions` (items '
+      + 'rejected for a span the source does not contain: the quality signal scored against model and prompt) and '
+      + '`scrum:providerFailures` (transport errors, counted apart and never a quality score). Written in the same guarded '
+      + 'update as the run\'s assertions, so a crash mid-run leaves no report and no half-published run.',
+  },
   // ── decisions and their scaffolding ───────────────────────────────────────
   {
     name: 'scrum:Decision', eventKind: 'decision', collection: null,
