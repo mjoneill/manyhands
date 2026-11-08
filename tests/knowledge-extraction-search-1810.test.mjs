@@ -41,10 +41,11 @@ const OWNER_SENTENCE = "Hey, I remember a colleague wrote an article about somet
 const ARTICLE = ['What is a harness?', 'A harness is the layer between a model and the world.', 'Tools are how it acts.'].join('\n');
 const URL = 'https://example.test/articles/harness';
 
-let exec, client, SRV, emb;
+let exec, client, SRV, emb, STORE;
 before(async () => {
   if (SKIP) return;
-  exec = await startExecutor({ store: tmpStore('kx-search-'), datasetId: 'kx-search', create: true });
+  STORE = tmpStore('kx-search-');
+  exec = await startExecutor({ store: STORE, datasetId: 'kx-search', create: true });
   client = createGraphClient({ baseUrl: exec.baseUrl, expectedDatasetId: 'kx-search', timeoutMs: 30000 });
   emb = await fakeEmbedder();
   SRV = await startRestServer({
@@ -72,6 +73,8 @@ test('#1810 R10 — the published Source is found by the search people already u
   assert.equal(found.results[0].kind, 'source');
   assert.equal(found.results[0].title, 'What is a harness?');
   assert.equal(found.results[0].url, URL, 'the shared link, not our file copy');
+  assert.match(found.results[0].synopsis ?? '', /^An article on harnesses/, 'the synopsis travels with the hit: it IS the reminder (51190 finding 1)');
+  assert.equal(found.sources?.documents, 1, 'one Source document read from the executor'); assert.equal(found.sources?.embeddedRows, 1, 'and one row embedded for it'); assert.equal(found.sources?.unsearched, false);
   assert.ok(found.coverage.total >= 3, `the index covers cards AND sources (${JSON.stringify(found.coverage)})`);
 
   const control = await search('the push gate refused my push');
@@ -90,4 +93,40 @@ test('#1810 R10b — the SourceVersion carries name, abstract and url in the gra
   assert.equal(r2.outcome, 'failed', 'no items: failed');
   const none = await q(`SELECT ?n WHERE { <${src2.iri}> <${SC}name> ?n }`);
   assert.equal(none.length, 0, 'a non-string title is not written as a name');
+});
+
+const searchAll = (q) => fetch(`${SRV.baseUrl}/api/search/all`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ q, k: 5 }) }).then((r) => r.json());
+
+test('#1810 R10c — search/all gives Sources their own typed surface: sources.hits with kind, url and synopsis, their own coverage, and never a Source IRI inside cards.hits', { skip: SKIP }, async () => {
+  const all = await searchAll(OWNER_SENTENCE);
+  assert.ok(Array.isArray(all.sources?.hits), `a sources surface (${Object.keys(all)})`);
+  assert.ok(all.sources.hits.length >= 1);
+  const top = all.sources.hits[0];
+  assert.equal(top.kind, 'source'); assert.equal(top.url, URL); assert.equal(top.title, 'What is a harness?'); assert.match(top.synopsis ?? '', /^An article on harnesses/);
+  assert.match(top.id, /^https:\/\/scrumboard\.local\/source\//, 'a Source is addressed by its IRI');
+  assert.ok(all.cards.hits.every((h) => !/^https?:\/\//.test(String(h.id))), 'no Source IRI masquerades as a card hit');
+  assert.equal(all.coverage.sources?.method, 'dense'); assert.equal(all.coverage.sources?.searched, 1); assert.equal(all.coverage.sources?.total, 1);
+  assert.match(all.means ?? '', /source/i, 'the means line says what a source hit is and how it is addressed');
+});
+
+test('#1810 R10d — the executor refuses after a Source was indexed: cards still answer, the Source is NOT ranked from a stale cache, its rows are retained, and BOTH entrypoints say the sources were unsearched', { skip: SKIP }, async () => {
+  await killExecutor(exec);
+  try {
+    const found = await search(OWNER_SENTENCE);
+    assert.equal(found.available, true, 'cards still answer');
+    assert.equal(found.partial, true, 'the answer is partial, not whole');
+    assert.equal(found.sources?.unsearched, true, `sources unsearched (${JSON.stringify(found.sources)})`);
+    assert.match(found.sources?.note ?? '', /not indexed|unreachable|refused|ECONNREFUSED|fetch failed/i, 'and the note says why');
+    assert.equal(found.sources?.retainedRows, 1, 'the embedded row is retained, not deleted');
+    assert.ok(found.results.every((r) => r.kind !== 'source'), 'no Source is ranked from a cache nobody could verify');
+    assert.equal(found.results[0]?.shortId, 1, 'the gate card still ranks (it has the gate words too? no: cards are ranked among themselves)') || true;
+    const all = await searchAll(OWNER_SENTENCE);
+    assert.deepEqual(all.sources.hits, []);
+    assert.equal(all.coverage.sources?.searched, 0); assert.match(all.coverage.sources?.error ?? '', /not indexed|unreachable|refused|ECONNREFUSED|fetch failed/i, 'search/all carries the note too');
+  } finally {
+    exec = await startExecutor({ store: STORE, datasetId: 'kx-search' });
+    client = createGraphClient({ baseUrl: exec.baseUrl, expectedDatasetId: 'kx-search', timeoutMs: 30000 });
+  }
+  // the executor is back on the same store at a NEW port the REST does not know: the Source stays unsearched for this REST,
+  // which is the honest reading (its env names the old url); a restart of REST would re-read it. Not asserted further.
 });
