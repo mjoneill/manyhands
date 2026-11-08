@@ -69,11 +69,12 @@ async function fakeSiteByName() {
 }
 
 const TOK = mintToken();
-let exec, client, SRV, provider, site, DIR;
+let exec, client, SRV, provider, site, DIR, STORE;
 before(async () => {
   if (SKIP) return;
   DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'kx-entry-1810-'));
-  exec = await startExecutor({ store: tmpStore('kx-entry-'), datasetId: 'kx-entry', create: true });
+  STORE = tmpStore('kx-entry-');   // retained so after() can remove it, whether or not the executor started
+  exec = await startExecutor({ store: STORE, datasetId: 'kx-entry', create: true });
   client = createGraphClient({ baseUrl: exec.baseUrl, expectedDatasetId: 'kx-entry', timeoutMs: 30000 });
   const at = (h) => new Date(Date.now() + h * 3600_000).toISOString();
   const tokens = path.join(DIR, 'seat-tokens.json');
@@ -90,7 +91,7 @@ before(async () => {
     body: JSON.stringify({ name: 'scrum:relatedTo', definition: 'SEE ALSO (test registration for R14)', by: 'extractor' }) });
   assert.ok(pred.ok, `predicate registered (${pred.status} ${await pred.text()})`);
 });
-after(async () => { await SRV?.stop(); await provider?.stop(); await site?.stop(); await killExecutor(exec); if (DIR) fs.rmSync(DIR, { recursive: true, force: true }); });
+after(async () => { await SRV?.stop(); await provider?.stop(); await site?.stop(); await killExecutor(exec); if (DIR) fs.rmSync(DIR, { recursive: true, force: true }); if (STORE) fs.rmSync(STORE, { recursive: true, force: true }); });   // #1672: store included
 
 const baseEnv = () => ({
   PATH: process.env.PATH, HOME: process.env.HOME,

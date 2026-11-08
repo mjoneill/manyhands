@@ -18,6 +18,7 @@
  */
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import http from 'node:http';
 import { startRestServer, makeBoardFixture } from './helpers/harness.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
@@ -53,7 +54,7 @@ before(async () => {
     env: { SCRUM_GRAPH_EXECUTOR_URL: exec.baseUrl, SCRUM_GRAPH_DATASET_ID: 'kx-search', SEARCH_EMBED_URL: emb.url, SEARCH_EMBED_MODEL: 'fake-embed' },
   });
 });
-after(async () => { await SRV?.stop(); await emb?.stop(); await killExecutor(exec); });
+after(async () => { await SRV?.stop(); await emb?.stop(); await killExecutor(exec); if (STORE) fs.rmSync(STORE, { recursive: true, force: true }); });   // #1672: the store is this file's own temp; removed after the executor has exited, a failed start included
 
 const search = (q) => fetch(`${SRV.baseUrl}/api/search`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ q, k: 5 }) }).then((r) => r.json());
 const q = async (s) => { const r = await client.query(s); assert.ok(r.ok, r.reason); return r.rows; };

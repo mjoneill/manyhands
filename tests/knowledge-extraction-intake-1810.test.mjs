@@ -33,15 +33,16 @@ const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
 const ARTICLE = ['What is a harness?', 'A harness is the layer between a model and the world.', 'Tools are how it acts.'].join('\n');
 const U = 'https://example.test/articles/harness';
 
-let exec, client, SRV, DIR;
+let exec, client, SRV, DIR, STORE;
 before(async () => {
   if (SKIP) return;
   DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'kx-intake-1810-'));
-  exec = await startExecutor({ store: tmpStore('kx-intake-'), datasetId: 'kx-intake', create: true });
+  STORE = tmpStore('kx-intake-');   // retained so after() can remove it, whether or not the executor started
+  exec = await startExecutor({ store: STORE, datasetId: 'kx-intake', create: true });
   client = createGraphClient({ baseUrl: exec.baseUrl, expectedDatasetId: 'kx-intake', timeoutMs: 30000 });
   SRV = await startRestServer({});
 });
-after(async () => { await SRV?.stop(); await killExecutor(exec); if (DIR) fs.rmSync(DIR, { recursive: true, force: true }); });
+after(async () => { await SRV?.stop(); await killExecutor(exec); if (DIR) fs.rmSync(DIR, { recursive: true, force: true }); if (STORE) fs.rmSync(STORE, { recursive: true, force: true }); });   // #1672: this file's own temp only, store included
 
 const post = async (author, body) => (await fetch(`${SRV.baseUrl}/api/conversations`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ author, body }) })).json();
 const postCount = async () => (await (await fetch(`${SRV.baseUrl}/api/conversations`)).json()).length;
