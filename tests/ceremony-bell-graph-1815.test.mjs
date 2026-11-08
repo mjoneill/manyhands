@@ -72,7 +72,7 @@ const objects = async (q, s, p) => (await q(`SELECT ?o WHERE { <${s}> <${RS}${p}
 const events = async (q) => (await q(`SELECT DISTINCT ?e WHERE { ?e <${RDF_TYPE}> <${RS}CeremonyBellEvent> }`)).map((r) => r.e.value);
 
 test('#1815 G1–G5 — the bell is reserved once, its state round-trips, its events link to it, and all of it survives a restart', T, async () => {
-  await world(async ({ q, start, call }) => {
+  await world(async ({ q, start, call, base }) => {
     await start();
     const KEY = 'review@2026-11-11T16:00:00.000Z';
 
@@ -112,6 +112,19 @@ test('#1815 G1–G5 — the bell is reserved once, its state round-trips, its ev
     assert.equal(unk.status, 400, `G3: an unknown field is refused (${unk.status} ${unk.text.slice(0, 120)})`);
     assert.deepEqual((await call('GET', `/api/ceremony-bells?key=${encodeURIComponent(KEY)}`)).json?.value, value, 'G3: and the stored value is unchanged');
     assert.deepEqual(await bells(q), [BELL(KEY)], 'G3: no bell was created by a PATCH');
+
+    // G3b (review of PR #165): a body that is not JSON is the CLIENT's error: 400 'invalid JSON', never a 500, and nothing written
+    // ...and a body that parses but is not an object (`null`, a number) is refused the same way, never left unanswered
+    for (const raw of ['{"key": ', 'null', '7']) {
+      for (const [method, route] of [['POST', '/api/ceremony-bells'], ['PATCH', '/api/ceremony-bells'], ['POST', '/api/ceremony-bells/events']]) {
+        const x = await fetch(`${base()}${route}`, { method, headers: { 'content-type': 'application/json' }, body: raw, signal: AbortSignal.timeout(30000) });
+        const t = await x.text();
+        assert.equal(x.status, 400, `G3b: ${method} ${route} with body ${raw} is 400 (${x.status} ${t.slice(0, 120)})`);
+        assert.match(t, /invalid JSON/, `G3b: and says so (${t.slice(0, 120)})`);
+      }
+    }
+    assert.deepEqual(await bells(q), [BELL(KEY)], 'G3b: no bell was created by a malformed body');
+    assert.deepEqual(await events(q), [], 'G3b: and no event either');
 
     // G4
     const boot = { bootId: 'boot-g4', bootAt: '2026-11-11T15:00:00.000Z' };
