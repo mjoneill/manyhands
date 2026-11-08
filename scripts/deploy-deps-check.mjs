@@ -25,7 +25,7 @@
  * deletes it first — an install inside the deploy would pull modules out from
  * under the running processes, and put a network fetch inside the deploy.
  *
- * CLI:   node scripts/deploy-deps-check.mjs <repo-dir> [--lockfile <path>] [package ...]
+ * CLI:   node scripts/deploy-deps-check.mjs <repo-dir> [--lockfile <path>] [--include-dev] [package ...]
  *        (<repo-dir> holds node_modules; --lockfile defaults to <repo-dir>/package-lock.json)
  *        exit 0: in step (prints `deps: N packages match the lockfile`, then one
  *                `installed <name>@<version>` line per named package)
@@ -43,7 +43,7 @@ const readJson = (p) => JSON.parse(fs.readFileSync(p, 'utf8'));
  * `lockPath` defaults to repoDir's own lockfile. deploy.sh passes the EXPORTED one: the clone's working
  * tree can hold an uncommitted lockfile that matches node_modules while the commit being served does not.
  */
-export function checkInstalled(repoDir, lockPath = path.join(repoDir, 'package-lock.json')) {
+export function checkInstalled(repoDir, lockPath = path.join(repoDir, 'package-lock.json'), { includeDev = false } = {}) {
   let lock;
   try { lock = readJson(lockPath); } catch (e) { throw new Error(`cannot read ${lockPath}: ${e.message}`); }
   if (!lock || typeof lock.packages !== 'object' || lock.packages === null) {
@@ -52,7 +52,7 @@ export function checkInstalled(repoDir, lockPath = path.join(repoDir, 'package-l
   let checked = 0;
   const mismatches = [];
   for (const [rel, entry] of Object.entries(lock.packages)) {
-    if (!rel.startsWith('node_modules/') || !entry || entry.dev || entry.link) continue;
+    if (!rel.startsWith('node_modules/') || !entry || (entry.dev && !includeDev) || entry.link) continue;
     const name = rel.slice(rel.lastIndexOf('node_modules/') + 'node_modules/'.length);
     let have = null;
     try { have = readJson(path.join(repoDir, rel, 'package.json')).version ?? null; } catch { have = null; }
@@ -60,7 +60,7 @@ export function checkInstalled(repoDir, lockPath = path.join(repoDir, 'package-l
     checked += 1;
     if (have !== entry.version) mismatches.push({ name, path: rel, want: entry.version ?? null, have });
   }
-  if (checked === 0 && mismatches.length === 0 && Object.keys(lock.packages).some((k) => k.startsWith('node_modules/') && !lock.packages[k]?.dev)) {
+  if (checked === 0 && mismatches.length === 0 && Object.keys(lock.packages).some((k) => k.startsWith('node_modules/') && (includeDev || !lock.packages[k]?.dev))) {
     throw new Error('the lockfile lists production packages but none could be checked');
   }
   return { checked, mismatches };
@@ -79,12 +79,17 @@ const real = (p) => { try { return fs.realpathSync(p); } catch { return path.res
 if (process.argv[1] && real(process.argv[1]) === real(fileURLToPath(import.meta.url))) {
   const args = process.argv.slice(2);
   let lockArg;
+  // #1835: --include-dev also checks devDependencies. scripts/run-tests.sh uses it because the TEST tooling is what runs
+  // there; the deploy does not, because production never loads dev packages.
+  const di = args.indexOf('--include-dev');
+  const includeDev = di !== -1;
+  if (includeDev) args.splice(di, 1);
   const li = args.indexOf('--lockfile');
   if (li !== -1) { lockArg = args[li + 1]; args.splice(li, 2); if (!lockArg) { console.error('--lockfile needs a path'); process.exit(2); } }
   const [repoDir, ...names] = args;
   if (!repoDir) { console.error('usage: deploy-deps-check.mjs <repo-dir> [--lockfile <path>] [package ...]'); process.exit(2); }
   let r;
-  try { r = checkInstalled(repoDir, lockArg); } catch (e) { console.error(`deps: CANNOT CHECK — ${e.message}`); process.exit(2); }
+  try { r = checkInstalled(repoDir, lockArg, { includeDev }); } catch (e) { console.error(`deps: CANNOT CHECK — ${e.message}`); process.exit(2); }
   if (r.mismatches.length) {
     for (const m of r.mismatches) console.log(`MISMATCH ${m.path.replace(/^node_modules\//, '')}: lockfile ${m.want}, installed ${m.have ?? 'absent'}`);
     process.exit(1);

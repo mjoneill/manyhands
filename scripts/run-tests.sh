@@ -32,6 +32,30 @@ trap 'got=130' INT
 
 cd "$(dirname "$0")/.." || exit 2
 
+# #1835: the tests run against THIS tree's node_modules. On a worktree that is usually a symlink to a shared tree,
+# and nothing keeps that tree in step with the lockfile. Measured 2026-11-08: the shared tree dated from 08-04 and
+# held no @langchain/* at all, so the LangGraph saver files failed to LOAD on every worktree that symlinked it. A
+# stale tree's red reads as a code failure. So before any test runs, compare the installed tree with this
+# checkout's lockfile, dev packages included (the test tooling is what runs here), and REFUSE on drift, naming the
+# fix. A tree with no lockfile makes no dependency claim (the harness's own fixtures copy this script alone), so
+# it is skipped, and the output says so. A check that could not run also refuses: an unchecked tree must not read
+# as an all-clear.
+if [ -f package-lock.json ] && [ -f scripts/deploy-deps-check.mjs ]; then
+  deps_out=$(node scripts/deploy-deps-check.mjs . --include-dev 2>&1)
+  deps_rc=$?
+  case "$deps_out" in *"packages match the lockfile"*) : ;; *) [ "$deps_rc" -eq 0 ] && deps_rc=2 ;; esac
+  if [ "$deps_rc" -ne 0 ]; then
+    nm=$(cd node_modules 2>/dev/null && pwd -P)
+    echo "── REFUSED: node_modules does not match package-lock.json (#1835); no test has run ──"
+    echo "$deps_out" | head -20
+    echo "── the installed tree is ${nm:-absent}; a red from it would be the TREE, not the code"
+    echo "── fix: rebuild it from this lockfile (npm ci; if others share it, build beside and swap, and announce first) ──"
+    exit 2
+  fi
+else
+  echo "── deps: not checked (this tree has no package-lock.json, or no checker) ──"
+fi
+
 total=$(ls tests/*.test.mjs 2>/dev/null | wc -l | tr -d ' ')
 if [ "$#" -eq 0 ]; then
   scope="FULL SUITE ($total files)"
