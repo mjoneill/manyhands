@@ -10,6 +10,10 @@
  * in the ledger. Then print one JSON summary on stdout and exit 0. Any failure to START prints one line on stderr
  * naming what is missing (a variable's NAME, never a value) and exits 2, before any network call.
  *
+ * A link is extracted once. If its job FAILED, a sharer re-posts it with the word "re-run" in the same post, and the
+ * next tick makes one fresh attempt (job id `.r1`, then `.r2`, at most 3) whose summary names the failed run (#1841).
+ * A link that once succeeded is never re-run.
+ *
  * Environment (names, no values):
  *   OPENROUTER_API_KEY            the key, from the Keychain via the plist      (required, checked FIRST)
  *   SCRUM_BOARD_URL               REST                                           (default http://127.0.0.1:3141)

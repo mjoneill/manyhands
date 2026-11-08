@@ -46,6 +46,9 @@ export function linksOf(text, { allowHttp = false } = {}) {
   return out;
 }
 export const jobIdFor = (url) => `job-${sha256(url)}`;
+/** #1841: a sharer's post saying "re-run" asks for ONE fresh attempt at a link whose job FAILED. Attempts are `.r1`, `.r2`, … */
+export const RERUN_RE = /\bre-?run\b/i;
+export const MAX_RERUNS = 3;
 
 export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fetchSource, extractor, modelKey, prompt, sharers, limit = 200, allowHttp = false, fetchImpl = fetch, now = () => new Date().toISOString(), actor = 'extractor', log = (line) => process.stderr.write(`${line}\n`) } = {}) {
   for (const [k, v] of Object.entries({ boardUrl, stateFile, sourcesDir, fetchSource, extractor, modelKey })) if (!v) throw new Error(`createIntake needs ${k}`);
@@ -204,11 +207,28 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
       const links = linksOf(post.body, { allowHttp });
       if (!links.length) continue;
       if (!sharers.has(author)) { for (const url of links) skipped.push({ url, jobId: jobIdFor(url), reason: 'author is not a configured sharer' }); continue; }
+      const asksRerun = RERUN_RE.test(String(post.body ?? ''));
       for (const url of links) {
-        const jobId = jobIdFor(url);
+        let jobId = jobIdFor(url);
         if (seenThisTick.has(jobId)) { skipped.push({ url, jobId, reason: 'same tick: already handled' }); continue; }
         seenThisTick.add(jobId);
-        const known = await extractor.state({ jobId });
+        let known = await extractor.state({ jobId });
+        let rerunOf = null;
+        if (known.outcome && asksRerun) {
+          // walk the attempts: the base job, then .r1, .r2 … The first attempt with no outcome is where this one goes,
+          // but only while every attempt before it FAILED. A link that once succeeded is never re-run.
+          let last = known; let target = null;
+          for (let n = 1; n <= MAX_RERUNS && last.outcome === 'failed'; n += 1) {
+            const k = await extractor.state({ jobId: `${jobIdFor(url)}.r${n}` });
+            if (!k.outcome) { target = { jobId: `${jobIdFor(url)}.r${n}`, k }; break; }
+            last = k;
+          }
+          if (!target) {
+            const why = last.outcome === 'failed' ? `re-run refused: ${MAX_RERUNS} re-runs already failed` : `known: ${last.outcome}; a re-run is only for a failed job`;
+            skipped.push({ url, jobId, reason: why }); continue;
+          }
+          rerunOf = last.runId; jobId = target.jobId; known = target.k; seenThisTick.add(jobId);
+        }
         if (known.outcome) { skipped.push({ url, jobId, reason: `known: ${known.outcome}` }); continue; }
         if (Array.isArray(known.next) && known.next.length) { skipped.push({ url, jobId, reason: `in progress: next ${known.next.join(',')}` }); continue; }
         let got;
@@ -221,7 +241,7 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
         writeState({ cursor: st.cursor, mode: st.mode, pending, resyncs: st.resyncs, lastReadAt: st.lastReadAt });
         try {
           const r = await extractor.run({ source, modelKey, prompt, jobId });
-          started.push({ url, jobId, runId: r.runId, outcome: r.outcome, published: r.published.length, rejected: r.rejected.length });
+          started.push({ url, jobId, runId: r.runId, ...(rerunOf ? { rerunOf } : {}), outcome: r.outcome, published: r.published.length, rejected: r.rejected.length });
           pending = pending.filter((x) => x.jobId !== jobId);
         } catch (e) { failed.push({ url, jobId, reason: `run: ${e?.message ?? e} (pending: the next tick resumes it)` }); }
       }

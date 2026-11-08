@@ -175,3 +175,41 @@ test('#1810 R9e (authors) — only a configured sharer\'s link becomes a job (th
   assert.equal(model.bodies.length, 1);
   assert.throws(() => createIntake({ boardUrl: SRV.baseUrl, stateFile: path.join(DIR, 'x.json'), sourcesDir: DIR, fetchSource: async () => null, extractor: {}, modelKey: 'k', prompt: 'p', sharers: new Set() }), /sharers/, 'no sharers configured: refused to construct, nothing runs for nobody');
 });
+
+test('#1841 R9l — a sharer\'s post saying "re-run" makes ONE fresh attempt at a link whose job FAILED, keyed .r1, naming the failed run; a plain repost is still skipped, and a link that succeeded is never re-run', { skip: SKIP }, async () => {
+  const U5 = 'https://example.test/articles/failed-once';
+  const base = `job-${sha256(U5)}`;
+  const cursor = await cursorNow();
+  const good = fakeModel();
+  let calls = 0;
+  // the first ask answers with nothing usable (a FAILED job); every later ask answers like the good model
+  const model = { bodies: [], async send(body) { this.bodies.push(body); calls += 1; return calls === 1 ? { status: 200, json: { items: [] } } : good.send(body); } };
+  const { intake, runs } = intakeWith({ model, cursor, fetchSource: serves(U5) });
+  await post('person-a', `read ${U5}`);
+  const t1 = await intake.tick();
+  assert.equal(t1.started[0]?.outcome, 'failed', `the first job failed (${JSON.stringify(t1)})`);
+  const failedRun = t1.started[0].runId;
+
+  await post('person-b', `Reposting ${U5}`);
+  const t2 = await intake.tick();
+  assert.deepEqual(t2.started, [], 'a plain repost is still skipped');
+  assert.ok(t2.skipped.some((s) => s.url === U5 && /known: failed/.test(s.reason)), JSON.stringify(t2.skipped));
+  assert.equal(calls, 1, 'no model call for the plain repost');
+
+  const p3 = await post('person-a', `Re-run ${U5} please, the validator is fixed`);
+  const t3 = await intake.tick();
+  assert.equal(t3.started.length, 1, `one fresh attempt (${JSON.stringify(t3)})`);
+  assert.equal(t3.started[0].jobId, `${base}.r1`, 'keyed as the first re-run of the base job');
+  assert.equal(t3.started[0].rerunOf, failedRun, 'it names the run that failed');
+  assert.equal(t3.started[0].outcome, 'complete');
+  assert.equal(calls, 2, 'the model was asked once more');
+  assert.equal(runs.runs.length, 2, 'a NEW run, not the old one overwritten');
+  const from = await q(`SELECT ?from WHERE { ?s <${RS}contentHash> ${JSON.stringify(`sha256:${sha256(ARTICLE)}`)} ; <${PROV}wasDerivedFrom> ?from }`);
+  assert.ok(from.some((r) => r.from.value === `https://scrumboard.local/entity/${p3.id}`), 'the re-run\'s source is derived from the post that asked for it');
+
+  await post('person-a', `re-run ${U5}`);
+  const t4 = await intake.tick();
+  assert.deepEqual(t4.started, [], 'a link whose re-run COMPLETED is not re-run again');
+  assert.ok(t4.skipped.some((s) => s.url === U5 && /complete/.test(s.reason) && /only for a failed/.test(s.reason)), JSON.stringify(t4.skipped));
+  assert.equal(calls, 2);
+});
