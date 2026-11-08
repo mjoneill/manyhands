@@ -34,6 +34,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import { createGraphClient, WRITE_PROTOCOL, WRITE_PROTOCOL_HEADER } from '../core/graph-client.mjs';
 import { compile } from '../core/graph-compiler.mjs';
 import { HAVE_PY, PY, startExecutor, killExecutor, tmpStore } from './helpers/graph-executor-proc.mjs';
@@ -105,13 +106,18 @@ function fakeRuns() {
 
 const REGISTRY = new Set(['scrum:relatedTo', 'scrum:dependsOn', 'schema:isPartOf']);   // `scrum:exposes` is deliberately NOT registered
 
-let exec, client;
+let exec, client, storeDir;
 before(async () => {
   if (SKIP) return;
-  exec = await startExecutor({ store: tmpStore('kx-1810-'), datasetId: 'kx-1810', create: true });
+  // the store is the test's to remove: kept BEFORE the executor starts, so a failed start is cleaned up too
+  storeDir = tmpStore('kx-1810-');
+  exec = await startExecutor({ store: storeDir, datasetId: 'kx-1810', create: true });
   client = createGraphClient({ baseUrl: exec.baseUrl, expectedDatasetId: 'kx-1810', timeoutMs: 30000 });
 });
-after(async () => { await killExecutor(exec); });
+after(async () => {
+  await killExecutor(exec);   // waits for exit, so the store's lock is released before it is removed
+  if (storeDir) fs.rmSync(storeDir, { recursive: true, force: true });
+});
 
 const q = async (sparql) => { const r = await client.query(sparql); assert.ok(r.ok, `query failed: ${r.reason}`); return r.rows; };
 const ask = async (sparql) => { const r = await client.ask(sparql); assert.ok(r.ok, `ask failed: ${r.reason}`); return r.boolean; };
