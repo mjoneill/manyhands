@@ -23,6 +23,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeBoardFixture, withBrowserServer } from './helpers/harness.mjs';
+import { clickWhenOnTop } from './helpers/click-on-top.mjs';   // #1674 — one helper, checks the click REACHED the target
 
 const ts = '2026-09-01T00:00:00.000Z';
 const card = (shortId, title, extra = {}) => ({
@@ -76,22 +77,6 @@ const setValue = (page, selector, text) => page.evaluate((sel, t) => {
 // layout has already left (traced 2026-10-05: the click landed on the form or
 // on the "Filing as" label while the form grew 667 → 702 px). So the button's
 // box must be identical, and on top, for 10 consecutive animation frames.
-async function clickWhenOnTop(page, selector) {
-  await page.evaluate(() => { window.__stableClick = { key: '', frames: 0 }; });
-  await page.waitForFunction((sel) => {
-    const b = document.querySelector(sel);
-    if (!b) return false;
-    b.scrollIntoView({ block: 'nearest' });
-    const r = b.getBoundingClientRect();
-    const key = `${r.x},${r.y},${r.width},${r.height}`;
-    const onTop = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2) === b;
-    const s = (window.__stableClick ??= { key: '', frames: 0 });
-    s.frames = onTop && key === s.key ? s.frames + 1 : 0;
-    s.key = key;
-    return s.frames >= 10;
-  }, { timeout: 5000, polling: 'raf' }, selector);
-  await page.click(selector);
-}
 
 const api = async (baseUrl, method, path, body) => {
   const r = await fetch(`${baseUrl}${path}`, {
