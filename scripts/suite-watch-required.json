@@ -1,6 +1,7 @@
 [
   "tests/activity-projector-protocol-1747.test.mjs",
   "tests/admission-control-a1.test.mjs",
+  "tests/applied-never-5xx-1868.test.mjs",
   "tests/agents-graph-a1.test.mjs",
   "tests/announcement-graph-post-1574-c3c-addendum.test.mjs",
   "tests/announcement-graph-post-1574-c3c.test.mjs",
