@@ -56,10 +56,12 @@ test('#844 read-modify-write reports NOTHING — the echo is silent', async () =
     const c = await mk(server.baseUrl);
     const got = await get(server.baseUrl, c.shortId);
 
-    // The whole card, verbatim, one field changed. The ordinary client pattern.
-    const r = await patch(server.baseUrl, c.shortId, { ...got, title: 'renamed' });
+    // The whole card, verbatim, one field changed. The ordinary client pattern. Since #534 (decision 3464b457) the echo
+    // carries `description`, which is a full replace, so it also names the version it read: the server's own output
+    // plus the precondition it already holds (`got.version`) is valid input. An echo can always obtain the version.
+    const r = await patch(server.baseUrl, c.shortId, { ...got, title: 'renamed', ifVersion: got.version });
 
-    assert.equal(r.status, 200, "the server's own output must be valid input to it");
+    assert.equal(r.status, 200, "the server's own output, with the version it read as ifVersion, must be valid input to it");
     assert.equal(r.body.title, 'renamed', 'control: the one intended change landed');
     assert.equal(r.body.refusedFields, undefined,
       `echoed immutables must be silent — got ${JSON.stringify(r.body.refusedFields)}`);

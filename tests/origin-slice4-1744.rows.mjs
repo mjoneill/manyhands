@@ -348,7 +348,7 @@ for (const mode of ['on', 'off']) {
     await world(mode, async (s) => {
       await s.start();
       const c1 = (await s.call('GET', '/api/cards/uuid-1')).json;
-      const u = await s.call('PATCH', '/api/cards/uuid-1', { description: 'see #2 and #3', ifVersion: c1.version, by: 'ada' });
+      const u = await s.call('PATCH', '/api/cards/uuid-1', { description: 'see #2 and #3', ifVersion: c1.version ?? 0, by: 'ada' });
       assert.equal(u.status, 200, `the update is applied (${u.status} ${u.text.slice(0, 200)})`);
       assert.deepEqual((await coverageOf(s, 'uuid-1')).names, [INT(2), INT(3)], 'card 1 now names exactly #2 and #3');
       await assertIndexComplete(s, 'after adding refs');
@@ -593,7 +593,7 @@ test(`#1744 (R3b, mode off) a names SWAP that keeps count and sum ({2,4} → {1,
   await world('off', async (s) => {
     await s.start();
     const c1 = (await s.call('GET', '/api/cards/uuid-1')).json;
-    assert.equal((await s.call('PATCH', '/api/cards/uuid-1', { description: 'see #2 and #4', ifVersion: c1.version, by: 'ada' })).status, 200, 'PRECONDITION: #1 names #2 and #4');
+    assert.equal((await s.call('PATCH', '/api/cards/uuid-1', { description: 'see #2 and #4', ifVersion: c1.version ?? 0, by: 'ada' })).status, 200, 'PRECONDITION: #1 names #2 and #4');
     assert.deepEqual((await coverageOf(s, 'uuid-1')).names, [INT(2), INT(4)], 'PRECONDITION: indexed as {2, 4}');
     await s.xu(`DELETE DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.namesShortId}> "2"^^<${XSD}integer> . ${COV('uuid-1')} <${IX.namesShortId}> "4"^^<${XSD}integer> } } ; INSERT DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.namesShortId}> "1"^^<${XSD}integer> . ${COV('uuid-1')} <${IX.namesShortId}> "5"^^<${XSD}integer> } }`, 'swap');
     await latchedByVerifier(s, 'the {2,4} → {1,5} swap');
@@ -611,7 +611,7 @@ for (const mode of ['on', 'off']) {
     await world(mode, async (s) => {
       await s.start();
       const c1 = (await s.call('GET', '/api/cards/uuid-1')).json;
-      assert.equal((await s.call('PATCH', '/api/cards/uuid-1', { description: 'see #4 later', ifVersion: c1.version, by: 'ada' })).status, 200, 'PRECONDITION: #1 names #4 in prose');
+      assert.equal((await s.call('PATCH', '/api/cards/uuid-1', { description: 'see #4 later', ifVersion: c1.version ?? 0, by: 'ada' })).status, 200, 'PRECONDITION: #1 names #4 in prose');
       assert.deepEqual((await coverageOf(s, 'uuid-1')).names, [INT(4)], 'the index records the UNRESOLVED prose mention');
       assert.deepEqual(await mentionsEdges(s, 'uuid-1'), [], 'public: no traversable mention before #4 exists');
       assert.deepEqual((await s.q(`SELECT ?p WHERE { <${cardIriOf('uuid-1')}> ?p <${UNRESOLVED}4> }`)), [], 'public: a prose mention projects NO unresolved node');
@@ -945,7 +945,7 @@ for (const [what, pre, edit] of [
   test(`#1744 (R4, mode off) between prepare and commit ${what} → the create refuses, no effect; a keyed retry → STALE_PREPARED`, T, async () => {
     await world('off', async (s) => {
       await s.start();
-      if (pre) { const c1 = (await s.call('GET', '/api/cards/uuid-1')).json; assert.equal((await s.call('PATCH', '/api/cards/uuid-1', { description: pre, ifVersion: c1.version, by: 'ada' })).status, 200, 'PRECONDITION: #1 names #4'); }
+      if (pre) { const c1 = (await s.call('GET', '/api/cards/uuid-1')).json; assert.equal((await s.call('PATCH', '/api/cards/uuid-1', { description: pre, ifVersion: c1.version ?? 0, by: 'ada' })).status, 200, 'PRECONDITION: #1 names #4'); }
       await heldCreate(s, { title: 'Page four', createdBy: 'ada', requestId: `req-1744-r4-${pre ? 'drop' : 'new'}` }, async () => {
         const o = s.other(); await o.load();
         const snap = o.snapshot();
@@ -1370,7 +1370,7 @@ test(`#1744 (R3b, r4, finding 8) a names SWAP among OTHER names ({2,6} → {3,5}
   await world('off', async (s) => {
     await s.start();
     const c1 = (await s.call('GET', '/api/cards/uuid-1')).json;
-    assert.equal((await s.call('PATCH', '/api/cards/uuid-1', { description: 'see #2 and #6', ifVersion: c1.version, by: 'ada' })).status, 200, 'PRECONDITION: #1 names #2 and #6');
+    assert.equal((await s.call('PATCH', '/api/cards/uuid-1', { description: 'see #2 and #6', ifVersion: c1.version ?? 0, by: 'ada' })).status, 200, 'PRECONDITION: #1 names #2 and #6');
     assert.deepEqual((await coverageOf(s, 'uuid-1')).names, [INT(2), INT(6)], 'PRECONDITION: indexed as {2, 6}');
     // count 2 and sum 8 kept, namesList "2,6" kept: only the list-membership (CONTAINS) clause can see it, and #4 is not involved
     await s.xu(`DELETE DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.namesShortId}> "2"^^<${XSD}integer> . ${COV('uuid-1')} <${IX.namesShortId}> "6"^^<${XSD}integer> } } ; INSERT DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.namesShortId}> "3"^^<${XSD}integer> . ${COV('uuid-1')} <${IX.namesShortId}> "5"^^<${XSD}integer> } }`, 'swap-other');
@@ -1447,7 +1447,7 @@ test('#1744 (D8, mode on, a regression guard that passes today) an ordinary upda
     const subjects = async () => new Set((await s.q(`SELECT DISTINCT ?s WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }`)).map((r) => r.s.value));
     const s0 = await subjects();
     const c1 = (await s.call('GET', '/api/cards/uuid-1')).json;
-    assert.equal((await s.call('PATCH', '/api/cards/uuid-1', { description: 'names #2', ifVersion: c1.version, by: 'ada' })).status, 200, 'PRECONDITION: the update applied');
+    assert.equal((await s.call('PATCH', '/api/cards/uuid-1', { description: 'names #2', ifVersion: c1.version ?? 0, by: 'ada' })).status, 200, 'PRECONDITION: the update applied');
     const added = [...(await subjects())].filter((x) => !s0.has(x));
     assert.deepEqual(added.filter((x) => !x.startsWith('urn:ex:op/') && !x.startsWith(IX.ns) && !x.startsWith('https://scrumboard.local/activity/')), [], `only receipts, activities and index subjects are new (${JSON.stringify(added)})`);
     const leaked = await s.q(`SELECT ?s ?p ?o WHERE { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "${IX.ns}") || STRSTARTS(STR(?p), "${IX.ns}") || STRSTARTS(STR(?o), "${IX.ns}")) }`);

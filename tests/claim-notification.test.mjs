@@ -158,9 +158,11 @@ claimTest(
   'an ordinary PATCH announces NOTHING — this lane is claims only',
   boardWithCard(),
   async ({ baseUrl }) => {
+    // #534: a full description replace names the version it read (decision 3464b457).
+    const { version } = await (await fetch(`${baseUrl}/api/cards/42`)).json();
     const res = await fetch(`${baseUrl}/api/cards/42`, json({
       method: 'PATCH',
-      body: JSON.stringify({ description: 'someone else edited this' }),
+      body: JSON.stringify({ description: 'someone else edited this', ifVersion: version ?? 0 }),
     }));
     assert.equal(res.status, 200);
 
