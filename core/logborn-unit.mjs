@@ -333,13 +333,16 @@ export function seatClearIntention({ actor, seat, ends, at, opId = opIri('seat')
 
 const I = (x) => `<${x}>`;
 export const Q_MEMORIES = `SELECT ?s ?t ?p ?o WHERE { ?s ${I(TM.type)} ?t ; ?p ?o . VALUES ?t { ${I(TM.Memory)} ${I(TM.MemoryVersion)} } }`;
+// #1865 — `?m` is bound INSIDE the BIND's group. SPARQL evaluates a group bottom-up: a bare `{ BIND(?m AS ?s) }` sees ?m
+// unbound, binds nothing, and joins with ?s FREE, so these reads returned every memory in the store (32,737 rows / 15 MB / ~5.3 s
+// live for a one-version memory, 2026-11-09). The callers picked the right one out, so only the cost showed.
 export const qOneMemory = (identifier) => `SELECT ?s ?t ?p ?o WHERE { ?m ${I(TM.type)} ${I(TM.Memory)} ; ${I(TM.identifier)} ${recLit(String(identifier))} . `
   // #1638 — `ver` is bookkeeping (named graph): the write revision readMemory needs is read from GRAPH <bk> explicitly and comes
   // back as a `?s urn:ex:ver ?o` row, the shape the default-graph `?s ?p ?o` gave it before.
-  + `{ BIND(?m AS ?s) } UNION { ?s ${I(TM.ofMemory)} ?m } ?s ${I(TM.type)} ?t . { ?s ?p ?o } UNION { GRAPH ${BK} { ?s ${I(TM.ver)} ?o } BIND(${I(TM.ver)} AS ?p) } VALUES ?t { ${I(TM.Memory)} ${I(TM.MemoryVersion)} } }`;
+  + `{ ?m ${I(TM.type)} ${I(TM.Memory)} . BIND(?m AS ?s) } UNION { ?s ${I(TM.ofMemory)} ?m } ?s ${I(TM.type)} ?t . { ?s ?p ?o } UNION { GRAPH ${BK} { ?s ${I(TM.ver)} ?o } BIND(${I(TM.ver)} AS ?p) } VALUES ?t { ${I(TM.Memory)} ${I(TM.MemoryVersion)} } }`;
 /** One memory, its versions AND its revision nodes, in one query (one snapshot). */
 export const qOneMemoryHistory = (identifier) => `SELECT ?s ?t ?p ?o WHERE { ?m ${I(TM.type)} ${I(TM.Memory)} ; ${I(TM.identifier)} ${recLit(String(identifier))} . `
-  + `{ BIND(?m AS ?s) } UNION { ?s ${I(TM.ofMemory)} ?m } ?s ${I(TM.type)} ?t ; ?p ?o . VALUES ?t { ${I(TM.Memory)} ${I(TM.MemoryVersion)} ${I(TM.MemoryRevision)} } }`;
+  + `{ ?m ${I(TM.type)} ${I(TM.Memory)} . BIND(?m AS ?s) } UNION { ?s ${I(TM.ofMemory)} ?m } ?s ${I(TM.type)} ?t ; ?p ?o . VALUES ?t { ${I(TM.Memory)} ${I(TM.MemoryVersion)} ${I(TM.MemoryRevision)} } }`;
 export const Q_DECISIONS = `SELECT ?d ?p ?o WHERE { ?d ${I(TM.type)} ${I(TM.Decision)} ; ?p ?o }`;
 export const Q_OPEN_SEAT_DECLS = `SELECT ?d ?p ?o WHERE { ?d ${I(TM.type)} ${I(TM.SeatDeclaration)} ; ?p ?o FILTER NOT EXISTS { ?d ${I(TM.endedAt)} ?x } }`;
 
