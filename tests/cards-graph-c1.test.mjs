@@ -36,7 +36,7 @@ import path from 'node:path';
 import http from 'node:http';
 import { makeBoardFixture, startRestServer } from './helpers/harness.mjs';
 import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-executor-proc.mjs';
-import { settleOne, bodyIncludes, assertOneObligation, publishNow } from './helpers/announcements.mjs';   // #1845 — the shared #1721 contract
+import { settleOne, mentionsCard, bodyMatches, assertOneObligation, publishNow } from './helpers/announcements.mjs';   // #1845 — the shared #1721 contract
 
 const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)';
 const UNIT_ENV = 'SCRUM_GRAPH_UNIT_CARDS';
@@ -105,7 +105,7 @@ async function cardScript(base, tag) {
   rec('list', await api(base, 'GET', '/api/cards?limit=200')); rec('list column planned', await api(base, 'GET', '/api/cards?column=planned&limit=200'));
   return out;
 }
-const announcements = async (base, sid) => ((await api(base, 'GET', '/api/conversations?limit=300')).body ?? []).filter((x) => String(x.body ?? '').includes(`claimed #${sid}`));
+const announcements = async (base, sid) => ((await api(base, 'GET', '/api/conversations?limit=300')).body ?? []).filter((x) => mentionsCard('claimed', sid)(x.body));   // #1845 slice 2: #1 never selects #12
 async function facts(base, tag, { unitOn = false } = {}) {
   const f = {};
   const c = (await newCard(base, `${tag} race`)).body; const v0 = c.version;
@@ -121,7 +121,7 @@ async function facts(base, tag, { unitOn = false } = {}) {
   f.holder = (await api(base, 'GET', `/api/cards/${k.id}`)).body.claimedBy; f.winner = winner; f.loserNamesHolder = !!loser && JSON.stringify(loser.body).includes(winner ?? '\u0000');
   // #1845 — unit on, the 200 promises the OBLIGATION; its post is published after the answer, un-awaited (#1574 1b). Assert exactly one,
   // drive it, then count. Unit off writes the post in the same document write, so the posts are counted directly (C0).
-  if (unitOn) f.obligationBody = String((await settleOne(base, bodyIncludes(`claimed #${k.shortId}`), { names: [`#${k.shortId}`, winner ?? '\u0000'] }, 'C4 unit on')).obligation.payload?.body ?? '');
+  if (unitOn) f.obligationBody = String((await settleOne(base, bodyMatches(mentionsCard('claimed', k.shortId)), { names: [`#${k.shortId}`, winner ?? '\u0000'] }, 'C4 unit on')).obligation.payload?.body ?? '');
   f.announcements = (await announcements(base, k.shortId)).map((x) => String(x.body)); f.winnerAnnounced = f.announcements.filter((b) => winner && b.includes(winner)).length;
   f.releaseByOther = (await api(base, 'DELETE', `/api/cards/${k.id}/claim`, { by: winner === 'ada' ? 'gizmo' : 'ada' })).status;
   const sixCreates = await Promise.all([1, 2, 3, 4, 5, 6].map((n) => newCard(base, `${tag} sid ${n}`)));
@@ -176,11 +176,11 @@ test('C4h THE ANNOUNCEMENT RACE, MADE DETERMINISTIC (#1845): the inline publish 
     try {
       const r = await api(base, 'POST', `/api/cards/${k.id}/claim`, { by: 'ada' });
       assert.equal(r.status, 200, `the claim does not wait on its announcement (${r.status} ${r.text.slice(0, 160)})`);
-      const ob = await assertOneObligation(base, bodyIncludes(`claimed #${sid}`), { names: [`#${sid}`, 'ada'] }, 'held');
+      const ob = await assertOneObligation(base, bodyMatches(mentionsCard('claimed', sid)), { names: [`#${sid}`, 'ada'] }, 'held');
       assert.equal(ob.status, 'pending', 'held: the obligation is PENDING (the inline publish could not land)');
       assert.equal((await announcements(base, sid)).length, 0, 'held: and no post exists yet (this is the window the flake fell into)');
     } finally { proxy.refuse = null; }
-    const ob = await assertOneObligation(base, bodyIncludes(`claimed #${sid}`), { names: [`#${sid}`] }, 'lifted');
+    const ob = await assertOneObligation(base, bodyMatches(mentionsCard('claimed', sid)), { names: [`#${sid}`] }, 'lifted');
     const pub = await publishNow(base, ob.obligationId, 'lifted');
     const posts = await announcements(base, sid);
     assert.equal(posts.length, 1, `driven: exactly ONE announcement (${posts.length})`);

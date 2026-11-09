@@ -29,8 +29,21 @@ export async function obligations(base, match) {
   return (r.body?.entries ?? []).filter((e) => match(e));
 }
 
-/** Entries whose frozen body contains `needle` — the usual match for a card announcement ("claimed #12"). */
+/** Entries whose frozen body contains `needle`. ⚠️ A substring: "claimed #1" also selects "claimed #12". For a card, use mentionsCard. */
 export const bodyIncludes = (needle) => (e) => String(e?.payload?.body ?? '').includes(needle);
+
+/**
+ * #1845 slice 2 — a text test for "<phrase> #<sid>" that names ONE card: the number ends where no digit follows, so #1 never selects
+ * #12 or #10. The phrase is literal text, not a pattern. Use it for posts (`.filter((p) => mentionsCard('claimed', 1)(p.body))`) and,
+ * through bodyMatches, for outbox entries.
+ */
+export function mentionsCard(phrase, sid) {
+  const rx = new RegExp(`${String(phrase).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} #${Number(sid)}(?!\\d)`);
+  return (text) => rx.test(String(text ?? ''));
+}
+
+/** Outbox entries whose frozen body passes `textTest` (e.g. mentionsCard('claimed', 12)). */
+export const bodyMatches = (textTest) => (e) => textTest(e?.payload?.body);
 
 /**
  * The obligation the 200 promised: exactly ONE publisher entry, pending or published (never blocked), sequenced in the same write,
