@@ -233,7 +233,7 @@ test('#1762 A1–A9, R4, R5 — flag on: every REST card and column write commit
     seqs.push(['A1', (await assertCardActivity(q, a1.fresh[0][0], a1.fresh[0][1], { op: 'create', id: card.id, shortId: card.shortId, actor: 'ada', versionAfter: v1, part: 0, holder: null, columnBefore: NONE, columnAfter: 'backlog' }, 'A1 create')).commitSeq]);
 
     // A2 update
-    const a2 = await step('A2', () => call('PATCH', `/api/cards/${card.id}`, { description: 'second', by: 'bea' }));
+    const a2 = await step('A2', async () => call('PATCH', `/api/cards/${card.id}`, { description: 'second', by: 'bea', ifVersion: (await call('GET', `/api/cards/${card.id}`)).json.version ?? 0 }));
     assert.equal(a2.r.status, 200, `A2 update (${a2.r.status} ${a2.r.text.slice(0, 200)})`);
     a2.fresh = forEntity(a2.fresh, cardIriOf(card.id)); assert.equal(a2.fresh.length, 1, `A2: exactly one new activity for the card (got ${a2.fresh.length})`);
     const v2 = await restVersion(call, card.id); assert.ok(v2 > v1, 'PRECONDITION: the update moved the version');
@@ -252,7 +252,7 @@ test('#1762 A1–A9, R4, R5 — flag on: every REST card and column write commit
     const claimActs = c4.fresh.filter(([, n]) => (n[C.used] || []).some((u) => u.value === cardIriOf(card.id)));
     assert.equal(claimActs.length, 1, `A4 claim: exactly one activity for the card (got ${claimActs.length})`);
     seqs.push(['A4 claim', (await assertCardActivity(q, claimActs[0][0], claimActs[0][1], { op: 'claim', id: card.id, shortId: card.shortId, actor: 'ada', versionAfter: await restVersion(call, card.id), part: 0, holder: null, columnBefore: undefined, columnAfter: 'in-progress' }, 'A4 claim')).commitSeq]);
-    const e4 = await step('A4 edit', () => call('PATCH', `/api/cards/${card.id}`, { description: 'edited by a non-holder', by: 'bea' }));
+    const e4 = await step('A4 edit', async () => call('PATCH', `/api/cards/${card.id}`, { description: 'edited by a non-holder', by: 'bea', ifVersion: (await call('GET', `/api/cards/${card.id}`)).json.version ?? 0 }));
     assert.equal(e4.r.status, 200, `A4 non-holder edit (${e4.r.status} ${e4.r.text.slice(0, 200)})`);
     e4.fresh = forEntity(e4.fresh, cardIriOf(card.id)); assert.equal(e4.fresh.length, 1, `A4 edit: exactly one new activity for the card (got ${e4.fresh.length})`);
     seqs.push(['A4 edit', (await assertCardActivity(q, e4.fresh[0][0], e4.fresh[0][1], { op: 'update', id: card.id, shortId: card.shortId, actor: 'bea', versionAfter: await restVersion(call, card.id), part: 0, holder: 'ada', columnBefore: undefined, columnAfter: 'in-progress' }, 'A4 edit while ada holds')).commitSeq]);
@@ -323,7 +323,7 @@ test('#1762 A1–A9, R4, R5 — flag on: every REST card and column write commit
     // A10 REPROJECT: card #3 (held by bea) names the NEXT shortId; the create that mints it re-writes #3 with its JSON unchanged
     const next = Number((await q(`SELECT ?n WHERE { GRAPH <${BK}> { <${SHORTID_COUNTER_IRI}> <${VER}> ?n } }`))[0]?.n.value);
     assert.ok(Number.isSafeInteger(next), `PRECONDITION: the shortId counter reads (${next})`);
-    const named = await call('PATCH', '/api/cards/uuid-3', { description: `waits on #${next}`, by: 'bea' });
+    const named = await call('PATCH', '/api/cards/uuid-3', { description: `waits on #${next}`, by: 'bea', ifVersion: (await call('GET', '/api/cards/uuid-3')).json.version ?? 0 });
     assert.equal(named.status, 200, `PRECONDITION: #3 names #${next} (${named.status} ${named.text.slice(0, 200)})`);
     const held = await call('POST', '/api/cards/uuid-3/claim', { by: 'bea' });
     assert.equal(held.status, 200, `PRECONDITION: bea holds #3 (${held.status} ${held.text.slice(0, 200)})`);

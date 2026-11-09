@@ -71,7 +71,7 @@ test('#1365 served: edit in the pop-out → column card and wiki page show it; a
     await page.waitForSelector('#card-detail .edit-desc', { timeout: 5000 });
     await setValue(page, '#card-detail .edit-desc', 'v3 by me\nshared line');
     // someone else saves in between
-    const r = await fetch(`${server.baseUrl}/api/cards/1`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ by: 'alex', description: 'v3 by them\nshared line' }) });
+    const r = await fetch(`${server.baseUrl}/api/cards/1`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ by: 'alex', description: 'v3 by them\nshared line', ifVersion: (await (await fetch(`${server.baseUrl}/api/cards/1`)).json()).version ?? 0 }) });
     assert.equal(r.status, 200);
     await page.click('#card-detail [data-action="save-edit"]');
     await page.waitForSelector('#card-detail .edit-conflict:not([hidden])', { timeout: 8000 });

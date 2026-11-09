@@ -8881,6 +8881,18 @@ function validateCardFields(body, { checkId = true, surface = 'patch', current =
         + 'or a concurrent write is silently deleted (#1132). Read the card, pass its version, write once; '
         + 'a moved version is refused with 409 so you can re-read and reapply.';
     }
+    // #534 condition 2 (room decision 3464b457, 2026-11-07) — a full `description`
+    // REPLACE is the same shape: it rewrites the whole body, so a replace built
+    // from a stale read deletes whatever arrived since, and nothing tells either
+    // writer (measured again 2026-11-09 on #1847). An empty body is a clear and is
+    // not exempt. descriptionAppend / descriptionPrepend compose under the write
+    // lock and stay unconditioned.
+    if (surface === 'patch' && typeof body.description === 'string' && body.ifVersion === undefined) {
+      return 'description REPLACES the whole body and needs ifVersion — the card version you read — '
+        + 'or a concurrent write is silently deleted (#534). To ADD text, use descriptionAppend or '
+        + 'descriptionPrepend, which need no precondition. A moved version is refused with 409: re-read, '
+        + 'reapply your edit to the CURRENT body, and never resend the stale one with the new version.';
+    }
   }
   if (body.acceptance !== undefined && body.acceptance !== null) {
     const aerr = validateAcceptance(body.acceptance);

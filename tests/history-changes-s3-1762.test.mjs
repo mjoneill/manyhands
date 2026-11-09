@@ -419,7 +419,7 @@ async function nativeLifecycle(label) {
   const ok = (r, what) => assert.ok(r.status >= 200 && r.status < 300, `PRECONDITION: ${what} (${r.status} ${r.text.slice(0, 200)})`);
   ok(await W.send('PATCH', `/api/cards/${card.id}`, { column: 'in-progress', by: 'ada' }), 'move'); steps.push(['move', await colOf()]);
   ok(await W.send('POST', `/api/cards/${card.id}/claim`, { by: 'ada' }), 'claim'); steps.push(['claim', await colOf()]);
-  ok(await W.send('PATCH', `/api/cards/${card.id}`, { description: 'second', by: 'ada' }), 'edit'); steps.push(['update', await colOf()]);
+  ok(await W.send('PATCH', `/api/cards/${card.id}`, { description: 'second', by: 'ada', ifVersion: (await W.get(`/api/cards/${card.id}`)).json.version ?? 0 }), 'edit'); steps.push(['update', await colOf()]);
   ok(await W.send('DELETE', `/api/cards/${card.id}/claim`, { by: 'ada' }), 'release'); steps.push(['release', await colOf()]);
   ok(await W.send('DELETE', `/api/cards/${card.id}?by=ada`), 'delete'); steps.push(['delete', null]);
   return { card, steps };
@@ -537,7 +537,7 @@ test('#1762 S3 CH16 — a `reproject` part (a card re-written only because a #N 
   const holder = 'uuid-3';
   const okc = (r, what) => assert.ok(r.status >= 200 && r.status < 300, `PRECONDITION: ${what} (${r.status} ${r.text.slice(0, 200)})`);
   okc(await W.send('POST', `/api/cards/${holder}/claim`, { by: 'ada' }), 'ada claims #3');
-  okc(await W.send('PATCH', `/api/cards/${holder}`, { description: `waits on #${next}`, by: 'ada' }), '#3 names the next shortId');
+  okc(await W.send('PATCH', `/api/cards/${holder}`, { description: `waits on #${next}`, by: 'ada', ifVersion: (await W.get(`/api/cards/${holder}`)).json.version ?? 0 }), '#3 names the next shortId');
   const created = await W.send('POST', '/api/cards', { title: 'native names-target', description: 'mints the #N that #3 names', createdBy: 'ada' });
   assert.equal(created.status, 201, `PRECONDITION: the create applied (${created.status})`);
   assert.equal(created.json.shortId, next, 'PRECONDITION: the new card minted exactly the #N that #3 names');

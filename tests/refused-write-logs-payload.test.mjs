@@ -102,7 +102,7 @@ test('#1217 — a 400 validation refusal on create logs the payload too', async 
 test('#1217 CONTROL — a SUCCESSFUL write logs no refused event', async () => {
   const srv = await startRestServer({ board: board() });
   try {
-    const res = await api(srv.baseUrl, 'PATCH', '/api/cards/1', { description: 'fine', by: 'ada' });
+    const res = await api(srv.baseUrl, 'PATCH', '/api/cards/1', { description: 'fine', by: 'ada', ifVersion: (await (await fetch(`${srv.baseUrl}/api/cards/1`)).json()).version ?? 0 });
     assert.equal(res.status, 200);
     assert.deepEqual(refusals(srv.boardFile), [],
       'the log must not gain a refusal for a write that succeeded');
@@ -225,7 +225,7 @@ test('#1217 — the refusal is recoverable through changes_since, with the body,
     assert.equal(made.status, 201);
     const id = made.body.shortId;
     // A real write, then a refused one, on the same card by the same seat.
-    const ok = await api(srv.baseUrl, 'PATCH', `/api/cards/${id}`, { description: 'the real last write', by: 'ada' });
+    const ok = await api(srv.baseUrl, 'PATCH', `/api/cards/${id}`, { description: 'the real last write', by: 'ada', ifVersion: (await (await fetch(`${srv.baseUrl}/api/cards/${id}`)).json()).version ?? 0 });
     assert.equal(ok.status, 200);
     const since = ok.body.updatedAt;
     const bad = await api(srv.baseUrl, 'PATCH', `/api/cards/${id}`, { description: 'the lost draft', by: 'ada', ifVersion: 1 });

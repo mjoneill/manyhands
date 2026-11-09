@@ -11,7 +11,9 @@
  * must not masquerade as a decision (#966's principle on a write path).
  *
  * Scope is exactly the three arrays on PATCH. Controls pin that the
- * description paths, create, and every other field are untouched.
+ * append/prepend paths, create, and every other field are untouched. (Since
+ * #534 condition 2, a full `description` replace needs ifVersion too; its own
+ * file pins that.)
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -76,10 +78,10 @@ test('#1132 with the version you read, the write lands; with a stale one it is a
   } finally { await s.stop(); }
 });
 
-test('#1132 CONTROLS: description, descriptionAppend, title, column, and create with arrays all still work without ifVersion', async () => {
+test('#1132 CONTROLS: descriptionAppend, title, column, and create with arrays all still work without ifVersion (a full description replace needs it since #534 condition 2: see description-replace-requires-ifversion-534)', async () => {
   const s = await startRestServer({ board: board() });
   try {
-    for (const patch of [{ description: 'new' }, { descriptionAppend: '\nmore' }, { title: 'renamed' }, { column: 'planned' }, { labels: ['x'] }]) {
+    for (const patch of [{ descriptionAppend: '\nmore' }, { title: 'renamed' }, { column: 'planned' }, { labels: ['x'] }]) {
       const r = await api(s.baseUrl, 'PATCH', '/api/cards/1', { by: 'ada', ...patch });
       assert.equal(r.status, 200, `${Object.keys(patch)[0]} without ifVersion: ${JSON.stringify(r.body)}`);
     }
