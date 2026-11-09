@@ -283,6 +283,41 @@ stamp_shas() {
   fi
 }
 
+# #1847 slice 1 — SAY WHICH RUNNING SERVICES THIS DEPLOY LEFT ON AN OLDER TREE.
+# The restart plan (#1138) decides only rest and mcp; every other job keeps its
+# cwd in the folder the swap just renamed to `.previous`, so the NEXT deploy
+# refuses at #1831's guard. Until now the deployer learned that from that
+# refusal. This reports it here, after the swap (and after any restarts), with
+# serve-cwd-check (#539). It changes nothing and is NEVER fatal:
+#   exit 0 → ✓ · exit 1 → name the jobs, post one line to the commons
+#   anything else, or no check script → UNMEASURED (never read as a pass)
+report_serve_cwd() {
+  cwd_check="$CLONE/scripts/serve-cwd-check.mjs"
+  if [ ! -f "$cwd_check" ]; then
+    say "⚠️ serve-cwd UNMEASURED (no $cwd_check) — which running jobs are on an older tree is not known"
+    return 0
+  fi
+  cwd_rc=0
+  cwd_out="$(node "$cwd_check" --serve "$SERVE" 2>&1)" || cwd_rc=$?
+  case "$cwd_rc" in
+    0) say "✓ every running job is on the served tree or outside it (serve-cwd-check)" ;;
+    1)
+      printf '%s\n' "$cwd_out" | sed 's/^/   /'
+      stale="$(printf '%s\n' "$cwd_out" | awk '$1 == "previous" || $1 == "GONE" { sub(/^com\.scrumboard\./, "", $2); printf "%s%s", sep, $2; sep = ", " }')"
+      line="still on an older tree after deploying $(printf '%s' "$(git -C "$CLONE" rev-parse HEAD)" | cut -c1-7): $stale. The next deploy will refuse (#1831) until they're restarted (#1847)."
+      say "⚠️ $line"
+      body="$(printf '%s' "$line" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.stringify({author:"board",body:s})))')"
+      curl -fsS --max-time 3 -X POST "${DEPLOY_BOARD_API:-http://127.0.0.1:3141}/api/conversations" -H 'Content-Type: application/json' -d "$body" >/dev/null 2>&1 \
+        || say "   (not posted to the commons — tell the room by hand)"
+      ;;
+    *)
+      printf '%s\n' "$cwd_out" | sed 's/^/   /'
+      say "⚠️ serve-cwd UNMEASURED (the check exited $cwd_rc) — look yourself: node $cwd_check --serve $SERVE"
+      ;;
+  esac
+  return 0
+}
+
 case "${1:-deploy}" in
   status)
     if [ -d "$SERVE" ]; then
@@ -297,7 +332,7 @@ case "${1:-deploy}" in
   unlock)
     unlock; say "🔓 UNLOCKED $SERVE"; say "   re-lock with: scripts/deploy.sh export"; exit 0 ;;
   export)
-    ci_gate; export_tree; stamp_shas; exit 0 ;;
+    ci_gate; export_tree; stamp_shas; report_serve_cwd; exit 0 ;;
   --no-restart) RESTART=0 ;;
   deploy) : ;;
   *) die "unknown command: $1" ;;
@@ -370,7 +405,7 @@ export_tree
 
 stamp_shas
 
-[ "$RESTART" = "0" ] && exit 0
+[ "$RESTART" = "0" ] && { report_serve_cwd; exit 0; }
 
 # #1138 — RESTART ONLY WHAT CHANGED. Every deploy used to kickstart both
 # services; a Claude Code MCP session does not reconnect after :3001 restarts
@@ -476,6 +511,7 @@ until curl -fsS --max-time 3 http://127.0.0.1:3141/api/health 2>/dev/null | grep
   i=$((i + 1)); [ "$i" -gt 40 ] && die "rest did not return ready within 80s"; sleep 2
 done
 say "   mcp 200 · rest 200 · serving $(cat "$SERVE/DEPLOYED-SHA" | cut -c1-7) · restarted: rest=$DO_REST mcp=$DO_MCP"
+report_serve_cwd
 
 # #1324 — VERIFY AT THE SEATS, NOT ONLY AT THE SERVER. Only when MCP actually
 # restarted (acceptance 5: a check that fires on every deploy is one nobody
