@@ -50,11 +50,20 @@ export const jobIdFor = (url) => `job-${sha256(url)}`;
 export const RERUN_RE = /\bre-?run\b/i;
 export const MAX_RERUNS = 3;
 
-export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fetchSource, extractor, modelKey, prompt, sharers, limit = 200, allowHttp = false, fetchImpl = fetch, now = () => new Date().toISOString(), actor = 'extractor', log = (line) => process.stderr.write(`${line}\n`) } = {}) {
+export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fetchSource, extractor, modelKey, prompt, sharers, limit = 200, allowHttp = false, fetchImpl = fetch, now = () => new Date().toISOString(), actor = 'extractor', log = (line) => process.stderr.write(`${line}\n`), report = null } = {}) {
   for (const [k, v] of Object.entries({ boardUrl, stateFile, sourcesDir, fetchSource, extractor, modelKey })) if (!v) throw new Error(`createIntake needs ${k}`);
   if (typeof prompt !== 'string') throw new Error('createIntake needs the prompt text');
   if (!(sharers instanceof Set) || sharers.size === 0) throw new Error('createIntake needs sharers: the configured set of authors whose links become jobs (the PO\'s ruling, 51192). Empty means nobody, so nothing would ever run; refusing to construct.');
   const base = String(boardUrl).replace(/\/$/, '');
+  // #1862 — an optional run reporter (core/knowledge-extraction-report.mjs createAnnouncer). Absent: the tick posts no
+  // run reports, as before. Present: one report when a job starts (or resumes), one when it ends or fails. A report can
+  // NEVER fail a job: a throw or an { ok:false } is counted in the tick's reportErrors and the job carries on.
+  let reportErrors = 0;
+  async function tell(event) {
+    if (typeof report !== 'function') return;
+    try { const r = await report(event); if (r && r.ok === false) reportErrors += 1; } catch { reportErrors += 1; }
+  }
+  const withReports = (o) => (typeof report === 'function' ? { ...o, reportErrors } : o);
   const headers = () => ({ ...(token ? { Authorization: `Bearer ${token}` } : {}) });
 
   /**
@@ -157,6 +166,7 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
 
   async function tick() {
     let st = readState();
+    reportErrors = 0;
     const started = [], skipped = [], failed = [], resumed = [];
     let pending = [...st.pending];
 
@@ -178,13 +188,15 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
     // 1. RESUME what died mid-run, before anything new: the checkpoint has the model's answer, so this costs no model call
     for (const p of st.pending) {
       try {
+        await tell({ kind: 'start', url: p.url, modelKey, jobId: p.jobId, resumed: true });
         const r = await extractor.resume({ jobId: p.jobId });
+        await tell({ kind: 'finish', url: p.url, result: r });
         resumed.push({ url: p.url, jobId: p.jobId, runId: r.runId, outcome: r.outcome, published: r.published.length, rejected: r.rejected.length });
         pending = pending.filter((x) => x.jobId !== p.jobId);
       } catch (e) {
         const attempts = (p.attempts ?? 1) + 1;
-        if (attempts >= MAX_RESUME_ATTEMPTS) { failed.push({ url: p.url, jobId: p.jobId, reason: `resume gave up after ${attempts} attempts: ${e?.message ?? e}` }); pending = pending.filter((x) => x.jobId !== p.jobId); }
-        else { failed.push({ url: p.url, jobId: p.jobId, reason: `resume: ${e?.message ?? e} (attempt ${attempts} of ${MAX_RESUME_ATTEMPTS}, still pending)` }); pending = pending.map((x) => (x.jobId === p.jobId ? { ...x, attempts } : x)); }
+        if (attempts >= MAX_RESUME_ATTEMPTS) { failed.push({ url: p.url, jobId: p.jobId, reason: `resume gave up after ${attempts} attempts: ${e?.message ?? e}` }); pending = pending.filter((x) => x.jobId !== p.jobId); await tell({ kind: 'fail', url: p.url, reason: failed.at(-1).reason, retry: false }); }
+        else { failed.push({ url: p.url, jobId: p.jobId, reason: `resume: ${e?.message ?? e} (attempt ${attempts} of ${MAX_RESUME_ATTEMPTS}, still pending)` }); pending = pending.map((x) => (x.jobId === p.jobId ? { ...x, attempts } : x)); await tell({ kind: 'fail', url: p.url, reason: failed.at(-1).reason, retry: true }); }
       }
       writeState({ cursor: st.cursor, mode: st.mode, pending, resyncs: st.resyncs, lastReadAt: st.lastReadAt });
     }
@@ -196,7 +208,7 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
       const resyncs = [...st.resyncs, r.record];
       writeState({ cursor: r.cursor, mode: r.mode, pending, resyncs, lastReadAt: r.record.at });   // the re-seed read the head
       if (r.record.announced) announced.push(r.record.at);
-      return { started, resumed, skipped, failed, pending: pending.length, cursor: r.cursor, mode: r.mode, read: 0, resync: r.record, announced };
+      return withReports({ started, resumed, skipped, failed, pending: pending.length, cursor: r.cursor, mode: r.mode, read: 0, resync: r.record, announced });
     }
     const { conversations, next } = got;
     const readAt = now();   // the READ happened now; the runs below can take minutes, and the window must open here, not after them
@@ -232,22 +244,24 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
         if (known.outcome) { skipped.push({ url, jobId, reason: `known: ${known.outcome}` }); continue; }
         if (Array.isArray(known.next) && known.next.length) { skipped.push({ url, jobId, reason: `in progress: next ${known.next.join(',')}` }); continue; }
         let got;
-        try { got = await fetchSource(url); } catch (e) { failed.push({ url, jobId, reason: `fetch: ${e?.message ?? e}` }); continue; }
-        if (!got || typeof got.text !== 'string') { failed.push({ url, jobId, reason: 'fetch: no text' }); continue; }
+        try { got = await fetchSource(url); } catch (e) { failed.push({ url, jobId, reason: `fetch: ${e?.message ?? e}` }); await tell({ kind: 'fail', url, reason: failed.at(-1).reason, retry: false }); continue; }
+        if (!got || typeof got.text !== 'string') { failed.push({ url, jobId, reason: 'fetch: no text' }); await tell({ kind: 'fail', url, reason: 'fetch: no text', retry: false }); continue; }
         const contentUrl = keep(got.text);
         const source = ingestSource({ text: got.text, url, contentUrl, encodingFormat: got.encodingFormat ?? 'text/plain', retrievedAt: now(), wasDerivedFrom: `${ENTITY}${post.id}` });
         // PENDING before the run, so a death mid-run leaves a record the next tick resumes from
         pending = [...pending, { jobId, url, postId: post.id, since: now(), attempts: 1 }];
         writeState({ cursor: st.cursor, mode: st.mode, pending, resyncs: st.resyncs, lastReadAt: st.lastReadAt });
+        await tell({ kind: 'start', url, modelKey, jobId });
         try {
           const r = await extractor.run({ source, modelKey, prompt, jobId });
           started.push({ url, jobId, runId: r.runId, ...(rerunOf ? { rerunOf } : {}), outcome: r.outcome, published: r.published.length, rejected: r.rejected.length });
           pending = pending.filter((x) => x.jobId !== jobId);
-        } catch (e) { failed.push({ url, jobId, reason: `run: ${e?.message ?? e} (pending: the next tick resumes it)` }); }
+          await tell({ kind: 'finish', url, result: r });
+        } catch (e) { failed.push({ url, jobId, reason: `run: ${e?.message ?? e} (pending: the next tick resumes it)` }); await tell({ kind: 'fail', url, reason: failed.at(-1).reason, retry: true }); }
       }
     }
     writeState({ cursor: next, mode: st.mode, pending, resyncs: st.resyncs, lastReadAt: readAt });   // a successful read, stamped when it happened
-    return { started, resumed, skipped, failed, pending: pending.length, cursor: next, mode: st.mode, read: conversations.length, announced };
+    return withReports({ started, resumed, skipped, failed, pending: pending.length, cursor: next, mode: st.mode, read: conversations.length, announced });
   }
 
   return { tick, readState };
