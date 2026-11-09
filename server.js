@@ -13368,6 +13368,16 @@ async function handleUpdateNode(req, res, idOrShortId) {
           + `Got ${JSON.stringify(patch.ifVersion)}. This is a malformed request, not a version conflict.`,
       });
     }
+    // #1857 step 3 (the owner's ruling, 2026-11-09 16:31Z: "mandatory") — a `body` save REPLACES the whole page, so it must carry
+    // the version it was read at, exactly as a card's `description` replace must (#534). Without it a stale tab silently
+    // erases a newer edit. An empty body is a clear and is not exempt. Title, parent and attachments alone need none.
+    if (typeof patch.body === 'string' && patch.ifVersion === undefined) {
+      return sendJSON(res, 400, {
+        error: 'body REPLACES the whole page and needs ifVersion: the page version you read (node.board.version). '
+          + 'Without it a newer edit made since your read is silently erased (#1857). A moved version is refused '
+          + 'with 409: re-read, reapply your edit to the CURRENT text, and never resend the stale one with the new version.',
+      });
+    }
     let cycle = false;
     let conflict = null;   // #1857 — { currentVersion } when the page moved on since the caller read it
     let noticeEntry = null;   // #1574 1b — the wiki notice as a publisher obligation (unit on)
@@ -13381,8 +13391,8 @@ async function handleUpdateNode(req, res, idOrShortId) {
       if (idx < 0) return null;
       const card = data.cards[idx];
       // #1857 — compare-and-swap, checked under the write lock against the same read the write uses, BEFORE any field
-      // is touched: a stale save writes nothing at all. Opt-in today (no ifVersion = unconditioned, as before);
-      // requiring it on `body` is the card's step 3 and waits for a room decision. A version-less card reads as 0, the
+      // is touched: a stale save writes nothing at all. Required for a `body` save (step 3, above); optional for the
+      // rest, which checks it when sent. A version-less card reads as 0, the
       // same rule the card route uses, and the first accepted write stamps 1 (bumpCardVersion below).
       if (patch.ifVersion !== undefined) {
         const current = Number.isInteger(card.version) ? card.version : 0;

@@ -82,7 +82,8 @@ apiTest('POST /api/nodes without a title is rejected 400', async ({ baseUrl }) =
 });
 
 apiTest('PATCH /api/nodes/:id edits title + body, and can clear the parent', async ({ baseUrl }) => {
-  const res = await fetch(`${baseUrl}/api/nodes/c`, j('PATCH', { title: 'Renamed', body: 'new body', parent: null }));
+  const v = (await (await fetch(`${baseUrl}/api/nodes/c`)).json()).node?.board?.version;   // #1857 step 3: a body save carries the version read
+  const res = await fetch(`${baseUrl}/api/nodes/c`, j('PATCH', { title: 'Renamed', body: 'new body', parent: null, ifVersion: Number.isInteger(v) ? v : 0 }));
   assert.equal(res.status, 200);
   const node = await res.json();
   assert.equal(node.name, 'Renamed');
@@ -132,7 +133,9 @@ apiTest('#223 creating a page posts a "page created" commons notice', async ({ b
 
 apiTest('#223 editing a page\'s content posts a "page updated" notice', async ({ baseUrl }) => {
   const before = (await convs(baseUrl)).length;
-  await fetch(`${baseUrl}/api/nodes/p`, j('PATCH', { body: 'edited body' }));
+  const v = (await (await fetch(`${baseUrl}/api/nodes/p`)).json()).node?.board?.version;   // #1857 step 3: the version read
+  const r = await fetch(`${baseUrl}/api/nodes/p`, j('PATCH', { body: 'edited body', ifVersion: Number.isInteger(v) ? v : 0 }));
+  assert.equal(r.status, 200, 'the edit itself landed (a refused edit posts nothing either, so check it first)');
   const after = await convs(baseUrl);
   assert.equal(after.length, before + 1, 'one notice posted');
   assert.match(after[after.length - 1].body, /updated/i);
