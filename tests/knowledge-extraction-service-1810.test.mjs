@@ -107,6 +107,21 @@ test('#1810 R13 — the OpenRouter adapter: chat/completions with the key in the
 
 });
 
+test('#1867 R13d — the OpenRouter adapter hands the provider\'s finish_reason back as stopReason (null when the provider sends none)', async () => {
+  const finishes = ['error', 'stop', undefined];
+  let n = 0;
+  const fakeFetch = async () => {
+    const finish_reason = finishes[n++];
+    const content = JSON.stringify({ items: [] });
+    return new Response(JSON.stringify({ id: `gen-${n}`, choices: [{ message: { role: 'assistant', content }, ...(finish_reason ? { finish_reason } : {}) }], usage: { prompt_tokens: 1, completion_tokens: 1 } }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const model = createOpenRouterModel({ apiKey: 'sk-or-test-not-a-real-key', baseUrl: 'https://openrouter.test/api/v1', modelId: 'm/x', fetchImpl: fakeFetch, ledger: null });
+  const body = { model: 'm', messages: [{ role: 'user', content: 'u' }] };
+  assert.equal((await model.send(body)).stopReason, 'error', 'the d530379c shape: a 200 that ended "error" says so');
+  assert.equal((await model.send(body)).stopReason, 'stop');
+  assert.equal((await model.send(body)).stopReason, null, 'no finish_reason → null, never invented');
+});
+
 test('#1810 R13b — every OpenRouter call, refused ones included, lands ONE model-call row with the usage, and the key never reaches the board', async () => {
   let n = 0;
   const fakeFetch = async () => {

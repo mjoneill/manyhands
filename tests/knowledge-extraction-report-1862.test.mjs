@@ -106,6 +106,17 @@ test('B3: a run that published nothing says so, and still names the run and its 
   assert.ok(b.includes(RUN));
 });
 
+test('B3b (#1867): the finish post names the main call\'s finish; an answer that did not finish "stop" is called out, never read as complete', () => {
+  const clean = finishBody({ url: URL1, result: { ...result, stopReason: 'stop' } });
+  assert.match(clean, /model finished: stop/, 'a clean finish is stated');
+  assert.doesNotMatch(clean, /did not finish/);
+  const cut = finishBody({ url: URL1, result: { ...result, outcome: 'failed', published: [], stopReason: 'length' } });
+  assert.match(cut, /model finished: length/);
+  assert.match(cut, /the model's answer did not finish \("length"\), so none of it was used/, 'the cut-off is called out in plain words');
+  const none = finishBody({ url: URL1, result: { ...result, stopReason: null } });
+  assert.doesNotMatch(none, /model finished/, 'no finish reason: nothing is claimed');
+});
+
 test('B4: the fail post names the source, the reason, and whether it will be retried', () => {
   const b = failBody({ url: URL1, reason: 'fetch: http 404', retry: false });
   assert.match(b, /^❌ extraction failed/);

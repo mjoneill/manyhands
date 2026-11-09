@@ -125,7 +125,7 @@ const JobState = Annotation.Root({
   source: Annotation(), modelKey: Annotation(), prompt: Annotation(),
   runId: Annotation(), performedUsing: Annotation(),
   proposals: Annotation(), items: Annotation(), rejected: Annotation(), counters: Annotation(), repairs: Annotation(), outcome: Annotation(),
-  title: Annotation(), synopsis: Annotation(),
+  title: Annotation(), synopsis: Annotation(), stopReason: Annotation(),
   result: Annotation(),
 });
 
@@ -178,7 +178,12 @@ export function createExtractor({ graphClient, runs, model, registry, actor = 'e
       const r = await model.send(body);
       if (!r || typeof r.status !== 'number') return { ok: false, failure: 'malformed-response' };
       if (r.status !== 200) return { ok: false, failure: `http-${r.status}` };
-      return { ok: true, json: r.json };
+      // #1867 — a 200 is not a finished answer. Any finish but "stop" (length, error, content_filter) is a PROVIDER failure
+      // and its output is never used: model-call d530379c answered 200 with stopReason "error" and was counted a success.
+      // No finish reason at all (older providers, fakes) stays as before.
+      const stopReason = typeof r.stopReason === 'string' ? r.stopReason : null;
+      if (stopReason !== null && stopReason !== 'stop') return { ok: false, failure: `finish-${stopReason}`, stopReason };
+      return { ok: true, json: r.json, stopReason };
     } catch (e) { return { ok: false, failure: e?.message || String(e) }; }
   }
   const body = (modelKey, prompt, user) => ({
@@ -231,7 +236,7 @@ export function createExtractor({ graphClient, runs, model, registry, actor = 'e
     // the title and synopsis are strings or nothing: the schema is closed, a number or a list is not a title (R10b)
     const title = typeof first.json?.title === 'string' && first.json.title.trim() ? first.json.title.trim() : null;
     const synopsis = typeof first.json?.synopsis === 'string' && first.json.synopsis.trim() ? first.json.synopsis.trim() : null;
-    return { proposals: proposed.length, items, rejected, counters, repairs, outcome, title, synopsis };
+    return { proposals: proposed.length, items, rejected, counters, repairs, outcome, title, synopsis, stopReason: first.stopReason ?? null };
   }
 
   /**
@@ -258,7 +263,7 @@ export function createExtractor({ graphClient, runs, model, registry, actor = 'e
     const prior = await alreadyPublished(st);
     if (prior) {
       await runs.generated({ run: st.runId, iris: prior.map((p) => p.iri) });
-      return { result: { runId: st.runId, outcome: st.outcome, published: prior, counters: st.counters, repairs: st.repairs ?? null, proposals: st.proposals,
+      return { result: { runId: st.runId, outcome: st.outcome, published: prior, counters: st.counters, repairs: st.repairs ?? null, proposals: st.proposals, stopReason: st.stopReason ?? null,
         rejected: st.rejected.map((r, k) => ({ iri: `${st.runId}/rejected/${k + 1}`, reason: r.reason, item: r.item, detail: r.detail })) } };
     }
     const intention = await intentionFor({
@@ -273,6 +278,7 @@ export function createExtractor({ graphClient, runs, model, registry, actor = 'e
     await runs.generated({ run: st.runId, iris: published.map((p) => p.iri) });
     const result = {
       runId: st.runId, outcome: st.outcome, published, counters: st.counters, repairs: st.repairs ?? null, proposals: st.proposals,
+      stopReason: st.stopReason ?? null,   // #1867: the main call's finish reason ("stop" = it finished on its own)
       rejected: intention.rejected.map((r, k) => ({ iri: r.iri, reason: r.reason, item: st.rejected[k].item, detail: st.rejected[k].detail })),
     };
     return { result };

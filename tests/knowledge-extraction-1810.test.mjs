@@ -326,6 +326,47 @@ test('#1810 R6 — two counters kept apart: a span mismatch is a SPAN invention;
   assert.equal(Number(g.i.value), 1); assert.equal(Number(g.f.value), 1);
 });
 
+// #1867 (spec: bubbles, post 52012) — a 200 is not a finished answer. The provider's finish reason travels with the reply as
+// `stopReason`; anything but "stop" is a PROVIDER failure and its output is never used. Live specimen: model-call d530379c,
+// a span repair that answered 200 with stopReason "error" and was counted as a success.
+test('#1867 R6b — the FIRST ask ends "length": a provider failure, its items are not used, the run is failed and says why', { skip: SKIP }, async () => {
+  const src = ingestSource({ text: FIXTURE, url: FIXTURE_URL });
+  const { extractor } = extractorWith({ model: fakeModel([{ status: 200, json: reply(...goodItems()), stopReason: 'length' }]) });
+  const r = await extractor.run({ source: src, modelKey: 'fake-a', prompt: 'p' });
+  assert.equal(r.counters.providerFailures, 1, `a length finish is a provider failure (${JSON.stringify(r.counters)})`);
+  assert.equal(r.published.length, 0, 'the cut-off answer\'s items are not published, however valid they look');
+  assert.equal(r.outcome, 'failed', 'never complete, never "the document had nothing more to say"');
+  assert.equal(r.stopReason, 'length', 'the run result names the main call\'s finish reason');
+});
+
+test('#1867 R6c — a REPAIR that ends "error" (the d530379c shape: 200, stopReason error) is a provider failure and its span is NOT used', { skip: SKIP }, async () => {
+  const src = ingestSource({ text: FIXTURE, url: FIXTURE_URL });
+  const good = goodItems()[0];
+  const bad = { ...good, span: 'not a span of that block at all' };
+  // the repair's span WOULD validate; only the finish reason says it cannot be trusted
+  const { extractor } = extractorWith({ model: fakeModel([reply(bad), { status: 200, json: reply(good), stopReason: 'error' }]) });
+  const r = await extractor.run({ source: src, modelKey: 'fake-a', prompt: 'p' });
+  assert.equal(r.counters.providerFailures, 1, `an error finish is a provider failure (${JSON.stringify(r.counters)})`);
+  assert.equal(r.published.length, 0, 'the repair\'s span is not used');
+  assert.equal(r.rejected[0]?.reason, 'span-mismatch', 'the item stays rejected for its own reason');
+  // CONTROL: the same repair finishing "stop" IS used
+  const { extractor: ok } = extractorWith({ model: fakeModel([reply(bad), { status: 200, json: reply(good), stopReason: 'stop' }]) });
+  const r2 = await ok.run({ source: src, modelKey: 'fake-a', prompt: 'p' });
+  assert.equal(r2.published.length, 1, 'CONTROL: a repair that finished "stop" is used');
+  assert.equal(r2.counters.providerFailures, 0, 'CONTROL: and is not a failure');
+});
+
+test('#1867 R6d — a clean run reports its main call\'s finish reason "stop"; a reply with no finish reason reports null, as today', { skip: SKIP }, async () => {
+  const src = ingestSource({ text: FIXTURE, url: FIXTURE_URL });
+  const { extractor } = extractorWith({ model: fakeModel([{ status: 200, json: reply(...goodItems()), stopReason: 'stop' }]) });
+  const r = await extractor.run({ source: src, modelKey: 'fake-a', prompt: 'p' });
+  assert.equal(r.outcome, 'complete'); assert.equal(r.stopReason, 'stop');
+  const { extractor: bare } = extractorWith({ model: fakeModel([reply(...goodItems())]) });
+  const r2 = await bare.run({ source: src, modelKey: 'fake-a', prompt: 'p' });
+  assert.equal(r2.outcome, 'complete', 'no finish reason is not a failure (older providers, fakes)');
+  assert.equal(r2.stopReason, null);
+});
+
 test('#1810 R7 — ZDR on every request body, re-asks included; a non-200 is never retried with the flags removed', { skip: SKIP }, async () => {
   assert.deepEqual(ZDR_PROVIDER, { zdr: true, data_collection: 'deny' });
   const src = ingestSource({ text: FIXTURE, url: FIXTURE_URL });

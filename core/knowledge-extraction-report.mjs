@@ -84,7 +84,12 @@ export function finishBody({ url, result }) {
   if (c && typeof c === 'object') {
     const proposals = Number.isInteger(result?.proposals) ? `${result.proposals} proposed · ` : '';
     const repairs = Number.isInteger(result?.repairs) ? result.repairs : 'not counted';
-    lines.push(`${proposals}span repairs ${repairs} · span inventions ${c.spanInventions ?? 0} · provider failures ${c.providerFailures ?? 0}`);
+    // #1867: the main call's finish reason, when the provider gave one ("stop" = the model finished on its own)
+    const finish = typeof result?.stopReason === 'string' ? ` · model finished: ${result.stopReason}` : '';
+    lines.push(`${proposals}span repairs ${repairs} · span inventions ${c.spanInventions ?? 0} · provider failures ${c.providerFailures ?? 0}${finish}`);
+  }
+  if (typeof result?.stopReason === 'string' && result.stopReason !== 'stop') {
+    lines.push(`⚠️ the model's answer did not finish ("${result.stopReason}"), so none of it was used. This is not "the source had nothing more to say".`);
   }
   if (result?.runId) {
     lines.push(`run ${result.runId}`);
