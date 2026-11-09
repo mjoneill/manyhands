@@ -47,15 +47,16 @@ test('U1 #1734 path 4: with onStale, a draft written on an OLDER base is handed 
 const MINE = 'my unsaved words\nsecond line\n';
 const J = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 
+const pageVersion = async (base, id) => { const v = (await (await fetch(`${base}/api/nodes/${encodeURIComponent(id)}`)).json()).node?.board?.version; return Number.isInteger(v) ? v : 0; };   // #1857 step 3: a body save carries the version read
 async function mkPage(base, text) {
   const r = await fetch(`${base}/api/nodes`, J('POST', { title: 'a page', body: '' }));
   assert.ok(r.ok, `create ${r.status}`);
   const id = (await r.json())['@id'];
-  assert.ok((await fetch(`${base}/api/nodes/${encodeURIComponent(id)}`, J('PATCH', { body: text }))).ok, 'seed');
+  assert.ok((await fetch(`${base}/api/nodes/${encodeURIComponent(id)}`, J('PATCH', { body: text, ifVersion: await pageVersion(base, id) }))).ok, 'seed');
   return id;
 }
 const serverText = async (base, id) => (await (await fetch(`${base}/api/nodes/${encodeURIComponent(id)}`)).json()).node.text;
-const editElsewhere = (base, id, text) => fetch(`${base}/api/nodes/${encodeURIComponent(id)}`, J('PATCH', { body: text }));
+const editElsewhere = async (base, id, text) => fetch(`${base}/api/nodes/${encodeURIComponent(id)}`, J('PATCH', { body: text, ifVersion: await pageVersion(base, id) }));   // the other person read the page first, as a correct editor does
 
 async function openEditor(page, base, id) {
   await page.goto(`${base}/wiki.html?node=${encodeURIComponent(id)}`, { waitUntil: 'networkidle0' });

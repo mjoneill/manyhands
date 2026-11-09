@@ -38,6 +38,11 @@ async function newCard(baseUrl, fields = {}) {
 }
 
 async function patchNode(baseUrl, shortId, patch) {
+  // #1857 step 3: a body save carries the version read, as a correct caller sends it. Never overrides one the row sends.
+  if (typeof patch.body === 'string' && patch.ifVersion === undefined) {
+    const cur = await (await fetch(`${baseUrl}/api/cards/${shortId}`)).json();
+    patch = { ...patch, ifVersion: Number.isInteger(cur.version) ? cur.version : 0 };
+  }
   const res = await fetch(`${baseUrl}/api/nodes/${shortId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },

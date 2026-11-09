@@ -89,8 +89,8 @@ const HANDLERS = [
     fire: (b) => api(b, 'POST', '/api/nodes', { title: 'a page', body: 'text', createdBy: 'ada' }),
     state: async (b) => String(((await api(b, 'GET', '/api/nodes')).body?.nodes ?? (await api(b, 'GET', '/api/nodes')).body ?? []).length) },
   { name: 'wiki node update', fixture: {},
-    setup: async (b) => { const mk = (await api(b, 'POST', '/api/nodes', { title: 'a page', body: 'text', createdBy: 'ada' })).body; const id = mk?.['@id'] ?? mk?.id; assert.ok(id, `node setup: ${JSON.stringify(mk)}`); return { id }; },
-    fire: (b, { id }) => api(b, 'PATCH', `/api/nodes/${id}`, { body: 'changed text' }),
+    setup: async (b) => { const mk = (await api(b, 'POST', '/api/nodes', { title: 'a page', body: 'text', createdBy: 'ada' })).body; const id = mk?.['@id'] ?? mk?.id; assert.ok(id, `node setup: ${JSON.stringify(mk)}`); const v = (await api(b, 'GET', `/api/nodes/${encodeURIComponent(id)}`)).body?.node?.board?.version; return { id, v: Number.isInteger(v) ? v : 0 }; },
+    fire: (b, { id, v }) => api(b, 'PATCH', `/api/nodes/${id}`, { body: 'changed text', ifVersion: v }),   // #1857 step 3: the version read, so the row still reaches the corrupt-sequence check
     state: async (b, { id }) => JSON.stringify((await api(b, 'GET', `/api/cards/${id}`)).body?.description ?? null) },   // a wiki node is a card; its body is the description
   { name: 'outbox /publish of a publisher-mode obligation', fixture: PUBLISHER_OB,
     setup: async () => ({}),

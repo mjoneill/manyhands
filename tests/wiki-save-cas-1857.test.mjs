@@ -99,14 +99,25 @@ test('W5 ifVersion is CONSUMED, never reported back as an ignored field', async 
   } finally { await s.stop(); }
 });
 
-test('W6 CONTROLS (today, until a room decision): a save with no ifVersion still lands, and a parent-only reparent needs no version', async () => {
+test('W6 step 3 (owner ruling 2026-11-09 16:31Z, "mandatory"): a body save with NO ifVersion is refused 400 and writes nothing; title, parent and attachments alone need none', async () => {
   const s = await startRestServer();
   try {
     const parent = await newPage(s.baseUrl, 'parent');
     const sid = await newPage(s.baseUrl, 'v1');
-    assert.equal((await patchNode(s.baseUrl, sid, { body: 'no precondition' })).status, 200, 'opt-in: step 3 has not been decided');
-    assert.equal((await readCard(s.baseUrl, sid)).description, 'no precondition');
-    const r = await patchNode(s.baseUrl, sid, { parent: (await readCard(s.baseUrl, parent)).id });
-    assert.equal(r.status, 200, `a drag in the tree is not a body rewrite: ${JSON.stringify(r.body)}`);
+    const before = await readCard(s.baseUrl, sid);
+    const r = await patchNode(s.baseUrl, sid, { body: 'no precondition', title: 'renamed too' });
+    assert.equal(r.status, 400, `a body rewrite without the version read is refused: ${JSON.stringify(r.body)}`);
+    assert.match(r.body.error, /ifVersion/, 'and the refusal names what is missing');
+    const after = await readCard(s.baseUrl, sid);
+    assert.equal(after.description, before.description, 'nothing written: not the body');
+    assert.equal(after.title, before.title, 'and not the title sent alongside it');
+    const empty = await patchNode(s.baseUrl, sid, { body: '' });
+    assert.equal(empty.status, 400, 'an empty body is a clear and is not exempt');
+    // the controls: these do not rewrite the body, so they need no version
+    assert.equal((await patchNode(s.baseUrl, sid, { parent: (await readCard(s.baseUrl, parent)).id })).status, 200, 'a drag in the tree is not a body rewrite');
+    assert.equal((await patchNode(s.baseUrl, sid, { title: 'just a rename' })).status, 200, 'a rename is not a body rewrite');
+    // and with the version it lands, as before
+    const v = (await readCard(s.baseUrl, sid)).version ?? 0;
+    assert.equal((await patchNode(s.baseUrl, sid, { body: 'with precondition', ifVersion: v })).status, 200);
   } finally { await s.stop(); }
 });
