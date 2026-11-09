@@ -108,6 +108,9 @@ const SYSTEM_PROMPT = (prompt, registry) => `${prompt}\n\nYou extract knowledge 
   + `Each item: {block, type (${ALLOWED_TYPES.join('|')}), span, subject, predicate, object, gist}. `
   + `For predicate, use one of these registered terms when it fits: ${[...registry].sort().join(', ')}. `
   + 'When none fits, use one plain word for the relation (letters, digits, underscore or hyphen, no spaces), such as enables; it is kept as a proposed predicate. '
+  // #1866 (the owner's ruling, 2026-11-09): one concept, one name. Only subject and object are renamed; the span stays verbatim.
+  + 'When the source defines an abbreviation (for example "transformation office (TO)"), name that concept by its full form in subject and object, '
+  + 'even where the source uses only the abbreviation; never return the abbreviation as a separate subject or concept. The span stays verbatim. '
   + 'Also give the source a short title and a one-paragraph synopsis in your own words (what it is about, for someone who has not read it). '
   + 'Return {"title": "...", "synopsis": "...", "items": [...]} as JSON.';
 const ITEM_SCHEMA = Object.freeze({
