@@ -251,7 +251,7 @@ test('#1583 409: a seat edits after the tab loaded → the browser edit is refus
     const writes = recordWrites(page);
 
     // The seat moves the card on (v1 → v2) behind the tab's back.
-    const seat = await api(server.baseUrl, 'PATCH', '/api/cards/k1', { by: 'bob', title: 'alpha by the seat', description: 'seat body' });
+    const seat = await api(server.baseUrl, 'PATCH', '/api/cards/k1', { by: 'bob', title: 'alpha by the seat', description: 'seat body', ifVersion: (await (await fetch(`${server.baseUrl}/api/cards/k1`)).json()).version ?? 0 });
     assert.equal(seat.status, 200);
     assert.equal(seat.body.version, 2);
 
@@ -362,7 +362,7 @@ test('#1583 lost create reply: the POST committed but the reply was dropped → 
 
 /** The 409 set-up shared by both recovery tests: a seat edits title AND body, then the browser edits both. */
 async function conflictOnK1(page, baseUrl) {
-  const seat = await api(baseUrl, 'PATCH', '/api/cards/k1', { by: 'bob', title: 'title by the seat', description: 'body by the seat' });
+  const seat = await api(baseUrl, 'PATCH', '/api/cards/k1', { by: 'bob', title: 'title by the seat', description: 'body by the seat', ifVersion: (await (await fetch(`${baseUrl}/api/cards/k1`)).json()).version ?? 0 });
   assert.equal(seat.status, 200);
   await page.click('.card[data-id="k1"] .card-edit-btn');
   await page.waitForSelector('.card[data-id="k1"] .edit-title', { timeout: 5000 });

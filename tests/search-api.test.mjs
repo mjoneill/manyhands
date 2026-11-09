@@ -102,7 +102,7 @@ test('the second search re-embeds NOTHING; a changed card re-embeds only itself'
     await search(srv, { q: 'gate' });
     await search(srv, { q: 'gate' });
     assert.equal(emb.calls[1].input.length, 1, 'only the query on a warm index');
-    await fetch(`${srv.baseUrl}/api/cards/uuid-3`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ description: 'gate gate gate — edited' }) });
+    await fetch(`${srv.baseUrl}/api/cards/uuid-3`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ description: 'gate gate gate — edited', ifVersion: (await (await fetch(`${srv.baseUrl}/api/cards/uuid-3`)).json()).version ?? 0 }) });
     const r = await search(srv, { q: 'gate' });
     assert.equal(emb.calls[2].input.length, 2, 'the query and the one changed card');
     assert.equal(r.top.shortId, 3);

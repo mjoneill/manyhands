@@ -190,7 +190,7 @@ test('P6 the card-write line joins the executor meter\'s slow line by rid, and t
 test('P7 the line holds no card content and is bounded', { skip: SKIP, timeout: 300000 }, async () => {
   await world({ cardSlow: 300, meterSlow: 300 }, async ({ rest, base, proxy }) => {
     const secret = `SECRET-1659-${process.pid}`; const c = await mkCard(base, `title ${secret}`); proxy.state.holdUpdate = 600;
-    assert.equal((await patch(base, c.id, { title: `retitled ${secret}`, description: `body text ${secret} and more` })).status, 200);
+    assert.equal((await patch(base, c.id, { title: `retitled ${secret}`, description: `body text ${secret} and more`, ifVersion: (await (await fetch(`${base}/api/cards/${c.id}`)).json()).version ?? 0 })).status, 200);
     const ls = await waitLines(rest, 1); assert.equal(ls.length, 1);
     assert.ok(!ls[0].includes(secret), 'neither the title nor the description is in the line'); assert.ok(!/SELECT|INSERT|\{|\}/.test(ls[0]), 'and no query text or JSON');
     assert.ok(ls[0].length < 400, `bounded (${ls[0].length} chars)`);

@@ -127,7 +127,7 @@ test('#1366 served: every other composer keeps its draft by name — board commo
     assert.equal(await page.$eval('.edit-desc', (e) => e.value), 'v1 body — and my half-typed change', 'SURFACE edit description: restored over the same base');
 
     // someone else edits the card meanwhile ⇒ the stale draft is DROPPED, never restored over v2
-    const patched = await fetch(`${server.baseUrl}/api/cards/1`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ by: 'alex', description: 'v2 body by someone else' }) });
+    const patched = await fetch(`${server.baseUrl}/api/cards/1`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ by: 'alex', description: 'v2 body by someone else', ifVersion: (await (await fetch(`${server.baseUrl}/api/cards/1`)).json()).version ?? 0 }) });
     assert.equal(patched.status, 200);
     await page.reload({ waitUntil: 'networkidle0' });
     await page.waitForSelector('.board-header', { timeout: 5000 });
