@@ -98,7 +98,7 @@ function describeSlot(c) {
 }
 
 /** The most recent slot instant at or before `nowMs` for one ceremony entry. */
-function latestSlot(entry, nowMs) {
+export function latestSlot(entry, nowMs) {
   const [hh, mm] = entry.time.split(':').map(Number);
   const now = new Date(nowMs);
   const back = (now.getUTCDay() - entry.weekday + 7) % 7;

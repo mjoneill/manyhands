@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  #1858 — the ceremony bell's fallback (scripts/ceremony-fallback.mjs), OUTSIDE the MCP server that runs the bell.
+
+  Fires at minute 6 of every hour. Local :06 is UTC :06 on any whole-hour offset, so the schedule file (UTC)
+  decides whether this hour holds a slot: a schedule edit or a daylight-saving change needs no reinstall.
+  It runs from the served tree on every fire, so a deploy updates it with no restart.
+
+  TEMPLATE: fill the placeholders.
+    __NODE__     the node binary the board's jobs use (the same one com.scrumboard.rest runs)
+    __SERVE__    the served tree (the folder com.scrumboard.rest runs from)
+    __SEATS__    comma-separated seat keys the fallback post names, in order
+    __LOGS__     a folder for stdout/stderr
+
+  Dry run before loading:  CEREMONY_FALLBACK_DRYRUN=1 CEREMONY_FALLBACK_NOW=<slot + 6 min, ISO> node __SERVE__/scripts/ceremony-fallback.mjs
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.scrumboard.ceremony-fallback</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>__SERVE__/scripts/ceremony-fallback.mjs</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>SCRUM_REST_URL</key>
+    <string>http://127.0.0.1:3141</string>
+    <key>CEREMONY_FALLBACK_SEATS</key>
+    <string>__SEATS__</string>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>__SERVE__</string>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Minute</key>
+    <integer>6</integer>
+  </dict>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>__LOGS__/ceremony-fallback.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOGS__/ceremony-fallback.log</string>
+</dict>
+</plist>
