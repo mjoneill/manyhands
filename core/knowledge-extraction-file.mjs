@@ -24,8 +24,35 @@ import { ingestSource } from './knowledge-extraction.mjs';
 const ENTITY = 'https://scrumboard.local/entity/';
 const sha256 = (b) => crypto.createHash('sha256').update(b).digest('hex');
 
+/**
+ * #1854 slice 2: pdftotext breaks lines where the page did, mid-sentence, and a block is a LINE. A model quoting a whole
+ * sentence then crosses a block and fails the anchor check (the first live run: 14 of 17 first-pass spans needed a
+ * repair). Rejoin a wrapped line onto the next unless it ends a sentence, is much shorter than a typical line (a heading
+ * or a paragraph's last line), or the next line is blank or starts a new page (a form feed). A trailing hyphen or dash
+ * joins with no space. Page breaks are never crossed, so pageOfBlock is unchanged.
+ */
+export function rejoinWrapped(text) {
+  const lines = String(text).split(/\r?\n/);
+  const lens = lines.map((l) => l.trim().length).filter((n) => n > 0).sort((a, b) => a - b);
+  const typical = lens.length ? lens[Math.floor(lens.length / 2)] : 0;
+  const ends = (l) => /[.!?:;]["'”’)\]]?\s*$/.test(l);
+  const out = [];
+  for (const line of lines) {
+    const prev = out.length ? out[out.length - 1] : null;
+    const joinable = prev !== null && prev.trim() && line.trim() && !line.startsWith('\f')
+      && !ends(prev) && prev.trim().length >= 0.6 * typical;
+    if (!joinable) { out.push(line); continue; }
+    out[out.length - 1] = /[-\u2010\u2013\u2014]$/.test(prev.trimEnd()) ? prev.trimEnd() + line.trimStart() : `${prev.trimEnd()} ${line.trimStart()}`;
+  }
+  return out.join('\n');
+}
+
+/** What a format's conversion IS, versioned: a change to it is a new job for the same bytes (the text the model sees changed). */
+export const CONVERSION = Object.freeze({ '.pdf': 'pdftotext+rejoin@2' });
+const LEGACY_CONVERSION = 'pdftotext@1';   // slice 1's raw lines: its jobs keep their original ids
+
 const CONVERTERS = Object.freeze({
-  '.pdf': { from: 'application/pdf', converter: 'pdftotext', run: (file, exec) => exec('pdftotext', ['-enc', 'UTF-8', file, '-'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }) },
+  '.pdf': { from: 'application/pdf', converter: CONVERSION['.pdf'], run: (file, exec) => rejoinWrapped(exec('pdftotext', ['-enc', 'UTF-8', file, '-'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })) },
 });
 
 /** Convert a local file to text on this machine. Throws, naming the supported extensions, for anything else. */
@@ -51,8 +78,9 @@ export function pageOfBlock(blocks, i) {
 }
 
 /** The job id for a file: from its BYTES, never its path. */
-export function fileJobId(file) {
-  return `job-file-${sha256(fs.readFileSync(file))}`;
+export function fileJobId(file, conversion = CONVERSION[path.extname(file).toLowerCase()] ?? LEGACY_CONVERSION) {
+  const base = `job-file-${sha256(fs.readFileSync(file))}`;
+  return conversion === LEGACY_CONVERSION ? base : `${base}.${conversion.replace(/[^A-Za-z0-9]+/g, '-')}`;
 }
 
 /**

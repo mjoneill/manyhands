@@ -60,7 +60,7 @@ test('P1 pageOfBlock: a block after the first form feed is on page 2, and the fi
 
 test('C1 a real PDF converts on this machine to text that keeps its page breaks', { skip: !havePdftotext && 'pdftotext is not installed' }, () => {
   const got = convertFile(twoPagePdf(tmp()));
-  assert.equal(got.converter, 'pdftotext');
+  assert.equal(got.converter, 'pdftotext+rejoin@2', 'the summary names the versioned conversion that produced the text');
   assert.equal(got.from, 'application/pdf');
   assert.match(got.text, /first page says one thing/);
   const blocks = blocksOf(got.text);
@@ -158,4 +158,53 @@ test('R5 finishBody names the page beside the block when a claim carries one, an
   const body = finishBody({ url: 'x', result });
   assert.match(body, /\(empirical, page 3, block 7\)/);
   assert.match(body, /\(empirical, block 9\)/);
+});
+
+// ── slice 2: wrapped lines are rejoined before extraction, so a quoted sentence fits inside one block ──
+import { rejoinWrapped, CONVERSION } from '../core/knowledge-extraction-file.mjs';
+
+const WRAPPED = [
+  'The transformation office (TO) has a dirty secret. The very function charged with driving radical',
+  'change across the enterprise is often one of the slowest to adopt modern tools and',
+  'technologies across the board.',
+  'Short heading here',
+  'The very function responsible for driving change and improvement across the organization is',
+  'often the most resistant to updating its own tools, and the self-',
+  'service ones especially.',
+  '\fThe next page starts here and runs on across one line that is about as long as the others are',
+  'and then ends.',
+].join('\n');
+
+test('J1 a sentence wrapped across lines becomes ONE block, so a span quoting the whole sentence anchors', () => {
+  const blocks = blocksOf(rejoinWrapped(WRAPPED));
+  const i = blocks.findIndex((b) => b.includes('charged with driving radical change across the enterprise is often one of the slowest'));
+  assert.ok(i >= 0, JSON.stringify(blocks, null, 1));
+});
+
+test('J2 a short line (a heading) is not glued onto the paragraph after it, and a sentence end closes a block', () => {
+  const blocks = blocksOf(rejoinWrapped(WRAPPED));
+  assert.ok(blocks.includes('Short heading here'), JSON.stringify(blocks, null, 1));
+  assert.ok(blocks.some((b) => b.endsWith('technologies across the board.')));
+});
+
+test('J3 a line ending in a hyphen joins with no space (self-service, not "self- service")', () => {
+  assert.match(rejoinWrapped(WRAPPED), /the self-service ones especially\./);
+});
+
+test('J4 a page break is never joined across, EVEN when page 1 ends mid-sentence: the next page\'s text stays on its page', () => {
+  // page 1's last line is long and has no sentence end, so only the form-feed rule keeps page 2 off it
+  const text = ['A first line that is long enough to count as a typical wrapped line of body text here',
+    'and a last line of page one that runs on, long, with no sentence end before the page',
+    '\fThe next page starts here and runs on across one line that is about as long as the others are',
+    'and then ends.'].join('\n');
+  const blocks = blocksOf(rejoinWrapped(text));
+  const i = blocks.findIndex((b) => b.includes('The next page starts here'));
+  assert.equal(pageOfBlock(blocks, i), 2);
+  assert.ok(!blocks[i - 1].includes('next page'), 'nothing from page 2 is glued onto page 1');
+});
+
+test('J5 the job id changes with the CONVERSION, so improved text is a new job; the same file and conversion stays one job', { skip: !havePdftotext && 'pdftotext is not installed' }, () => {
+  const d = tmp(); const a = twoPagePdf(d, 'a.pdf');
+  assert.equal(fileJobId(a), fileJobId(a));
+  assert.notEqual(fileJobId(a, 'pdftotext@1'), fileJobId(a, CONVERSION['.pdf']));
 });
