@@ -119,7 +119,8 @@ apiTest('#631 createdBy cannot be rewritten through PATCH /api/nodes either', as
   const created = await (await post(baseUrl, '/api/nodes', { title: 'page', body: 'x', createdBy: 'scribe' })).json();
   const id = created.identifier;
   // try both spellings — the board name and the schema.org name
-  await patch(baseUrl, `/api/nodes/${id}`, { createdBy: 'imposter', creator: 'imposter', body: 'edited' });
+  const read = await (await fetch(`${baseUrl}/api/cards/${id}`)).json();   // #1857 step 3: a body save carries the version read
+  await patch(baseUrl, `/api/nodes/${id}`, { createdBy: 'imposter', creator: 'imposter', body: 'edited', ifVersion: Number.isInteger(read.version) ? read.version : 0 });
 
   const after = await (await fetch(`${baseUrl}/api/cards/${id}`)).json();
   assert.equal(after.createdBy, 'scribe');

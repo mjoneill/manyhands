@@ -344,10 +344,13 @@ export async function auditNodeField(baseUrl, probe) {
 
   const hasDiag = await routeHasDiagnostic(baseUrl, 'nodes');
   const card = await post(baseUrl, {});
+  // #1857 step 3 — a `body` save needs the version read, as the card probe sends it for #1132: the audit is GIVEN the
+  // precondition the way a caller is. A fresh card reads as version 0 when it carries none.
+  const read = await (await fetch(`${baseUrl}/api/cards/${card.body.shortId}`)).json();
   const res = await fetch(`${baseUrl}/api/nodes/${card.body.shortId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ [name]: wellFormed }),
+    body: JSON.stringify({ ifVersion: Number.isInteger(read.version) ? read.version : 0, [name]: wellFormed }),
   });
   const body = await res.json();
   evidence.wellFormedStatus = res.status;
