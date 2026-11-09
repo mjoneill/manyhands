@@ -95,8 +95,9 @@ test('#856 RC1 — echoing the comments projection back is SILENT (the load-bear
     // the wrong reason — an absent comparand is not an echo.
     assert.equal(got.comments.total, 1, 'setup: the projection must be non-empty');
 
-    // The ordinary client pattern: the whole card back, one field changed.
-    const r = await patch(server.baseUrl, c.shortId, { ...got, title: 'renamed', by: 'ada' });
+    // The ordinary client pattern: the whole card back, one field changed. Since #534 the echoed description is a full
+    // replace, so the echo names the version it read (decision 3464b457).
+    const r = await patch(server.baseUrl, c.shortId, { ...got, title: 'renamed', by: 'ada', ifVersion: got.version });
 
     assert.equal(r.status, 200);
     assert.equal(r.body.title, 'renamed', 'control: the one intended change landed');
