@@ -59,7 +59,7 @@ export function fileJobId(file) {
  * Run one named file through the extractor. `askedIn` is the post that asked for it (the Source's wasDerivedFrom).
  * A file whose job already has an outcome is not run again: the summary says so and nothing is paid.
  */
-export async function extractFile({ file, extractor, sourcesDir, modelKey, prompt, askedIn, exec, now = () => new Date().toISOString() }) {
+export async function extractFile({ file, extractor, sourcesDir, modelKey, prompt, askedIn, exec, report = null, now = () => new Date().toISOString() }) {
   for (const [k, v] of Object.entries({ file, extractor, sourcesDir, modelKey, askedIn })) if (!v) throw new Error(`extractFile needs ${k}`);
   if (typeof prompt !== 'string') throw new Error('extractFile needs the prompt text');
   const converted = convertFile(file, exec ? { exec } : {});   // refuses an unsupported format BEFORE any state read or model call
@@ -67,18 +67,39 @@ export async function extractFile({ file, extractor, sourcesDir, modelKey, promp
   const jobId = fileJobId(file);
   const known = await extractor.state({ jobId });
   if (known.outcome) return { file: path.basename(file), jobId, runId: known.runId, skipped: `known: ${known.outcome}` };
-  if (Array.isArray(known.next) && known.next.length) return { file: path.basename(file), jobId, skipped: `in progress: next ${known.next.join(',')}` };
+  // #1862's announcer: a start, then a finish or a failure. A report never fails the run: its errors are only counted.
+  let reportErrors = 0;
+  const tell = async (e) => {
+    if (typeof report !== 'function') return;
+    try { const r = await report(e); if (r && r.ok === false) reportErrors += 1; } catch { reportErrors += 1; }
+  };
+  const label = `${path.basename(file)} (urn:sha256:${original})`;
+  const finish = async (r, blocks) => {
+    const published = r.published.map((p) => ({ ...p, page: pageOfBlock(blocks, p.block) }));
+    await tell({ kind: 'finish', url: label, result: { ...r, published } });
+    return { file: path.basename(file), jobId, runId: r.runId, outcome: r.outcome, converter: converted.converter, from: converted.from,
+      original: `sha256:${original}`, published, rejected: r.rejected.length, ...(typeof report === 'function' ? { reportErrors } : {}) };
+  };
+  // A job that DIED mid-run has a checkpoint with a next node. The id comes from the bytes, so nothing else would ever
+  // pick it up: resume it from the checkpoint (the model is not asked again).
+  if (Array.isArray(known.next) && known.next.length) {
+    await tell({ kind: 'start', url: label, modelKey, jobId, resumed: true });
+    let r;
+    try { r = await extractor.resume({ jobId }); } catch (e) { await tell({ kind: 'fail', url: label, reason: `resume: ${e?.message ?? e}`, retry: true }); throw e; }
+    return finish(r, ingestSource({ text: converted.text }).blocks);
+  }
 
   fs.mkdirSync(sourcesDir, { recursive: true });
   const kept = path.join(sourcesDir, `${sha256(converted.text)}.txt`);
   if (!fs.existsSync(kept)) fs.writeFileSync(kept, converted.text);
   const source = ingestSource({ text: converted.text, url: `urn:sha256:${original}`, contentUrl: `file://${path.resolve(kept)}`,
     encodingFormat: 'text/plain', retrievedAt: now(), wasDerivedFrom: `${ENTITY}${askedIn}` });
-  const r = await extractor.run({ source, modelKey, prompt, jobId });
-  return {
-    file: path.basename(file), jobId, runId: r.runId, outcome: r.outcome, converter: converted.converter, from: converted.from,
-    original: `sha256:${original}`, contentUrl: source.contentUrl,
-    published: r.published.map((p) => ({ ...p, page: pageOfBlock(source.blocks, p.block) })),
-    rejected: r.rejected.length,
-  };
+  await tell({ kind: 'start', url: label, modelKey, jobId });
+  let r;
+  try { r = await extractor.run({ source, modelKey, prompt, jobId }); } catch (e) {
+    // the checkpoint survives a death mid-run: running the same file again resumes it (above)
+    await tell({ kind: 'fail', url: label, reason: `run: ${e?.message ?? e}`, retry: true });
+    throw e;
+  }
+  return { ...(await finish(r, source.blocks)), contentUrl: source.contentUrl };
 }

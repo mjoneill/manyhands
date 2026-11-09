@@ -47,7 +47,7 @@ function fakeExtractor() {
     async run({ source, jobId }) {
       runs.push({ jobId, source });
       const line = source.blocks.findIndex((b) => b.includes('second page'));
-      const r = { runId: `run-${runs.length}`, outcome: 'complete', published: [{ iri: 'urn:x:1', block: line, type: 'empirical', predicate: 'scrum:relatedTo' }], rejected: [] };
+      const r = { runId: `run-${runs.length}`, outcome: 'complete', published: [{ iri: 'urn:x:1', block: line, type: 'empirical', predicate: 'scrum:relatedTo', subject: 'concept:second-page', object: 'concept:claim' }] /* subject/object: the real extractor carries them since #1862 */, rejected: [] };
       jobs.set(jobId, r); return { ...r, jobId };
     },
   };
@@ -103,4 +103,55 @@ test('X4 a format with no local converter is refused before any model call, nami
   const f = path.join(d, 'deck.pptx'); fs.writeFileSync(f, 'PK\u0003\u0004 not text');
   await assert.rejects(extractFile({ file: f, extractor: ex, sourcesDir: d, modelKey: 'm', prompt: 'p', askedIn: 'post-1' }), /no local converter for \.pptx.*\.pdf/);
   assert.equal(ex.runs.length, 0);
+});
+
+// ── slice 1b: a file run reports itself in the room (#1862's announcer), and a job that died mid-run is RESUMED ──
+import { finishBody } from '../core/knowledge-extraction-report.mjs';
+
+function recorder({ throws = false } = {}) {
+  const events = [];
+  const report = async (e) => { events.push(e); if (throws) throw new Error('post refused'); return { ok: true }; };
+  return { events, report };
+}
+
+test('R1 a file run reports start then finish; the finish names the file and each claim\'s PAGE', { skip: !havePdftotext && 'pdftotext is not installed' }, async () => {
+  const d = tmp(); const ex = fakeExtractor(); const r = recorder();
+  await extractFile({ file: twoPagePdf(d), extractor: ex, sourcesDir: path.join(d, 's'), modelKey: 'm', prompt: 'p', askedIn: 'post-1', report: r.report });
+  assert.deepEqual(r.events.map((e) => e.kind), ['start', 'finish']);
+  assert.match(r.events[0].url, /^two\.pdf \(urn:sha256:[0-9a-f]{64}\)$/);
+  const body = finishBody(r.events[1]);
+  assert.match(body, /page 2/, body);
+});
+
+test('R2 a report that throws never fails the run', { skip: !havePdftotext && 'pdftotext is not installed' }, async () => {
+  const d = tmp(); const ex = fakeExtractor(); const r = recorder({ throws: true });
+  const out = await extractFile({ file: twoPagePdf(d), extractor: ex, sourcesDir: path.join(d, 's'), modelKey: 'm', prompt: 'p', askedIn: 'post-1', report: r.report });
+  assert.equal(out.outcome, 'complete');
+  assert.equal(out.reportErrors, 2);
+});
+
+test('R3 a run that throws is reported as a failure that the next run resumes, and the error still reaches the caller', { skip: !havePdftotext && 'pdftotext is not installed' }, async () => {
+  const d = tmp(); const ex = fakeExtractor(); const r = recorder();
+  ex.run = async () => { throw new Error('model down'); };
+  await assert.rejects(extractFile({ file: twoPagePdf(d), extractor: ex, sourcesDir: path.join(d, 's'), modelKey: 'm', prompt: 'p', askedIn: 'post-1', report: r.report }), /model down/);
+  assert.deepEqual(r.events.map((e) => [e.kind, e.retry ?? null]), [['start', null], ['fail', true]]);
+});
+
+test('R4 a job that died mid-run (a checkpoint with a next node) is RESUMED, not skipped forever, and costs no new model call', { skip: !havePdftotext && 'pdftotext is not installed' }, async () => {
+  const d = tmp(); const ex = fakeExtractor(); const r = recorder(); let resumed = 0;
+  ex.state = async ({ jobId }) => ({ jobId, outcome: null, next: ['publish'] });
+  ex.resume = async ({ jobId }) => { resumed += 1; return { jobId, runId: 'run-r', outcome: 'complete', published: [{ iri: 'urn:x', block: 0, type: 'definition', predicate: 'scrum:relatedTo' }], rejected: [] }; };
+  const out = await extractFile({ file: twoPagePdf(d), extractor: ex, sourcesDir: path.join(d, 's'), modelKey: 'm', prompt: 'p', askedIn: 'post-1', report: r.report });
+  assert.equal(resumed, 1); assert.equal(ex.runs.length, 0, 'no fresh run');
+  assert.equal(out.outcome, 'complete'); assert.equal(out.published[0].page, 1);
+  assert.deepEqual(r.events.map((e) => [e.kind, e.resumed ?? null]), [['start', true], ['finish', null]]);
+});
+
+test('R5 finishBody names the page beside the block when a claim carries one, and only the block when it does not', () => {
+  const result = { outcome: 'complete', published: [
+    { subject: 'a', object: 'b', predicate: 'scrum:relatedTo', type: 'empirical', block: 7, page: 3 },
+    { subject: 'c', object: 'd', predicate: 'scrum:relatedTo', type: 'empirical', block: 9 }] };
+  const body = finishBody({ url: 'x', result });
+  assert.match(body, /\(empirical, page 3, block 7\)/);
+  assert.match(body, /\(empirical, block 9\)/);
 });

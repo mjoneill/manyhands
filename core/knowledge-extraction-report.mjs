@@ -57,7 +57,7 @@ export function finishBody({ url, result }) {
       + ` · by type: ${fmt(tally(published.map((a) => a.type ?? 'untyped')))}`
       + ` · by predicate: ${fmt(tally(published.map((a) => a.proposedPredicate ? `${a.predicate} (proposed ${a.proposedPredicate})` : a.predicate)))}`);
     if (withEdges.length) {
-      for (const a of withEdges.slice(0, SHOWN)) lines.push(`  ${a.subject} —${a.predicate}→ ${a.object} (${a.type ?? 'untyped'}, block ${a.block})`);
+      for (const a of withEdges.slice(0, SHOWN)) lines.push(`  ${a.subject} —${a.predicate}→ ${a.object} (${a.type ?? 'untyped'}, ${Number.isInteger(a.page) ? `page ${a.page}, ` : ''}block ${a.block})`);   // #1854: a file's claim names its page
       if (withEdges.length > SHOWN) lines.push(`  …and ${withEdges.length - SHOWN} more`);
     }
   } else {

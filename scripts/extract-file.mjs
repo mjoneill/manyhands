@@ -13,12 +13,14 @@
  *   OPENROUTER_API_KEY (from the Keychain: security find-generic-password -s OPENROUTER_API_KEY -w)
  *   SCRUM_SEAT_TOKEN_FILE, SCRUM_GRAPH_EXECUTOR_URL, SCRUM_GRAPH_DATASET_ID, SCRUM_EXTRACT_SOURCES_DIR   (required)
  *   SCRUM_BOARD_URL, SCRUM_EXTRACT_MODEL_KEY, SCRUM_EXTRACT_PROMPT                                     (optional)
+ *   SCRUM_EXTRACT_REPORTS=0    do NOT post the run's start and finish to the commons (#1862; default: both are posted)
  */
 import fs from 'node:fs';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { createExtractor } from '../core/knowledge-extraction.mjs';
 import { createRestBoard, createOpenRouterModel } from '../core/knowledge-extraction-adapters.mjs';
 import { extractFile, convertFile } from '../core/knowledge-extraction-file.mjs';
+import { createAnnouncer } from '../core/knowledge-extraction-report.mjs';
 
 const ACTOR = 'extractor';
 const DEFAULT_PROMPT = 'Extract what this source says: its concepts, the claims it makes about them, and a short synopsis.';
@@ -72,7 +74,14 @@ async function main() {
   const board = createRestBoard({ baseUrl: BOARD, token, by: ACTOR });
   const model = createOpenRouterModel({ apiKey, baseUrl: entry.baseUrl, modelId: entry.model, ledger: board, by: ACTOR });
   const extractor = createExtractor({ graphClient, runs: board, model, registry, actor: ACTOR });
-  const summary = await extractFile({ file, extractor, sourcesDir: SOURCES_DIR, modelKey: MODEL_KEY, prompt: PROMPT, askedIn });
+  // #1862: the run reports itself in the room, as a link's run does. A refused post never fails the run.
+  const report = process.env.SCRUM_EXTRACT_REPORTS === '0' ? null : createAnnouncer({ post: async (body) => {
+    const r = await fetch(`${BOARD}/api/conversations`, { method: 'POST', headers: { 'content-type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ author: ACTOR, body }), signal: AbortSignal.timeout(30_000) });
+    if (r.status !== 201) throw new Error(`POST /api/conversations → ${r.status}`);
+    return r.json();
+  } });
+  const summary = await extractFile({ file, extractor, sourcesDir: SOURCES_DIR, modelKey: MODEL_KEY, prompt: PROMPT, askedIn, ...(report ? { report } : {}) });
   console.log(JSON.stringify({ at: new Date().toISOString(), modelKey: MODEL_KEY, model: entry.model, ...summary }, null, 2));
 }
 
