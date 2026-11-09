@@ -106,7 +106,7 @@ test('X4 a format with no local converter is refused before any model call, nami
 });
 
 // ── slice 1b: a file run reports itself in the room (#1862's announcer), and a job that died mid-run is RESUMED ──
-import { finishBody } from '../core/knowledge-extraction-report.mjs';
+import { finishBody, failBody } from '../core/knowledge-extraction-report.mjs';
 
 function recorder({ throws = false } = {}) {
   const events = [];
@@ -135,6 +135,10 @@ test('R3 a run that throws is reported as a failure that the next run resumes, a
   ex.run = async () => { throw new Error('model down'); };
   await assert.rejects(extractFile({ file: twoPagePdf(d), extractor: ex, sourcesDir: path.join(d, 's'), modelKey: 'm', prompt: 'p', askedIn: 'post-1', report: r.report }), /model down/);
   assert.deepEqual(r.events.map((e) => [e.kind, e.retry ?? null]), [['start', null], ['fail', true]]);
+  // nothing ticks a file: the failure says how it resumes, and the rendered post must not promise a tick
+  const fail = r.events.find((e) => e.kind === 'fail');
+  assert.match(fail.retryHow, /run the same file again/);
+  assert.doesNotMatch(failBody(fail), /tick/);
 });
 
 test('R4 a job that died mid-run (a checkpoint with a next node) is RESUMED, not skipped forever, and costs no new model call', { skip: !havePdftotext && 'pdftotext is not installed' }, async () => {

@@ -59,6 +59,9 @@ export function fileJobId(file) {
  * Run one named file through the extractor. `askedIn` is the post that asked for it (the Source's wasDerivedFrom).
  * A file whose job already has an outcome is not run again: the summary says so and nothing is paid.
  */
+// nothing ticks a file: a failed run resumes from its checkpoint only when the same bytes are run again
+const RETRY_HOW = 'run the same file again to resume';
+
 export async function extractFile({ file, extractor, sourcesDir, modelKey, prompt, askedIn, exec, report = null, now = () => new Date().toISOString() }) {
   for (const [k, v] of Object.entries({ file, extractor, sourcesDir, modelKey, askedIn })) if (!v) throw new Error(`extractFile needs ${k}`);
   if (typeof prompt !== 'string') throw new Error('extractFile needs the prompt text');
@@ -85,7 +88,7 @@ export async function extractFile({ file, extractor, sourcesDir, modelKey, promp
   if (Array.isArray(known.next) && known.next.length) {
     await tell({ kind: 'start', url: label, modelKey, jobId, resumed: true });
     let r;
-    try { r = await extractor.resume({ jobId }); } catch (e) { await tell({ kind: 'fail', url: label, reason: `resume: ${e?.message ?? e}`, retry: true }); throw e; }
+    try { r = await extractor.resume({ jobId }); } catch (e) { await tell({ kind: 'fail', url: label, reason: `resume: ${e?.message ?? e}`, retry: true, retryHow: RETRY_HOW }); throw e; }
     return finish(r, ingestSource({ text: converted.text }).blocks);
   }
 
@@ -98,7 +101,7 @@ export async function extractFile({ file, extractor, sourcesDir, modelKey, promp
   let r;
   try { r = await extractor.run({ source, modelKey, prompt, jobId }); } catch (e) {
     // the checkpoint survives a death mid-run: running the same file again resumes it (above)
-    await tell({ kind: 'fail', url: label, reason: `run: ${e?.message ?? e}`, retry: true });
+    await tell({ kind: 'fail', url: label, reason: `run: ${e?.message ?? e}`, retry: true, retryHow: RETRY_HOW });
     throw e;
   }
   return { ...(await finish(r, source.blocks)), contentUrl: source.contentUrl };

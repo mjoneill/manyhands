@@ -101,6 +101,10 @@ test('B4: the fail post names the source, the reason, and whether it will be ret
   assert.ok(b.includes(URL1)); assert.ok(b.includes('fetch: http 404'));
   assert.match(b, /not retried/);
   assert.match(failBody({ url: URL1, reason: 'run: boom', retry: true }), /next tick resumes/);
+  // #1854: a file is not ticked, so the caller says HOW it is retried; the tick wording is only the default.
+  const f = failBody({ url: URL1, reason: 'run: boom', retry: true, retryHow: 'run the same file again to resume' });
+  assert.match(f, /still pending: run the same file again to resume/);
+  assert.doesNotMatch(f, /tick/);
 });
 
 test('B5: the announcer never throws; a failed post comes back as an error', async () => {

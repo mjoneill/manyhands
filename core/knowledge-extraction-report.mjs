@@ -78,8 +78,10 @@ export function finishBody({ url, result }) {
   return lines.join('\n');
 }
 
-export function failBody({ url, reason, retry = false }) {
-  return `❌ extraction failed: ${url}\n${reason}\n${retry ? 'still pending: the next tick resumes it from its checkpoint.' : 'not retried until someone shares it again.'} (#1862)`;
+/** `retryHow` says how a retry happens when it is not the tick (a file is resumed only by running it again, #1854). */
+export function failBody({ url, reason, retry = false, retryHow = null }) {
+  const pending = `still pending: ${retryHow || 'the next tick resumes it from its checkpoint'}.`;
+  return `❌ extraction failed: ${url}\n${reason}\n${retry ? pending : 'not retried until someone shares it again.'} (#1862)`;
 }
 
 const BODIES = { start: startBody, finish: finishBody, fail: failBody };
