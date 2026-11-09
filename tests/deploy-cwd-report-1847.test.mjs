@@ -11,12 +11,12 @@
  *
  * THE SEAM: a fixture clone (as #1831's test) whose `scripts/serve-cwd-check.mjs` is a FAKE that records its argv and
  * prints a chosen table with a chosen exit code; the commons post goes to a capture server named by DEPLOY_BOARD_API,
- * never to a real board. Covered: the `export` path. Not covered: the full deploy and --no-restart paths, which need
+ * never to a real board. R6 runs the REAL check with only launchctl/lsof faked. Covered: the `export` path. Not covered: the full deploy and --no-restart paths, which need
  * launchctl and a pull; they call the same function.
  */
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, readFileSync, rmSync, existsSync, statSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import http from 'node:http';
@@ -67,10 +67,10 @@ async function captureBoard() {
 }
 
 /** `deploy.sh export` ASYNC (the capture server must answer while it runs). */
-function deploy(fx, n, boardUrl) {
+function deploy(fx, n, boardUrl, pathPrefix) {
   writeFileSync(join(fx.clone, 'release.txt'), `${n}\n`); commit(fx.clone, `release ${n}`);
   return new Promise((resolve) => {
-    const c = spawn('sh', [DEPLOY, 'export'], { env: { PATH: process.env.PATH, DEPLOY_CLONE: fx.clone, DEPLOY_SERVE: fx.serve, DEPLOY_BOARD_API: boardUrl } });
+    const c = spawn('sh', [DEPLOY, 'export'], { env: { PATH: pathPrefix ? `${pathPrefix}:${process.env.PATH}` : process.env.PATH, DEPLOY_CLONE: fx.clone, DEPLOY_SERVE: fx.serve, DEPLOY_BOARD_API: boardUrl } });
     let out = ''; let err = '';
     c.stdout.on('data', (d) => { out += d; }); c.stderr.on('data', (d) => { err += d; });
     const t = setTimeout(() => c.kill('SIGKILL'), 60000);
@@ -133,6 +133,29 @@ test('R4 NO CHECK SCRIPT IN THE CLONE: UNMEASURED, no post; the deploy still suc
     assert.ok(!existsSync(fx.argvFile));
     assert.match(r.out, /UNMEASURED/, r.out);
     assert.equal(board.posts.length, 0);
+  } finally { await board.close(); }
+});
+
+test('R6 THE REAL CHECK, NOT A COPY OF ITS FORMAT (#1847 review): the actual serve-cwd-check runs in the fixture, a fake launchctl/lsof reports one job whose cwd is the folder the swap just made `.previous`, and the deploy names THAT job', async () => {
+  // R1's fake prints serve-cwd-check's line format by hand, so a format change would leave R1 green while the deploy
+  // named nobody. Here only the OS is faked: launchctl lists one job, lsof says its cwd is the old serve folder's inode.
+  const fx = fixtureClone(null);
+  copyFileSync(fileURLToPath(new URL('../scripts/serve-cwd-check.mjs', import.meta.url)), join(fx.clone, 'scripts', 'serve-cwd-check.mjs'));
+  const board = await captureBoard();
+  try {
+    const r1 = await deploy(fx, 1, board.url);   // serve exists; no .previous yet
+    assert.equal(r1.status, 0, r1.out);
+    const oldServeInode = statSync(fx.serve).ino;   // the swap RENAMES serve → .previous, so this inode is .previous after deploy 2
+    const bin = join(fx.clone, '..', 'fakebin'); mkdirSync(bin);
+    writeFileSync(join(bin, 'launchctl'), '#!/bin/sh\nprintf "PID\\tStatus\\tLabel\\n4242\\t0\\tcom.scrumboard.fixture-job\\n"\n');
+    writeFileSync(join(bin, 'lsof'), `#!/bin/sh\ncase " $* " in *" -d cwd "*) printf "p4242\\nfcwd\\ni${oldServeInode}\\nn${join(fx.serve)}\\n"; exit 0 ;; esac\nexec /usr/sbin/lsof "$@"\n`);
+    chmodSync(join(bin, 'launchctl'), 0o755); chmodSync(join(bin, 'lsof'), 0o755);
+    const r2 = await deploy(fx, 2, board.url, bin);
+    assert.equal(r2.status, 0, r2.out);
+    assert.ok(existsSync(`${fx.serve}.previous`) && statSync(`${fx.serve}.previous`).ino === oldServeInode, 'CONTROL: the swap made the old serve folder `.previous` (same inode)');
+    assert.match(r2.out, /previous com\.scrumboard\.fixture-job/, `the REAL check classified the job as previous\n${r2.out}`);
+    assert.equal(board.posts.length, 1, `one commons post (${JSON.stringify(board.posts)})`);
+    assert.match(board.posts[0].body.body, /fixture-job/, 'naming the job the real check found');
   } finally { await board.close(); }
 });
 
