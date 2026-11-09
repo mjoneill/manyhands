@@ -307,5 +307,8 @@ export function createExtractor({ graphClient, runs, model, registry, actor = 'e
     return { jobId, runId: v.runId ?? null, outcome: v.result?.outcome ?? v.outcome ?? null, next: snap?.next ?? [], values: v };
   }
 
-  return { intentionFor, run, resume, state };
+  /** #1866: the version of what the model is TOLD for this prompt, registry included: the hash the procedure version records (#1844). */
+  const promptVersion = (prompt) => sha256(SYSTEM_PROMPT(prompt, registry));
+
+  return { intentionFor, run, resume, state, promptVersion };
 }

@@ -489,6 +489,19 @@ test('#1866 R12d — the model is told to name a concept by the full form its so
   assert.match(system, /never .*separate (subject|concept)/i, 'the short form is not minted as its own concept');
 });
 
+test('#1866 R2c — promptVersion(prompt) is the hash the procedure version records: what the model is told, registry included', { skip: SKIP }, async () => {
+  const src = ingestSource({ text: FIXTURE, url: FIXTURE_URL });
+  const runs = fakeRuns();
+  const model = fakeModel([reply(...goodItems())]);
+  const { extractor } = extractorWith({ model, runs });
+  await extractor.run({ source: src, modelKey: 'fake-a', prompt: 'extract v1' });
+  const sent = model.bodies[0].messages.find((m) => m.role === 'system').content;
+  assert.equal(extractor.promptVersion('extract v1'), sha256(sent));
+  assert.notEqual(extractor.promptVersion('extract v2'), extractor.promptVersion('extract v1'));
+  const wider = extractorWith({ model: fakeModel([]), runs, registry: new Set([...REGISTRY, 'scrum:addedAfterwards']) }).extractor;
+  assert.notEqual(wider.promptVersion('extract v1'), extractor.promptVersion('extract v1'), 'one more registered term is a different version');
+});
+
 // ── #1844: the procedure version names what the model was TOLD, not only the short operator prompt ────────────────
 test('#1844 R2b — the version\'s prompt hash is the system message actually sent: same prompt + registry → one version; one more registered term → a new version', { skip: SKIP }, async () => {
   const src = ingestSource({ text: FIXTURE, url: FIXTURE_URL });

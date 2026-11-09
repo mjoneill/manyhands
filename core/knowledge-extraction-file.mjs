@@ -8,6 +8,7 @@
  *
  * Three things are new:
  *   - the job id comes from the ORIGINAL file's bytes, so a renamed copy is the same job and is never paid for twice;
+ *     (#1866: plus its conversion and the version of what the model is told, so a changed prompt is a new job);
  *   - the Source's url is `urn:sha256:<original>`: it names the file that was asked about, not the converted text;
  *   - each published claim is cited by PAGE. pdftotext ends every page with a form feed, and blocks are lines, so a
  *     block's page is one more than the form feeds before its text. (Publishing the page into the graph is a later
@@ -95,7 +96,10 @@ export async function extractFile({ file, extractor, sourcesDir, modelKey, promp
   if (typeof prompt !== 'string') throw new Error('extractFile needs the prompt text');
   const converted = convertFile(file, exec ? { exec } : {});   // refuses an unsupported format BEFORE any state read or model call
   const original = sha256(fs.readFileSync(file));
-  const jobId = fileJobId(file);
+  // #1866: the job is the file's bytes, its conversion AND what the model is told. A changed prompt or registry is a new
+  // extraction (and a new paid run); the same one is the same job and is never paid for twice.
+  if (typeof extractor.promptVersion !== 'function') throw new Error('extractFile needs an extractor with promptVersion(prompt): the job id names the prompt it ran');
+  const jobId = `${fileJobId(file)}.p${String(extractor.promptVersion(prompt)).replace(/[^A-Za-z0-9]+/g, '').slice(0, 12)}`;
   const known = await extractor.state({ jobId });
   if (known.outcome) return { file: path.basename(file), jobId, runId: known.runId, skipped: `known: ${known.outcome}` };
   // #1862's announcer: a start, then a finish or a failure. A report never fails the run: its errors are only counted.

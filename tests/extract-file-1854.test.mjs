@@ -43,6 +43,7 @@ function fakeExtractor() {
   const jobs = new Map(); const runs = [];
   return {
     runs,
+    promptVersion: (prompt) => `v-${Buffer.from(String(prompt)).toString('hex').slice(0, 12)}`,   // the real one hashes the system message (#1866)
     async state({ jobId }) { const j = jobs.get(jobId); return { jobId, outcome: j?.outcome ?? null, runId: j?.runId ?? null, next: [] }; },
     async run({ source, jobId }) {
       runs.push({ jobId, source });
@@ -207,4 +208,22 @@ test('J5 the job id changes with the CONVERSION, so improved text is a new job; 
   const d = tmp(); const a = twoPagePdf(d, 'a.pdf');
   assert.equal(fileJobId(a), fileJobId(a));
   assert.notEqual(fileJobId(a, 'pdftotext@1'), fileJobId(a, CONVERSION['.pdf']));
+});
+
+test('#1866 J-P1 a CHANGED prompt is a new job: the same file runs again (each run is a paid call, so only a real change pays)', { skip: !havePdftotext && 'pdftotext is not installed' }, async () => {
+  const d = tmp(); const ex = fakeExtractor(); const file = twoPagePdf(d);
+  const args = { file, extractor: ex, sourcesDir: path.join(d, 'sources'), modelKey: 'm', askedIn: 'post-1' };
+  const a = await extractFile({ ...args, prompt: 'p' });
+  const again = await extractFile({ ...args, prompt: 'p' });
+  const b = await extractFile({ ...args, prompt: 'p, naming full forms' });
+  assert.equal(again.skipped, 'known: complete', 'the same prompt is the same job: not paid twice');
+  assert.equal(ex.runs.length, 2, 'two runs: one per prompt');
+  assert.notEqual(a.jobId, b.jobId);
+  assert.ok(b.jobId.startsWith(fileJobId(file)), `the job id still begins with the file's bytes and conversion: ${b.jobId}`);
+});
+
+test('#1866 J-P2 an extractor that cannot name its prompt version is refused before any run', { skip: !havePdftotext && 'pdftotext is not installed' }, async () => {
+  const d = tmp(); const ex = fakeExtractor(); delete ex.promptVersion;
+  await assert.rejects(extractFile({ file: twoPagePdf(d), extractor: ex, sourcesDir: path.join(d, 'sources'), modelKey: 'm', prompt: 'p', askedIn: 'post-1' }), /promptVersion/);
+  assert.equal(ex.runs.length, 0);
 });
