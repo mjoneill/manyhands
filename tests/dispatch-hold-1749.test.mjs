@@ -861,6 +861,8 @@ test('#1749 A8 (D12 CONTROL) an obligation retired by a real --dispose-obligatio
     assert.deepEqual(o.all.integrity, [], `D12 CONTROL: not in integrity (${o.all.text.slice(0, 300)})`);
     assert.deepEqual(o.all.entries, [[r.snap.obligationId, 'retired']], 'D12 CONTROL: the unfiltered listing reads it retired');
     assert.deepEqual([o.pending.integrity, o.pending.entries], [[], []], 'D12 CONTROL: ?status=pending neither lists it nor flags it');
+    const sum = await s.call('GET', '/api/outbox/summary');
+    assert.equal(sum.json?.integrityFailures, 0, `D12 CONTROL: the audit's summary finds no fault in a genuine retire (${sum.text.slice(0, 400)})`);
   });
 });
 
@@ -901,6 +903,11 @@ for (const [tag, what, plant] of [
       assert.equal(o.all.integrity.length, 1, `D12${tag}: GET /api/outbox lists the origin in integrity (entries ${JSON.stringify(o.all.entries)}; ${o.all.text.slice(0, 300)})`);
       assert.deepEqual(o.all.entries, [], 'D12: and lists no entry for it as settled');
       assert.equal(o.pending.integrity.length, 1, `D12${tag}: GET /api/outbox?status=pending lists it in integrity too (${o.pending.text.slice(0, 300)})`);
+      // #1751: the publisher's AUDIT reads the summary, so the summary must catch the forgery too. Its presence check cannot (a
+      // record naming the obligation may exist); the deep read of every retired obligation's origin is what does.
+      const sum = await s.call('GET', '/api/outbox/summary');
+      assert.equal(sum.status, 200, `PRECONDITION: GET /api/outbox/summary answers (${sum.text.slice(0, 200)})`);
+      assert.ok(sum.json.integrityFailures >= 1, `D12${tag}: the audit's summary counts it as an integrity failure (${sum.text.slice(0, 400)})`);
     });
   });
 }

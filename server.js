@@ -11811,7 +11811,18 @@ async function xoListOutbox({ status, mutationId } = {}) {
       for (const m of slice) if (held.has(ORIGIN_TERMS.preparedSubject(m).replace(/^<|>$/g, ''))) prepared.add(m);
     }
   }
-  const mids = [...new Set(R.records.filter((x) => x.type === 'Origin' && x.mutationId && (!mutationId || x.mutationId === mutationId) && !(skipImported && x.imported && !prepared.has(x.mutationId))).map((x) => x.mutationId))];
+  // #1751 part 3 — a pending scan deep-reads ONLY the origins the summary calls unsettled. An entry's status is its stored
+  // obligation status (xoOrigin), the same field the summary reads, so an origin whose every obligation is in one recognised
+  // settled state cannot contribute a pending entry. Reading every origin and filtering afterwards cost 14.9 s on the live
+  // store for ZERO pending (2026-11-09), against the publisher's 15 s abort. The summary failing is UNAVAILABLE, never "none".
+  let unsettled = null;
+  if (status === 'pending' && !mutationId) {
+    const { outboxSummary } = await import('./core/outbox-summary.mjs');
+    const s = await outboxSummary(ANNOUNCE_EXECUTOR);
+    if (!s.ok) throw new OutboxUnavailable(s.reason);
+    unsettled = new Set(s.unsettled);
+  }
+  const mids = [...new Set(R.records.filter((x) => x.type === 'Origin' && x.mutationId && (!mutationId || x.mutationId === mutationId) && !(skipImported && x.imported && !prepared.has(x.mutationId)) && (!unsettled || unsettled.has(x.mutationId))).map((x) => x.mutationId))];
   const origins = [], entries = [], integrity = [];
   for (const mid of mids) {
     const o = await xoOrigin(mid);

@@ -120,7 +120,11 @@ test('S4 a retired obligation with no DispositionRecord is flagged; one WITH its
     const s = await M.outboxSummary(client);
     assert.deepEqual(s.failures.retiredWithoutDisposition, [{ obligationId: 'm-e:claim' }]);
     assert.equal(s.counts.byStatus.retired, 2);
-    assert.ok(!s.unsettled.includes('m-e') && !s.unsettled.includes('m-f'), 'retired is settled');
+    // a retired obligation always gets the deep check, record or no record: the summary sees only that SOME record names it,
+    // and only readCommittedOrigin can tell a forged one (wrong decision, wrong payload hash, another obligation's record:
+    // #1749 A8 D12a–e). Retired is rare, so this costs a handful of reads, not one per origin.
+    assert.ok(s.unsettled.includes('m-e') && s.unsettled.includes('m-f'), `a retired obligation's origin gets the deep check (${JSON.stringify(s.unsettled)})`);
+    assert.ok(!s.unsettled.includes('m-a'), 'a published one does not');
   });
 });
 

@@ -389,6 +389,12 @@ test('#1629 L2 PUBLICATION (mode off, file unreadable): a claim\'s announcement 
     assert.equal(sum.json.counts.origins, all.json.origins.length + (all.json.integrity?.length ?? 0), 'and the same origins');
     assert.equal(sum.json.integrityFailures, 0, `a clean store has no integrity failure (${JSON.stringify(sum.json.failures)})`);
     assert.deepEqual(sum.json.unsettled, [], 'every obligation is published, so nothing needs the deep check');
+    // #1751 part 3: the publisher's pending scan reads only the origins the summary calls unsettled. Before this it read
+    // every stored origin and filtered afterwards: 14.9 s live for ZERO pending, against the publisher's 15 s abort.
+    const pend = await s.call('GET', '/api/outbox?status=pending');
+    assert.equal(pend.status, 200, `the pending scan answers (${pend.text.slice(0, 300)})`);
+    assert.deepEqual(entriesOf(pend.json), [], 'nothing is pending');
+    assert.deepEqual(pend.json.origins, [], `a fully published origin is not read by a pending scan (${pend.text.slice(0, 300)})`);
     await documentUntouched(s, 'off', 'L2');
   });
 });
