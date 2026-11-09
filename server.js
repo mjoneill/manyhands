@@ -136,6 +136,7 @@ import { configureIdentities, usingDefaultRoster } from './core/identity.mjs';
 import { hostAllowed, parseAllowedHosts, refuseHost } from './core/host-guard.mjs';
 import { agentConstraints, unseenLayers } from './core/agent-constraints.mjs';   // #1350
 import { assembleMemories } from './core/memory-assemble.mjs';   // #1406
+import { appliedUnconfirmed } from './core/applied-read-back.mjs';   // #1868
 
 // #1582 — deliveries and model calls live in the graph. Read once, at boot; the refusal without the conversations unit
 // is beside that unit's own block (C7′).
@@ -3396,9 +3397,15 @@ async function updateMemoryOnGraph(req, res, id, body, flags) {
       ...(historyNativeOn() && versionAfter > 0 ? { history: { versionAfter } } : {}) });
     if (r.outcome === 'PRECONDITION_FAILED') continue;
     if (r.outcome !== 'APPLIED') return logbornWriteFailed(res, r);
-    let after;
-    try { after = await LOGBORN.readMemory(id); } catch (e) { if (graphRefused(res, e)) return; throw e; }
-    if (!after) throw new Error(`memory ${id}: the write was APPLIED but the memory is not readable from the graph store`);
+    // #1868 — the write is APPLIED from here on, so nothing below may answer 5xx: a failed
+    // read-back answers 200 with the composed memory and says the read was unconfirmed.
+    let after = null, readFailure = null;
+    try { after = await LOGBORN.readMemory(id); } catch (e) { readFailure = e?.message || String(e); }
+    if (!after) {
+      readFailure ??= `memory ${id} is not readable from the graph store after the write`;
+      console.error(`[#1868 applied-unconfirmed] ${JSON.stringify({ at: new Date().toISOString(), opId: r.opId ?? null, memory: id, reason: readFailure })}`);
+      return sendJSON(res, 200, appliedUnconfirmed(memoryToWire(composed.identity, [...cur.versions, ...composed.added]), { opId: r.opId, reason: readFailure }));
+    }
     return sendJSON(res, 200, memoryToWire(after.identity, after.versions));
   }
   return contended(res, `memory ${id}`);

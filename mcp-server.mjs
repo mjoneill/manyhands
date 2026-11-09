@@ -118,6 +118,7 @@ import { deliveryIdentity } from './core/cursor-service.mjs';
 import { createTokenRingEngine } from './core/token-ring-engine.mjs';
 import { residentSlotShadow } from './core/ring-shadow.mjs';   // #1513 — log-only
 import { hostAllowed, parseAllowedHosts, refuseHost } from './core/host-guard.mjs';
+import { appliedReadBackNotice } from './core/applied-read-back.mjs';   // #1868
 
 // #359 — timestamp every log line. The 2026-07-09 empty-response incident could
 // not even be LOCATED in this log afterward: bare console.log carries no clock,
@@ -1794,7 +1795,10 @@ function buildMcpServer() {
     if (priority !== undefined) updates.priority = priority;   // #971 — null unsets
     if (ifVersion !== undefined) updates.ifVersion = ifVersion;
     if (by !== undefined) updates.by = by;
-    return jsonResult(await apiCall('PATCH', `/api/memories/${encodeURIComponent(id)}`, updates));
+    const result = await apiCall('PATCH', `/api/memories/${encodeURIComponent(id)}`, updates);
+    // #1868 — applied, read-back unconfirmed: a distinct NON-error, so the caller re-reads instead of retrying
+    const notice = appliedReadBackNotice(result);
+    return notice ? { content: [{ type: 'text', text: notice }, ...jsonResult(result).content] } : jsonResult(result);
   });
 
   mcp.registerTool('memory_list', {
