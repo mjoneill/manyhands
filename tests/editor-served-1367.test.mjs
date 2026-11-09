@@ -15,6 +15,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeBoardFixture, withBrowserServer } from './helpers/harness.mjs';
 import { openPreview } from './helpers/preview-ready.mjs';   // #1445
+import { clickWhenOnTop } from './helpers/click-on-top.mjs';   // #1674 — one helper, checks the click REACHED the target
 
 const ts = '2026-09-14T00:00:00.000Z';
 
@@ -22,16 +23,6 @@ const ts = '2026-09-14T00:00:00.000Z';
 // overflow hidden, so a click dispatched mid-slide lands on the board behind
 // the clipped button — the same class as #1131's seven reds in commons-e2e.
 // Click only once the button is the element under its own centre.
-async function clickWhenOnTop(page, selector) {
-  await page.waitForFunction((sel) => {
-    const b = document.querySelector(sel);
-    if (!b) return false;
-    b.scrollIntoView({ block: 'nearest' });
-    const r = b.getBoundingClientRect();
-    return document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2) === b;
-  }, { timeout: 5000 }, selector);
-  await page.click(selector);
-}
 const card = (shortId, title) => ({
   id: `c${shortId}`, shortId, title, description: '', type: 'task', column: 'backlog', order: shortId,
   assignees: ['unassigned'], labels: [], priority: null, createdAt: ts, updatedAt: ts,
