@@ -11,6 +11,10 @@
  *   S2  mismatch: an origin whose slotCount differs from the number of its obligations (non-zero)
  *   S3  missing: an origin with no obligation at all
  *   S4  retired without its DispositionRecord (review post 51944); its control, a retired obligation WITH one, is not flagged
+ *   S7  an obligation with NO status, or a status outside pending/published/blocked/retired, is a failure and is not settled
+ *       (review post 51949: readCommittedOrigin refuses it, and a settled-looking record must not hide it)
+ *   S8  a field with two values on one record (an Origin with two slotCounts; an Obligation with two statuses) is a
+ *       cardinality failure, and the record is counted ONCE (review post 51949)
  *   S5  the summary costs a FIXED number of executor queries, not one per origin (the reason for #1751)
  */
 import { test, after } from 'node:test';
@@ -80,7 +84,7 @@ test('S0 CONTROL: a clean world has no structural failure, right counts, and onl
   await world({ bk: CLEAN }, async ({ client }) => {
     const s = await M.outboxSummary(client);
     assert.equal(s.ok, true, JSON.stringify(s));
-    assert.deepEqual(kinds(s), { orphan: 0, mismatch: 0, missing: 0, retiredWithoutDisposition: 0 });
+    assert.deepEqual(kinds(s), { orphan: 0, mismatch: 0, missing: 0, retiredWithoutDisposition: 0, badStatus: 0, cardinality: 0 });
     assert.deepEqual(s.counts, { origins: 2, obligations: 3, byStatus: { pending: 1, published: 2 } });
     assert.deepEqual(s.unsettled, ['m-b']);
   });
@@ -117,6 +121,28 @@ test('S4 a retired obligation with no DispositionRecord is flagged; one WITH its
     assert.deepEqual(s.failures.retiredWithoutDisposition, [{ obligationId: 'm-e:claim' }]);
     assert.equal(s.counts.byStatus.retired, 2);
     assert.ok(!s.unsettled.includes('m-e') && !s.unsettled.includes('m-f'), 'retired is settled');
+  });
+});
+
+test('S7 an obligation with no status, or an unknown one, is a badStatus failure and is never treated as settled', T, async () => {
+  const noStatus = `${ORI('obligation/m-g/claim')} a ${ORI('Obligation')} ; ${ORI('obligationId')} ${str('m-g:claim')} .`;
+  await world({ bk: [...CLEAN, originTriples('m-g', 1), noStatus, originTriples('m-h', 1), obligationTriples('m-h', 'claim', 'mislaid')] }, async ({ client }) => {
+    const s = await M.outboxSummary(client);
+    assert.deepEqual(s.failures.badStatus, [{ obligationId: 'm-g:claim', status: null }, { obligationId: 'm-h:claim', status: 'mislaid' }]);
+    assert.ok(s.unsettled.includes('m-g') && s.unsettled.includes('m-h'), 'an origin with an unreadable status gets the deep check');
+  });
+});
+
+test('S8 two values for one field on one record is a cardinality failure, and the record is counted once', T, async () => {
+  const twoSlotCounts = `${ORI('origin/m-i')} ${ORI('slotCount')} ${int(2)} .`;   // m-i also gets slotCount 1 below
+  const twoStatuses = `${ORI('obligation/m-i/claim')} ${ORI('status')} "pending" .`;   // and its obligation also reads published
+  await world({ bk: [...CLEAN, originTriples('m-i', 1), obligationTriples('m-i', 'claim', 'published'), twoSlotCounts, twoStatuses] }, async ({ client }) => {
+    const s = await M.outboxSummary(client);
+    const fields = s.failures.cardinality.map((x) => `${x.subject.split('/').slice(-2).join('/')} ${x.field} ${x.values.length}`).sort();
+    assert.deepEqual(fields, ['m-i/claim status 2', 'origin/m-i slotCount 2']);
+    assert.equal(s.counts.origins, 3, 'm-a, m-b and m-i, each once');
+    assert.equal(s.counts.obligations, 4, 'the obligation with two statuses is ONE obligation');
+    assert.ok(s.unsettled.includes('m-i'), 'an ambiguous record gets the deep check');
   });
 });
 
