@@ -98,6 +98,10 @@ jobs:
           python-version: '3.12'
       - name: Graph executor venv (pinned requirements)
         run: python -m venv graph-executor/.venv && graph-executor/.venv/bin/pip install -r graph-executor/requirements.txt
+      # #1854: extraction converts files on the machine itself, never online, so its converter tests need the
+      # converters here: pdftotext (poppler-utils). Without it those rows skip, and a skip that is not a platform skip is refused.
+      - name: Local file converters (pdftotext)
+        run: sudo apt-get update -q && sudo apt-get install -y -q poppler-utils && pdftotext -v
       - name: Run the server suite
         run: |
           set +e
