@@ -36,6 +36,7 @@ import path from 'node:path';
 import http from 'node:http';
 import { makeBoardFixture, startRestServer } from './helpers/harness.mjs';
 import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-executor-proc.mjs';
+import { settleOne, bodyIncludes, assertOneObligation, publishNow } from './helpers/announcements.mjs';   // #1845 — the shared #1721 contract
 
 const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)';
 const UNIT_ENV = 'SCRUM_GRAPH_UNIT_CARDS';
@@ -58,6 +59,7 @@ async function startProxy(execUrl) {
   const p = {};
   p.server = http.createServer(async (req, res) => {
     const chunks = []; for await (const c of req) chunks.push(c);
+    if (p.refuse && p.refuse(Buffer.concat(chunks).toString('utf8'))) { try { req.socket.destroy(); } catch { /* gone */ } return; }   // #1845: hold ONE kind of write
     const fwd = { ...req.headers }; delete fwd.host; delete fwd['content-length']; delete fwd.connection;
     try { const f = await fetch(`${execUrl}${req.url}`, { method: req.method, headers: fwd, ...(req.method === 'POST' ? { body: Buffer.concat(chunks) } : {}) }); const t = await f.text(); res.statusCode = f.status; res.end(t); } catch { try { req.socket.destroy(); } catch { /* gone */ } }
   });
@@ -104,7 +106,7 @@ async function cardScript(base, tag) {
   return out;
 }
 const announcements = async (base, sid) => ((await api(base, 'GET', '/api/conversations?limit=300')).body ?? []).filter((x) => String(x.body ?? '').includes(`claimed #${sid}`));
-async function facts(base, tag) {
+async function facts(base, tag, { unitOn = false } = {}) {
   const f = {};
   const c = (await newCard(base, `${tag} race`)).body; const v0 = c.version;
   const two = await Promise.all([1, 2].map((n) => api(base, 'PATCH', `/api/cards/${c.id}`, { by: n === 1 ? 'ada' : 'gizmo', title: `${tag} race ${n}`, ifVersion: v0 })));
@@ -117,6 +119,9 @@ async function facts(base, tag) {
   const cl = await Promise.all(['ada', 'gizmo'].map((by) => api(base, 'POST', `/api/cards/${k.id}/claim`, { by }).then((r) => ({ by, ...r }))));
   f.claimStatuses = cl.map((r) => r.status).sort(); const winner = cl.find((r) => r.status === 200)?.by; const loser = cl.find((r) => r.status !== 200);
   f.holder = (await api(base, 'GET', `/api/cards/${k.id}`)).body.claimedBy; f.winner = winner; f.loserNamesHolder = !!loser && JSON.stringify(loser.body).includes(winner ?? '\u0000');
+  // #1845 — unit on, the 200 promises the OBLIGATION; its post is published after the answer, un-awaited (#1574 1b). Assert exactly one,
+  // drive it, then count. Unit off writes the post in the same document write, so the posts are counted directly (C0).
+  if (unitOn) f.obligationBody = String((await settleOne(base, bodyIncludes(`claimed #${k.shortId}`), { names: [`#${k.shortId}`, winner ?? '\u0000'] }, 'C4 unit on')).obligation.payload?.body ?? '');
   f.announcements = (await announcements(base, k.shortId)).map((x) => String(x.body)); f.winnerAnnounced = f.announcements.filter((b) => winner && b.includes(winner)).length;
   f.releaseByOther = (await api(base, 'DELETE', `/api/cards/${k.id}/claim`, { by: winner === 'ada' ? 'gizmo' : 'ada' })).status;
   const sixCreates = await Promise.all([1, 2, 3, 4, 5, 6].map((n) => newCard(base, `${tag} sid ${n}`)));
@@ -160,7 +165,28 @@ test('C2 THE GRAPH HOLDS IT, THE FILE DOES NOT: a card created and edited throug
 });
 
 test('C3 + C4 + C6 THE DOCUMENT\'S FREE GUARANTEES, EARNED: ifVersion races, no lost appends, claim and announcement as one, consecutive shortIds (unit ON)', { skip: SKIP, timeout: 400000 }, async () => {
-  await unitOn(async ({ base }) => { expectFacts(await facts(base, ALNUM())); });
+  await unitOn(async ({ base }) => { expectFacts(await facts(base, ALNUM(), { unitOn: true })); });
+});
+
+test('C4h THE ANNOUNCEMENT RACE, MADE DETERMINISTIC (#1845): the inline publish held, the claim still answers 200 with ONE pending obligation and NO post; driven, exactly ONE post names the winner', { skip: SKIP, timeout: 300000 }, async () => {
+  await unitOn(async ({ base, proxy }) => {
+    const tag = ALNUM(); const k = (await newCard(base, `${tag} held claim`)).body; const sid = k.shortId;
+    // only the announcement's POST write: the claim's own write also carries the frozen text (the obligation), but only a post carries a postSeq triple
+    proxy.refuse = (body) => body.includes(`claimed #${sid}`) && body.includes('https://scrumboard.local/ns#postSeq');
+    try {
+      const r = await api(base, 'POST', `/api/cards/${k.id}/claim`, { by: 'ada' });
+      assert.equal(r.status, 200, `the claim does not wait on its announcement (${r.status} ${r.text.slice(0, 160)})`);
+      const ob = await assertOneObligation(base, bodyIncludes(`claimed #${sid}`), { names: [`#${sid}`, 'ada'] }, 'held');
+      assert.equal(ob.status, 'pending', 'held: the obligation is PENDING (the inline publish could not land)');
+      assert.equal((await announcements(base, sid)).length, 0, 'held: and no post exists yet (this is the window the flake fell into)');
+    } finally { proxy.refuse = null; }
+    const ob = await assertOneObligation(base, bodyIncludes(`claimed #${sid}`), { names: [`#${sid}`] }, 'lifted');
+    const pub = await publishNow(base, ob.obligationId, 'lifted');
+    const posts = await announcements(base, sid);
+    assert.equal(posts.length, 1, `driven: exactly ONE announcement (${posts.length})`);
+    assert.equal(posts[0].id, pub.postId, 'and it is the post the obligation names');
+    assert.ok(String(posts[0].body).includes('ada'), 'and it names the winner');
+  });
 });
 
 test('C5 A RETRY IS NOT A SECOND CARD: the same create with the same requestId is one card; a new requestId is a second', { skip: SKIP, timeout: 300000 }, async () => {

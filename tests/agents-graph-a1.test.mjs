@@ -40,6 +40,7 @@ import path from 'node:path';
 import http from 'node:http';
 import { makeBoardFixture, startRestServer } from './helpers/harness.mjs';
 import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-executor-proc.mjs';
+import { obligations, assertOneObligation, publishNow } from './helpers/announcements.mjs';   // #1845
 
 const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)';
 const UNIT_ENV = 'SCRUM_GRAPH_UNIT_SMALLKINDS';
@@ -160,35 +161,10 @@ async function restScenario(base, tag, { expectDown = null } = {}) {
 }
 const holderOf = async (base, id) => (await api(base, 'GET', `/api/cards/${id}`)).body?.claimedBy ?? null;
 const announcements = async (base, seat) => ((await api(base, 'GET', '/api/conversations?limit=200')).body ?? []).filter((c) => String(c.body ?? '').includes(`${seat} is resting`));
-/** #1721 — this seat's rest obligations, as the outbox stores them (read under the write lock, so never across a write) */
-const obligationsOf = async (base, seat) => {
-  const r = await api(base, 'GET', '/api/outbox');
-  assert.equal(r.status, 200, `the outbox is readable (${r.status} ${r.text.slice(0, 120)})`);
-  return (r.body?.entries ?? []).filter((e) => e?.payload?.origin?.agent === seat);
-};
-/** #1721 — the obligation the 200 promised: ONE publisher entry, pending or published (never blocked), sequenced, naming both cards */
-async function assertObligation(base, seat, cards, label) {
-  const obs = await obligationsOf(base, seat);
-  assert.equal(obs.length, 1, `${label}: exactly ONE obligation for the rest (${JSON.stringify(obs.map((e) => [e.slot, e.status]))})`);
-  const [ob] = obs;
-  assert.equal(ob.mode, 'publisher', `${label}: a publisher obligation (the post is written after the answer)`);
-  assert.ok(['pending', 'published'].includes(ob.status), `${label}: pending or published, never ${ob.status} (${ob.reason ?? ''})`);
-  assert.ok(Number.isSafeInteger(ob.postSeq) && ob.postSeq > 0, `${label}: its postSeq is reserved in the same write (${JSON.stringify(ob.postSeq)})`);
-  assert.equal(typeof ob.publicationAt, 'string', `${label}: its publicationAt is fixed in the same write`);
-  for (const c of cards) assert.ok(String(ob.payload?.body ?? '').includes(`#${c.shortId}`), `${label}: the frozen body names #${c.shortId}`);
-  return ob;
-}
-/** #1721 — drive publication through the idempotent verb; bounded, and ends on the verb's own answer, not on a clock */
-async function publishNow(base, obligationId, label) {
-  let last = null;
-  for (let i = 0; i < 20; i++) {
-    last = await api(base, 'POST', `/api/outbox/${encodeURIComponent(obligationId)}/publish`, {});
-    assert.equal(last.status, 200, `${label}: the publish verb answers (${last.status} ${last.text.slice(0, 160)})`);
-    if (last.body?.status !== 'pending') break;
-  }
-  assert.equal(last.body?.status, 'published', `${label}: publication completes when driven (${last.text.slice(0, 160)})`);
-  return last.body;
-}
+/** #1721 → #1845 — the obligation contract now lives in tests/helpers/announcements.mjs, shared with every file that counts announcement posts */
+const bySeat = (seat) => (e) => e?.payload?.origin?.agent === seat;
+const obligationsOf = (base, seat) => obligations(base, bySeat(seat));
+const assertObligation = (base, seat, cards, label) => assertOneObligation(base, bySeat(seat), { names: cards.map((c) => `#${c.shortId}`) }, label);
 
 test('A2 REST RELEASES THE CLAIMS, ONCE: both cards freed, named in the answer, ONE announcement; resting again releases nothing (unit off, then unit on, identical)', { skip: SKIP, timeout: 300000 }, async () => {
   const observe = async (base, tag) => {
