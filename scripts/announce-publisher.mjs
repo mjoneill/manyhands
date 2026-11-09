@@ -7,8 +7,8 @@
  *
  * A scan reads the board's pending obligations (GET /api/outbox?status=pending) and makes at most N publish
  * ATTEMPTS (POST /api/outbox/:id/publish), one at a time. Every decision — verify a legacy proof, write a post,
- * block — is the SERVER's, under its lock; this process only says "now". An audit reads the whole outbox and
- * counts integrity failures (auditOutbox).
+ * block — is the SERVER's, under its lock; this process only says "now". An audit reads the outbox SUMMARY and
+ * records its blocked and integrity-failure counts (GET /api/outbox/summary, #1751).
  *
  * Fairness and backoff (#1574 gate 12):
  *   - An attempt FAILS when /publish answers >= 500, cannot be reached or parsed, or answers 200 {status:'pending'}.
@@ -48,7 +48,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { auditOutbox } from '../core/announce-outbox.mjs';
 
 /**
  * PURE schedule. A side that has never run is due; otherwise it is due when now - last >= every.
@@ -251,18 +250,23 @@ export async function scan(call, batch, state, nowMs) {
   return counts;
 }
 
-/** The audit and the counts only it can see (blocked, integrity failures), from ONE read of the whole outbox. */
+/**
+ * The audit and the counts only it can see (blocked, integrity failures), from ONE read of the board's outbox SUMMARY
+ * (#1751). It used to read the whole unfiltered outbox, which on an executor-owned board validates every stored origin:
+ * ~8.5k executor calls a run, ~1.2 M a day at a 10-minute cadence. The summary does the structural audit in a few
+ * queries and deep-checks only the origins still pending.
+ */
 async function survey(call) {
-  const ob = await readOutbox(call);
-  const doc = { announcementOutbox: {
-    origins: Object.fromEntries(ob.origins.map((o) => [o.mutationId, o])),
-    entries: Object.fromEntries(ob.entries.map((e) => [e.obligationId, e])),
-  } };
+  const r = await call('GET', '/api/outbox/summary');
+  const s = r.body;
+  if (r.status !== 200 || !s || typeof s.counts?.byStatus !== 'object' || !Number.isSafeInteger(s.integrityFailures)) {
+    throw new Error(`GET /api/outbox/summary: HTTP ${r.status}`);
+  }
   // #1775: no pending counts here. Those are the scan's alone (its observed remainder), so the audit has nothing that
   // could overwrite them (review post 49004: an Object.assign of this result used to replace the scan's numbers).
   return {
-    blockedCount: ob.entries.filter((e) => e.status === 'blocked').length,
-    auditIntegrityFailures: auditOutbox(doc).failures.length,
+    blockedCount: s.counts.byStatus.blocked ?? 0,
+    auditIntegrityFailures: s.integrityFailures,
   };
 }
 

@@ -79,7 +79,7 @@ import { resolveProvenance } from './core/tending-provenance.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
 import { moveFenceIds, moveFenceEntity } from './core/move-fences.mjs';   // #1707
 import { labelAliasRows, labelAliasEntity, labelAliasIri } from './core/label-aliases.mjs';   // #1640
-import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, modeProblem, legacyProof, postMatchesEntry, opIdFor, announcePostId, postCreateIntention, obligationIdOf } from './core/announce-outbox.mjs';   // #1574 C3a/C3b/C3c
+import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, auditOutbox, modeProblem, legacyProof, postMatchesEntry, opIdFor, announcePostId, postCreateIntention, obligationIdOf } from './core/announce-outbox.mjs';   // #1574 C3a/C3b/C3c
 import * as U3 from './core/unit3-graph.mjs';   // #1582 — deliveries and model calls in the graph
 import { createGraphClient, setExecutorMeter } from './core/graph-client.mjs';   // #1574 C3b — the conversations unit's executor door
 import { createExecutorMeter, createKeepAlive, captureCpuProfile } from './core/executor-meter.mjs';   // #1570 — what REST asks the executor, and REST's own loop delay
@@ -11413,6 +11413,45 @@ async function handleGetOutbox(req, res) {
   }
 }
 
+/**
+ * #1751 GET /api/outbox/summary — what the publisher's audit needs, WITHOUT reading every stored origin.
+ * Executor-owned: core/outbox-summary.mjs (a fixed number of flat SELECTs), then the deep join (readCommittedOrigin, via
+ * xoOrigin) for the UNSETTLED origins only (any obligation still pending). A settled origin no longer changes, and each was
+ * deep-checked when it was published or imported. Document mode: the same shape from the document, in memory.
+ * `integrityFailures` is the one number the publisher records: every structural failure plus every unsettled origin whose
+ * deep join did not validate.
+ */
+async function handleGetOutboxSummary(req, res) {
+  try {
+    if (ORIGIN_EXECUTOR) {
+      const { outboxSummary } = await import('./core/outbox-summary.mjs');
+      const s = await outboxSummary(ANNOUNCE_EXECUTOR);
+      if (!s.ok) return sendJSON(res, 503, { error: `the outbox summary could not be read from the graph executor: ${s.reason}`, code: 'OUTBOX_UNAVAILABLE' });
+      const deep = [];
+      try {
+        for (const mid of s.unsettled) { const o = await xoOrigin(mid); if (o?.integrity) deep.push({ mutationId: mid, reason: o.integrity }); }
+      } catch (e) {
+        if (e instanceof OutboxUnavailable) return sendJSON(res, 503, { error: `the outbox summary could not be read from the graph executor: ${e.message}`, code: 'OUTBOX_UNAVAILABLE' });
+        throw e;
+      }
+      const structural = Object.values(s.failures).reduce((n, xs) => n + xs.length, 0);
+      return sendJSON(res, 200, { source: 'executor', counts: s.counts, failures: { ...s.failures, deep }, integrityFailures: structural + deep.length, unsettled: s.unsettled, deepChecked: s.unsettled.length });
+    }
+    const out = await withWriteLock(async () => {
+      const doc = readBoard();
+      const { origins, entries } = outboxOf(doc);
+      const byStatus = {};
+      for (const e of Object.values(entries)) { const st = e?.status ?? 'unknown'; byStatus[st] = (byStatus[st] ?? 0) + 1; }
+      const failures = auditOutbox(doc).failures;
+      return { source: 'document', counts: { origins: Object.keys(origins).length, obligations: Object.keys(entries).length, byStatus }, failures: { document: failures }, integrityFailures: failures.length };
+    });
+    sendJSON(res, 200, out);
+  } catch (e) {
+    console.error('GET /api/outbox/summary:', e.message);
+    sendJSON(res, 500, { error: 'Failed to summarise the outbox' });
+  }
+}
+
 // POST /api/outbox/:obligationId/complete {postId}
 // NEVER trusts a caller-supplied receipt, status or postId: publication is
 // recorded only from the server's own lookup of the post. C3a ships no such
@@ -13964,6 +14003,7 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/cards\/([^\/]+)\/claim$/, fn: (req, res, m) => handleClaimCard(req, res, m[1]) },
   { method: 'DELETE', re: /^\/api\/cards\/([^\/]+)\/claim$/, fn: (req, res, m) => handleReleaseCard(req, res, m[1]) },
   { method: 'GET',    re: /^\/api\/outbox$/,              fn: (req, res) => handleGetOutbox(req, res) },                    // #1574 C3a
+  { method: 'GET',    re: /^\/api\/outbox\/summary$/,     fn: (req, res) => handleGetOutboxSummary(req, res) },             // #1751
   { method: 'POST',   re: /^\/api\/outbox\/([^\/]+)\/complete$/, fn: (req, res, m) => handleCompleteOutbox(req, res, m[1]) }, // #1574 C3a
   { method: 'POST',   re: /^\/api\/outbox\/([^\/]+)\/publish$/,  fn: (req, res, m) => handlePublishOutbox(req, res, m[1]) },  // #1574 C3b
   { method: 'GET',    re: /^\/api\/cards\/([^\/]+)$/,      fn: (req, res, m) => handleGetCard(req, res, m[1]) },
