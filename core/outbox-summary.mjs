@@ -9,14 +9,16 @@
  *   mismatch     an Origin whose slotCount differs from the number of its Obligations (one or more)
  *   missing      an Origin with no Obligation at all
  *   retiredWithoutDisposition   a `retired` Obligation with no DispositionRecord in the recovery graph naming it (#1749 A8).
- *                PRESENCE only: the record's binding to the payload hash is the deep check's (origin-commit.mjs
- *                retiredByDisposition), done when the obligation was retired.
+ *                PRESENCE only: whether the record is the obligation's own, with the right decision and payload hash, is
+ *                the deep check's (origin-commit.mjs retiredByDisposition). So every retired obligation's origin is
+ *                deep-checked (see `unsettled`): a forged retire planted outside the settle path passes this presence test.
  *   badStatus    an Obligation with no status, or one outside pending/published/blocked/retired (review post 51949)
  *   cardinality  a field with more than one value on one record (two slotCounts, two statuses, …). Rows are grouped by
  *                RECORD, so such a record is counted once and flagged, never silently resolved to its last value.
- *   unsettled    origins with any obligation not in ONE recognised settled state (pending, no status, unknown status,
- *                ambiguous), or whose own fields are ambiguous. These are the only ones whose deep validation
- *                (readCommittedOrigin) can still change meaning, so the caller deep-checks THESE and nothing else.
+ *   unsettled    origins that need the DEEP check: any obligation not in ONE trusted settled state (pending, no status,
+ *                unknown status, ambiguous, or RETIRED: its validity rests on a disposition record only the deep reader
+ *                can verify, #1749 A8 D12a–e), or whose own fields are ambiguous. The caller deep-checks THESE and nothing
+ *                else; a pending scan reads only these. Retired is rare, so this stays a handful of reads.
  *                Settlement, not commit, is the key: an obligation's status changes in later ops (review post 51939).
  * NOT checked here: slot NAMES against the descriptor, digests, reservations. That is readCommittedOrigin's, which runs
  * on every publish and on the unsettled set. Also not seen: an Origin with NO mutationId and no obligations (it never
@@ -37,7 +39,7 @@ const PSQ = (k) => `<urn:ex:postseq/${k}>`;
 export const Q_ORIGINS = `SELECT ?o ?m ?sc WHERE { GRAPH ${BK} { ?o a ${T.Origin} ; ${T.mutationId} ?m . OPTIONAL { ?o ${T.slotCount} ?sc } } }`;
 export const Q_OBLIGATIONS = `SELECT ?ob ?id ?st WHERE { GRAPH ${BK} { ?ob a ${T.Obligation} ; ${T.obligationId} ?id . OPTIONAL { ?ob ${T.status} ?st } } }`;
 const STATUSES = new Set(['pending', 'published', 'blocked', 'retired']);   // origin-commit.mjs OBLIGATION_STATUSES
-const SETTLED = new Set(['published', 'blocked', 'retired']);
+const SETTLED = new Set(['published', 'blocked']);   // trusted without the deep read; `retired` is not (see unsettled)
 export const Q_DISPOSED = `SELECT DISTINCT ?id WHERE { GRAPH ${RG} { ?r a ${PSQ('DispositionRecord')} ; ${PSQ('obligationId')} ?id ; ${PSQ('decision')} ?d ; ${PSQ('obligationStatusAfter')} ?a . FILTER(STR(?d) = "retire-unsent-unknown" && STR(?a) = "retired") } }`;
 
 const FIELD_NAMES = { m: 'mutationId', sc: 'slotCount', id: 'obligationId', st: 'status' };
