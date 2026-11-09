@@ -41,6 +41,22 @@ function conceptCount(published) {
   return iris.size;
 }
 
+const VERBS_SHOWN = 3;
+/**
+ * Count by the predicate actually WRITTEN; a proposed verb is summarised under it, never listed one per entry. On the
+ * McKinsey PDF (2026-11-09) all 32 assertions were scrum:relatedTo with 32 different proposals, and listing each one
+ * buried the edges. The verbs still appear on the edge lines.
+ */
+function byPredicate(published) {
+  return tally(published.map((a) => a.predicate)).map(([p, n]) => {
+    const verbs = published.filter((a) => a.predicate === p && a.proposedPredicate).map((a) => a.proposedPredicate);
+    if (!verbs.length) return `${p} ${n}`;
+    const distinct = tally(verbs).map(([v]) => v);
+    const shown = distinct.slice(0, VERBS_SHOWN).join(', ') + (distinct.length > VERBS_SHOWN ? ', …' : '');
+    return `${p} ${n} (${plural(verbs.length, 'proposed verb')}, ${distinct.length} distinct: ${shown})`;
+  }).join(', ');
+}
+
 export function startBody({ url, modelKey, jobId, resumed = false }) {
   return `🧪 extraction ${resumed ? 'resuming' : 'started'}: ${url}\nmodel ${modelKey} · job ${jobId}${resumed ? ' (from its last checkpoint: the model is not asked again)' : ''} (#1862)`;
 }
@@ -55,9 +71,9 @@ export function finishBody({ url, result }) {
     const withEdges = published.filter((a) => a.subject && a.object);
     lines.push(`wrote ${plural(published.length, 'assertion')} about ${plural(conceptCount(published), 'concept')}`
       + ` · by type: ${fmt(tally(published.map((a) => a.type ?? 'untyped')))}`
-      + ` · by predicate: ${fmt(tally(published.map((a) => a.proposedPredicate ? `${a.predicate} (proposed ${a.proposedPredicate})` : a.predicate)))}`);
+      + ` · by predicate: ${byPredicate(published)}`);
     if (withEdges.length) {
-      for (const a of withEdges.slice(0, SHOWN)) lines.push(`  ${a.subject} —${a.predicate}→ ${a.object} (${a.type ?? 'untyped'}, ${Number.isInteger(a.page) ? `page ${a.page}, ` : ''}block ${a.block})`);   // #1854: a file's claim names its page
+      for (const a of withEdges.slice(0, SHOWN)) lines.push(`  ${a.subject} —${a.predicate}→ ${a.object} (${a.type ?? 'untyped'}, ${a.proposedPredicate ? `proposed ${a.proposedPredicate}, ` : ''}${Number.isInteger(a.page) ? `page ${a.page}, ` : ''}block ${a.block})`);   // #1854: a file's claim names its page
       if (withEdges.length > SHOWN) lines.push(`  …and ${withEdges.length - SHOWN} more`);
     }
   } else {
