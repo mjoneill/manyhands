@@ -108,7 +108,8 @@ export function createOpenRouterModel({ apiKey, baseUrl = 'https://openrouter.ai
     await ledgerRow({ requestId, by, agent: by, model: id, provider: 'openrouter', protocol: 'openai-completions', ok: true,
       tokensIn: json?.usage?.prompt_tokens ?? null, tokensOut: json?.usage?.completion_tokens ?? null,
       stopReason: json?.choices?.[0]?.finish_reason ?? null, latencyMs, at: now() });
-    return { status: 200, json: parsed };
+    // #1867 — the finish reason goes to the caller too: a 200 that ended "length" or "error" is not a finished answer
+    return { status: 200, json: parsed, stopReason: json?.choices?.[0]?.finish_reason ?? null };
   }
 
   return { send, modelId: id };
