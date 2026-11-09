@@ -87,6 +87,17 @@ test('B2c: at most five assertions are shown, and the rest are counted, not list
   assert.match(b, /and 4 more/);
 });
 
+test('B2d: when every relation is a distinct PROPOSED verb, the predicate line collapses and each edge names its verb', () => {
+  // the McKinsey PDF run of 2026-11-09: 32 assertions, all scrum:relatedTo, 32 different proposed verbs → a 32-item line
+  const verbs = Array.from({ length: 32 }, (_, k) => `verb${k}`);
+  const many = { ...result, published: verbs.map((v, k) => ({ iri: `a${k}`, block: k, type: 'empirical', predicate: 'scrum:relatedTo', proposedPredicate: v, subject: `s${k}`, object: `o${k}` })), rejected: [] };
+  const b = finishBody({ url: URL1, result: many });
+  const line = b.split('\n').find((l) => l.includes('by predicate'));
+  assert.match(line, /by predicate: scrum:relatedTo 32 \(32 proposed verbs, 32 distinct: verb0, verb1, verb10, …\)/);
+  assert.ok(line.length < 240, `the predicate line stays short (${line.length} chars)`);
+  assert.ok(b.includes('s0 —scrum:relatedTo→ o0 (empirical, proposed verb0, block 0)'), 'the verb moves onto the edge line');
+});
+
 test('B3: a run that published nothing says so, and still names the run and its rejections', () => {
   const b = finishBody({ url: URL1, result: { ...result, outcome: 'failed', published: [] } });
   assert.match(b, /^⚠️ extraction finished \(failed\)/);
@@ -171,7 +182,9 @@ test('I1: a tick that runs one job reports start THEN finish, and the finish pos
   // the body a person reads, and the query it hands them, run against the real store
   const body = finishBody({ url, result: r });
   assert.match(body, /wrote 2 assertions about 3 concepts/);
-  assert.match(body, /scrum:relatedTo \(proposed acts_through\) 1/);
+  // the proposal is summarised under the predicate written (B2d) and named on its own edge line
+  assert.match(body, /scrum:relatedTo 2 \(1 proposed verb, 1 distinct: acts_through\)/);
+  assert.match(body, /—scrum:relatedTo→ harness \(empirical, proposed acts_through, block 2\)/);
   const rows = await client.query(ofRunQuery(r.runId));
   assert.ok(rows.ok, `the query in the finish post must run (#1846 shape): ${rows.reason}`);
   assert.equal(rows.rows.length, 2, 'one row per assertion of THIS run');
