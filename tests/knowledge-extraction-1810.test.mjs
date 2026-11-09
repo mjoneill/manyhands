@@ -477,6 +477,18 @@ test('#1839 R12c — the model is told the registered predicates it was handed, 
   assert.match(system, /one plain word/i, 'the fallback is stated');
 });
 
+test('#1866 R12d — the model is told to name a concept by the full form its source defines, never as a separate abbreviation', { skip: SKIP }, async () => {
+  const src = ingestSource({ text: FIXTURE, url: FIXTURE_URL });
+  const model = fakeModel([reply(...goodItems())]);
+  const { extractor } = extractorWith({ model });
+  await extractor.run({ source: src, modelKey: 'fake-a', prompt: 'p' });
+  const system = model.bodies[0].messages.find((m) => m.role === 'system').content;
+  assert.match(system, /abbreviation/i, 'abbreviations are addressed');
+  assert.match(system, /full form/i, 'the concept is named by the full form');
+  assert.match(system, /even where the source uses only the abbreviation/i, 'the rule covers blocks that use only the short form');
+  assert.match(system, /never .*separate (subject|concept)/i, 'the short form is not minted as its own concept');
+});
+
 // ── #1844: the procedure version names what the model was TOLD, not only the short operator prompt ────────────────
 test('#1844 R2b — the version\'s prompt hash is the system message actually sent: same prompt + registry → one version; one more registered term → a new version', { skip: SKIP }, async () => {
   const src = ingestSource({ text: FIXTURE, url: FIXTURE_URL });
