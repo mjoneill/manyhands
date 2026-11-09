@@ -121,7 +121,7 @@ const ITEM_SCHEMA = Object.freeze({
 const JobState = Annotation.Root({
   source: Annotation(), modelKey: Annotation(), prompt: Annotation(),
   runId: Annotation(), performedUsing: Annotation(),
-  proposals: Annotation(), items: Annotation(), rejected: Annotation(), counters: Annotation(), outcome: Annotation(),
+  proposals: Annotation(), items: Annotation(), rejected: Annotation(), counters: Annotation(), repairs: Annotation(), outcome: Annotation(),
   title: Annotation(), synopsis: Annotation(),
   result: Annotation(),
 });
@@ -195,6 +195,7 @@ export function createExtractor({ graphClient, runs, model, registry, actor = 'e
   async function extract(st) {
     const { source, modelKey, prompt } = st;
     const counters = { spanInventions: 0, providerFailures: 0 };
+    let repairs = 0;   // #1862: model calls spent re-asking for a verbatim span (kept OUT of the R6 counters: a cost, not a score)
     const items = []; const rejected = [];
     const first = await send(body(modelKey, prompt, numbered(source.blocks)));
     if (!first.ok) counters.providerFailures += 1;
@@ -204,6 +205,7 @@ export function createExtractor({ graphClient, runs, model, registry, actor = 'e
       let final = it;
       if (!v.ok && v.reason === 'span-mismatch') {
         // ONE bounded repair: re-ask for a verbatim span of the named block. Never a loop.
+        repairs += 1;
         const again = await send(body(modelKey, prompt, `Block [${it.block}]:\n${source.blocks[it.block] ?? ''}\n\nYour item's span was not a `
           + `verbatim substring of that block. Return the SAME item (same subject, predicate, object, type) with a span copied `
           + `exactly from the block, as {"items":[item]}.\n\nItem: ${JSON.stringify(it)}`));
@@ -226,7 +228,7 @@ export function createExtractor({ graphClient, runs, model, registry, actor = 'e
     // the title and synopsis are strings or nothing: the schema is closed, a number or a list is not a title (R10b)
     const title = typeof first.json?.title === 'string' && first.json.title.trim() ? first.json.title.trim() : null;
     const synopsis = typeof first.json?.synopsis === 'string' && first.json.synopsis.trim() ? first.json.synopsis.trim() : null;
-    return { proposals: proposed.length, items, rejected, counters, outcome, title, synopsis };
+    return { proposals: proposed.length, items, rejected, counters, repairs, outcome, title, synopsis };
   }
 
   /**
@@ -244,7 +246,7 @@ export function createExtractor({ graphClient, runs, model, registry, actor = 'e
     const stored = new Set(r.rows.map((x) => x.a.value));
     const missing = st.items.filter((it) => !stored.has(it.iri));
     if (missing.length) throw new Error(`publish: the graph holds this run's report but ${missing.length} of its ${st.items.length} assertions are absent: refusing to guess`);
-    return st.items.map((it) => ({ iri: it.iri, block: it.block, type: it.type, predicate: it.predicate, ...(it.proposedPredicate ? { proposedPredicate: it.proposedPredicate } : {}) }));
+    return st.items.map((it) => ({ iri: it.iri, block: it.block, type: it.type, predicate: it.predicate, subject: it.subject, object: it.object, ...(it.proposedPredicate ? { proposedPredicate: it.proposedPredicate } : {}) }));
   }
 
   async function publish(st) {
@@ -253,7 +255,7 @@ export function createExtractor({ graphClient, runs, model, registry, actor = 'e
     const prior = await alreadyPublished(st);
     if (prior) {
       await runs.generated({ run: st.runId, iris: prior.map((p) => p.iri) });
-      return { result: { runId: st.runId, outcome: st.outcome, published: prior, counters: st.counters, proposals: st.proposals,
+      return { result: { runId: st.runId, outcome: st.outcome, published: prior, counters: st.counters, repairs: st.repairs ?? null, proposals: st.proposals,
         rejected: st.rejected.map((r, k) => ({ iri: `${st.runId}/rejected/${k + 1}`, reason: r.reason, item: r.item, detail: r.detail })) } };
     }
     const intention = await intentionFor({
@@ -263,10 +265,11 @@ export function createExtractor({ graphClient, runs, model, registry, actor = 'e
     const w = await graphClient.update(intention);
     if (w.outcome !== 'APPLIED') throw new Error(`publish failed: ${w.outcome} ${w.reason ?? ''}`.trim());
     const published = intention.assertions.map((a, k) => ({ iri: a.iri, block: st.items[k].block, type: a.type, predicate: st.items[k].predicate,
+      subject: st.items[k].subject, object: st.items[k].object,   // #1862: the names, so a report can show the edge
       ...(a.proposedPredicate ? { proposedPredicate: a.proposedPredicate } : {}) }));
     await runs.generated({ run: st.runId, iris: published.map((p) => p.iri) });
     const result = {
-      runId: st.runId, outcome: st.outcome, published, counters: st.counters, proposals: st.proposals,
+      runId: st.runId, outcome: st.outcome, published, counters: st.counters, repairs: st.repairs ?? null, proposals: st.proposals,
       rejected: intention.rejected.map((r, k) => ({ iri: r.iri, reason: r.reason, item: st.rejected[k].item, detail: st.rejected[k].detail })),
     };
     return { result };

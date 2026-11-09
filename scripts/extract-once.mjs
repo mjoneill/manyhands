@@ -30,6 +30,7 @@
  *                                 shares, not seats' links; the roster cannot tell a person from a seat, so this is configuration)
  *   SCRUM_EXTRACT_ALLOW_HTTP_SOURCES=1     accept http:// links too          (tests on loopback only; never set in production)
  *   SCRUM_EXTRACT_ALLOW_PRIVATE_SOURCES=1  accept loopback/private hosts     (tests on loopback only; never set in production)
+ *   SCRUM_EXTRACT_REPORTS=0       do NOT post run reports to the commons (#1862; default: a start and an end post per run)
  */
 import fs from 'node:fs';
 import { createGraphClient } from '../core/graph-client.mjs';
@@ -37,6 +38,7 @@ import { createExtractor } from '../core/knowledge-extraction.mjs';
 import { createRestBoard, createOpenRouterModel } from '../core/knowledge-extraction-adapters.mjs';
 import { createIntake } from '../core/knowledge-extraction-intake.mjs';
 import { createFetcher } from '../core/knowledge-extraction-fetch.mjs';
+import { createAnnouncer } from '../core/knowledge-extraction-report.mjs';
 
 const ACTOR = 'extractor';
 const DEFAULT_PROMPT = 'Extract what this source says: its concepts, the claims it makes about them, and a short synopsis.';
@@ -90,7 +92,16 @@ async function main() {
   const model = createOpenRouterModel({ apiKey, baseUrl: entry.baseUrl, modelId: entry.model, ledger: board, by: ACTOR });
   const extractor = createExtractor({ graphClient, runs: board, model, registry, actor: ACTOR });
   const fetchSource = createFetcher({ allowHttp: ALLOW_HTTP, allowPrivate: ALLOW_PRIVATE });
-  const intake = createIntake({ boardUrl: BOARD, token, stateFile: STATE_FILE, sourcesDir: SOURCES_DIR, fetchSource, extractor, modelKey: MODEL_KEY, prompt: PROMPT, sharers: SHARERS, allowHttp: ALLOW_HTTP });
+  // #1862 — each run reports itself in the room: one post when it starts, one when it ends or fails. Never a stream, and
+  // a refused post never fails a job (createAnnouncer returns the error; the tick counts it in reportErrors).
+  // SCRUM_EXTRACT_REPORTS=0 turns the posts off.
+  const report = process.env.SCRUM_EXTRACT_REPORTS === '0' ? null : createAnnouncer({ post: async (body) => {
+    const r = await fetch(`${BOARD}/api/conversations`, { method: 'POST', headers: { 'content-type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ author: ACTOR, body }), signal: AbortSignal.timeout(30_000) });
+    if (r.status !== 201) throw new Error(`POST /api/conversations → ${r.status}`);
+    return r.json();
+  } });
+  const intake = createIntake({ boardUrl: BOARD, token, stateFile: STATE_FILE, sourcesDir: SOURCES_DIR, fetchSource, extractor, modelKey: MODEL_KEY, prompt: PROMPT, sharers: SHARERS, allowHttp: ALLOW_HTTP, ...(report ? { report } : {}) });
   const summary = await intake.tick();
   console.log(JSON.stringify({ at: new Date().toISOString(), modelKey: MODEL_KEY, model: entry.model, ...summary }));
 }
