@@ -13347,7 +13347,9 @@ function reparentWouldCycle(cards, childId, newParentId) {
 // the surface where the lost data is hand-written prose. The physical distance
 // from the cards sets is the cheapest guard available against a future tidying
 // pass; tests/nodes-ignored-fields.test.mjs (RC3) is the one that actually bites.
-const NODE_PATCH_CONSUMED_FIELDS = new Set(['title', 'body', 'parent', 'attachments']);
+// #1857 — `ifVersion` is the save's PRECONDITION, consumed by the compare-and-swap below, so it is never reported as
+// ignored (the same reason CONSUMED_ELSEWHERE_FIELDS lists it for the card route).
+const NODE_PATCH_CONSUMED_FIELDS = new Set(['title', 'body', 'parent', 'attachments', 'ifVersion']);
 
 // Edit a node — title / body / parent (parent: null clears it → becomes a root).
 async function handleUpdateNode(req, res, idOrShortId) {
@@ -13358,7 +13360,16 @@ async function handleUpdateNode(req, res, idOrShortId) {
     // an empty array on every response is noise a caller learns to skip past,
     // which is how the diagnostic stops being read at all.
     const ignoredFields = Object.keys(patch).filter((k) => !NODE_PATCH_CONSUMED_FIELDS.has(k));
+    // #1857 — the card route's rule (#534 slice 3), on the wiki's door: REFUSE a malformed precondition rather than
+    // coerce it. A non-integer never equals the current version, so it would be a 409 that no re-read can ever clear.
+    if (patch.ifVersion !== undefined && !(Number.isInteger(patch.ifVersion) && patch.ifVersion >= 0)) {
+      return sendJSON(res, 400, {
+        error: 'ifVersion must be a non-negative integer (the page version you read, node.board.version). '
+          + `Got ${JSON.stringify(patch.ifVersion)}. This is a malformed request, not a version conflict.`,
+      });
+    }
     let cycle = false;
+    let conflict = null;   // #1857 — { currentVersion } when the page moved on since the caller read it
     let noticeEntry = null;   // #1574 1b — the wiki notice as a publisher obligation (unit on)
     // #223 — notice only on CONTENT change (title/body); a parent-only reparent
     // (e.g. a drag) is silent so tree-reorg doesn't spam the room.
@@ -13369,6 +13380,14 @@ async function handleUpdateNode(req, res, idOrShortId) {
       const idx = findCardIndex(data, idOrShortId);
       if (idx < 0) return null;
       const card = data.cards[idx];
+      // #1857 — compare-and-swap, checked under the write lock against the same read the write uses, BEFORE any field
+      // is touched: a stale save writes nothing at all. Opt-in today (no ifVersion = unconditioned, as before);
+      // requiring it on `body` is the card's step 3 and waits for a room decision. A version-less card reads as 0, the
+      // same rule the card route uses, and the first accepted write stamps 1 (bumpCardVersion below).
+      if (patch.ifVersion !== undefined) {
+        const current = Number.isInteger(card.version) ? card.version : 0;
+        if (patch.ifVersion !== current) { conflict = { currentVersion: current }; return card; }
+      }
       if ('parent' in patch && reparentWouldCycle(data.cards, card.id, patch.parent)) {
         cycle = true;
         return card; // don't write; reported as 409 below
@@ -13389,6 +13408,13 @@ async function handleUpdateNode(req, res, idOrShortId) {
       return card;
     });
     if (!updated) return sendJSON(res, 404, { error: 'Node not found' });
+    if (conflict) {
+      return sendJSON(res, 409, {
+        error: `This page has moved on: you read version ${patch.ifVersion} but it is now version ${conflict.currentVersion}. `
+          + 'Nothing was written. Re-read the page and reapply your edit; never resend the stale body with the new version.',
+        currentVersion: conflict.currentVersion,
+      });
+    }
     if (cycle) return sendJSON(res, 409, { error: 'That move would make the page a descendant of itself.' });
     const node = cardToNode(updated);
     sendJSON(res, 200, ignoredFields.length ? { ...node, ignoredFields } : node);

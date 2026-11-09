@@ -95,6 +95,9 @@
   .attach-retry:hover { border-color:var(--violet); }
   .attach-guard { font:12px var(--mono); color:var(--ink); margin:6px 0 10px; }
   .attach-guard:empty { display:none; }
+  /* #1734 — what happened to the person's words on Save, or an earlier draft on reopen */
+  .save-status { font:12px var(--mono); color:var(--ink); margin:6px 0 10px; }
+  .save-status:empty { display:none; }
   .attach-file-input { font:12px var(--mono); color:var(--muted); }
   @media (prefers-reduced-motion:reduce) { .page-rise { animation:none; } #tree a, .btn { transition:none; } }
   /* nav appearance in core/header.css (#303-2) */
@@ -478,9 +481,14 @@
       const title = el('input', 'edit-title'); title.value = node.name || ''; title.placeholder = 'Title';
       const body = el('textarea', 'edit-body'); body.value = node.text || '';
       body.placeholder = 'Markdown body…  [[Page Name]] to link';
-      // #1366 — keyed to this page and pinned to the text it was opened on:
-      // restores over the same text, dropped against a newer one.
-      const draft = mountComposerWatch(document, { textarea: body, key: `wiki:${node['@id']}`, base: node.text || '', sample: false });
+      // #1734 — the editor's own line for what happened to the person's words. Made BEFORE the draft mounts, because
+      // the mount can hand over an earlier draft (onStale) that must be shown here.
+      const status = el('div', 'save-status'); status.setAttribute('role', 'status');
+      const showStatus = (text, actions = []) => { status.textContent = text; for (const a of actions) status.append(' ', a); };
+      // #1366 — keyed to this page and pinned to the text it was opened on: restores over the same text. #1734 path 4:
+      // against a newer text it used to be DROPPED SILENTLY; now it is handed to onStale and offered to the person.
+      let staleDraft = null;
+      const draft = mountComposerWatch(document, { textarea: body, key: `wiki:${node['@id']}`, base: node.text || '', sample: false, onStale: (t) => { staleDraft = t; } });
       if (draft) { draft.unregister = registerComposer(draft, { describe: () => `an unsaved edit of «${node.name || 'this page'}»` }); installLeavingGuard(window); }
       const parentSel = el('select', 'edit-parent');
       const none = el('option', '', '— top level —'); none.value = ''; parentSel.appendChild(none);
@@ -569,21 +577,56 @@
       renderAttachList();
       attachRow.append(el('span', 'edit-label', 'Files'), fileInput);
 
+      // #1857 — the version this editor was opened on. A page with no stored version reads as 0, the server's own rule.
+      const loadedVersion = Number.isInteger(node.board?.version) ? node.board.version : 0;
+      // #1734 — the draft is released ONLY after the server confirms the save (composer-watch's clearDraft contract).
+      // Every other outcome leaves the editor open with the person's words in it and says what happened.
+      async function doSave(ifVersion) {
+        showStatus('Saving…');
+        let res;
+        try {
+          res = await fetch('/api/nodes/' + encodeURIComponent(node['@id']), {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title: title.value, body: body.value, parent: parentSel.value || null, attachments: workingAttachments, ifVersion }),
+          });
+        } catch (e) {
+          return showStatus(`Not saved: the board could not be reached (${e && e.message ? e.message : e}). Your text is still here.`);
+        }
+        if (res.ok) {
+          try { draft?.clearDraft(); draft?.stop(); draft?.unregister?.(); } catch { /* #1366 — never break the save */ }
+          await loadTree();
+          openNode(node['@id']);
+          return;
+        }
+        const e = await res.json().catch(() => ({}));
+        if (res.status === 409 && Number.isInteger(e.currentVersion)) {
+          // #1857 — someone saved since this editor opened. Never overwrite them silently: show it, keep my words, and
+          // make the overwrite a choice the person makes with the current version in hand.
+          const look = el('a', '', 'Open the current page in a new tab');
+          look.href = 'wiki.html?node=' + encodeURIComponent(node['@id']); look.target = '_blank'; look.rel = 'noopener';
+          const anyway = el('button', 'btn', 'Save mine anyway'); anyway.onclick = () => doSave(e.currentVersion);
+          return showStatus(`Not saved: this page changed since you opened it (it is now version ${e.currentVersion}). Your text is still here.`, [look, anyway]);
+        }
+        showStatus(`Not saved: the board answered ${res.status}${e.error ? ` (${e.error})` : ''}. Your text is still here.`);
+      }
       const save = el('button', 'btn primary', 'Save');
       save.onclick = async () => {
         // #1648 — a held or still-uploading file is not in workingAttachments yet; saving would re-render and lose it without a word
         if (heldAttachments.length || uploadingAttachments.length) { saveGuardShown = true; refreshSaveGuard(); return; }
-        await fetch('/api/nodes/' + encodeURIComponent(node['@id']), {
-          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title: title.value, body: body.value, parent: parentSel.value || null, attachments: workingAttachments }),
-        });
-        try { draft?.clearDraft(); draft?.stop(); draft?.unregister?.(); } catch { /* #1366 — never break the save */ }
-        await loadTree();
-        openNode(node['@id']);
+        await doSave(loadedVersion);
       };
       const cancel = el('button', 'btn', 'Cancel'); cancel.onclick = () => { try { draft?.clearDraft(); draft?.stop(); draft?.unregister?.(); } catch { /* ignore */ } openNode(node['@id']); };
       const bar = el('div', 'toolbar'); bar.append(save, cancel);
-      main.append(el('div', 'meta', 'Editing'), title, parentRow, attachRow, attachList, saveGuard, body, bar);
+      main.append(el('div', 'meta', 'Editing'), title, parentRow, attachRow, attachList, saveGuard, body, status, bar);
+      if (staleDraft != null) {
+        // #1734 path 4 — the page changed while the editor was closed. The newer text is what opens; my earlier words
+        // are offered, not silently dropped and not silently restored over someone else's edit.
+        const restore = el('button', 'btn', 'Restore my earlier draft');
+        restore.onclick = () => { body.value = staleDraft; body.dispatchEvent(new Event('input', { bubbles: true })); showStatus('Your earlier draft is restored. Saving it replaces the newer text.'); };
+        const discard = el('button', 'btn', 'Discard it');
+        discard.onclick = () => { if (!draft?.isDirty?.()) draft?.clearDraft(); showStatus(''); };
+        showStatus('This page changed since you last edited it. You have unsaved words from the earlier version.', [restore, discard]);
+      }
     }
 
     /**

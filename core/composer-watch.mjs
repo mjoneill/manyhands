@@ -46,7 +46,7 @@ export function saveTrace(tr) { safeSet(TRACE_KEY, serialize(tr)); }
  * Attach to a textarea + form. Returns a handle so a test — or a curious
  * operator at the console — can read the verdict without touching internals.
  */
-export function mountComposerWatch(doc, { textarea, form, fetchImpl = (...a) => fetch(...a), now = () => Date.now(), key = null, base = null, sample: doSample = true } = {}) {
+export function mountComposerWatch(doc, { textarea, form, fetchImpl = (...a) => fetch(...a), now = () => Date.now(), key = null, base = null, sample: doSample = true, onStale = null } = {}) {
   const ta = textarea || doc.getElementById('convs-body');
   if (!ta) return null;
   const KEY = draftKeyFor(key);
@@ -86,7 +86,18 @@ export function mountComposerWatch(doc, { textarea, form, fetchImpl = (...a) => 
     ta.value = saved;
     record({ kind: 'restore', len: saved.length });
   } else if (hasBase && safeGet(KEY) != null && saved == null) {
-    safeDel(KEY); // written on a base that no longer exists: drop it, don't ambush the next open
+    // Written on a base that no longer exists. It must not restore over the newer text (#466). Without an `onStale`
+    // caller it is dropped, as #1366 designed. #1734 path 4: dropping it SILENTLY lost a person's words, so a caller
+    // that passes `onStale` is handed the exact text and the key is KEPT: the caller shows it and the person chooses.
+    // (The key is overwritten as soon as they type on the new base, by which time they have seen the notice.)
+    let stale = null;
+    try { const o = JSON.parse(safeGet(KEY)); if (o && typeof o === 'object' && typeof o.text === 'string' && o.text !== o.base) stale = o.text; } catch { /* unreadable: nothing to hand over */ }
+    if (stale != null && typeof onStale === 'function') {
+      record({ kind: 'stale', len: stale.length });
+      try { onStale(stale); } catch { /* a caller's bug must not take the composer down */ }
+    } else {
+      safeDel(KEY); // don't ambush the next open
+    }
   }
 
   ta.addEventListener('input', () => {
