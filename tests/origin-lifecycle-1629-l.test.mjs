@@ -377,6 +377,18 @@ test('#1629 L2 PUBLICATION (mode off, file unreadable): a claim\'s announcement 
     const mid = e.mutationId ?? String(e.obligationId).split(':')[0];
     const one = await s.call('GET', `/api/outbox?mutationId=${encodeURIComponent(mid)}`);
     assert.ok(entriesOf(one.json).some((x) => x.slot === 'claim' && x.status === 'published'), `GET /api/outbox?mutationId= reads it published (${one.text.slice(0, 300)})`);
+    // #1751: the SUMMARY agrees with the full listing on the same executor-owned store: two readers of different kind
+    // (a few flat SELECTs vs one readCommittedOrigin per origin) must give the same counts, and neither may see a fault
+    const sum = await s.call('GET', '/api/outbox/summary');
+    assert.equal(sum.status, 200, `GET /api/outbox/summary answers (${sum.text.slice(0, 300)})`);
+    assert.equal(sum.json.source, 'executor', 'an executor-owned board summarises from the executor');
+    const listed = entriesOf(all.json);
+    const byStatus = {}; for (const x of listed) byStatus[x.status] = (byStatus[x.status] ?? 0) + 1;
+    assert.equal(sum.json.counts.obligations, listed.length, `the summary counts the obligations the listing lists (${sum.text.slice(0, 300)})`);
+    assert.deepEqual(sum.json.counts.byStatus, Object.fromEntries(Object.entries(byStatus).sort()), 'and the same statuses');
+    assert.equal(sum.json.counts.origins, all.json.origins.length + (all.json.integrity?.length ?? 0), 'and the same origins');
+    assert.equal(sum.json.integrityFailures, 0, `a clean store has no integrity failure (${JSON.stringify(sum.json.failures)})`);
+    assert.deepEqual(sum.json.unsettled, [], 'every obligation is published, so nothing needs the deep check');
     await documentUntouched(s, 'off', 'L2');
   });
 });

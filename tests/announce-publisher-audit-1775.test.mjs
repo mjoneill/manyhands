@@ -77,13 +77,16 @@ function runPublisher(base, dir, extra = []) {
 /** A pass-through proxy that COUNTS outbox reads by kind and can fail the unfiltered one. */
 async function startProxy(targetBase) {
   const target = new URL(targetBase);
-  const p = { unfiltered: 0, pending: 0, publishes: [], failUnfiltered: false, failPending: false, failPublish: new Set() };
+  const p = { unfiltered: 0, listing: 0, pending: 0, publishes: [], failUnfiltered: false, failPending: false, failPublish: new Set() };
   p.server = http.createServer((req, res) => {
     const chunks = []; req.on('data', (c) => chunks.push(c));
     req.on('end', () => {
       const [route, qs = ''] = req.url.split('?');
-      if (req.method === 'GET' && route === '/api/outbox') {
-        if (qs === '') {
+      // #1751: the audit's read is now GET /api/outbox/summary; `unfiltered` keeps counting the AUDIT read under its old name,
+      // and `listing` counts any true unfiltered GET /api/outbox, which the publisher must never make again
+      if (req.method === 'GET' && route === '/api/outbox' && qs === '') p.listing += 1;
+      if (req.method === 'GET' && (route === '/api/outbox/summary' || route === '/api/outbox')) {
+        if (route === '/api/outbox/summary') {
           p.unfiltered += 1;
           if (p.failUnfiltered) { res.writeHead(503, { 'Content-Type': 'application/json' }); res.end('{"error":"proxy-injected survey failure"}'); return; }
         } else if (/(^|&)status=pending(&|$)/.test(qs)) {
@@ -126,6 +129,7 @@ test('A1 two --once runs, --audit-every-ms 1 h: the first audits (ONE unfiltered
     const r1 = await runPublisher(proxy.base, dir, ['--audit-every-ms', HOUR_MS]);
     assert.equal(r1.code, 0, `run 1 exit ${r1.code}: ${r1.err}`);
     assert.equal(proxy.unfiltered, 1, 'run 1 audits: one unfiltered read');
+    assert.equal(proxy.listing, 0, '#1751: the audit never reads the whole unfiltered outbox');
     assert.ok(proxy.pending >= 1, 'run 1 scans: the pending read');
     assert.equal(r1.status.pendingCount, 1, `pendingCount from the scan (${JSON.stringify(r1.status)})`);
     assert.equal(r1.status.oldestPendingAt, at(T0, -5 * MIN), 'oldestPendingAt from the scan');

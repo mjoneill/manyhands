@@ -196,5 +196,6 @@
   "tests/work-ledger-retired-1763.test.mjs",
   "tests/write-protocol-client-1748.test.mjs",
   "tests/write-protocol-floor-1748.test.mjs",
-  "tests/write-protocol-guard-1748.test.mjs"
+  "tests/write-protocol-guard-1748.test.mjs",
+  "tests/outbox-summary-1751.test.mjs"
 ]
