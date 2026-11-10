@@ -100,6 +100,27 @@ function snapshot() {
 }
 const isStale = (c) => c === 'previous' || c === 'GONE';
 
+/**
+ * #1876 — a PERIODIC job (StartInterval or StartCalendarInterval, and no KeepAlive) is a fresh process each run, so a
+ * deploy that catches one mid-tick finds it on the old tree, and its next start picks up the served one with nobody
+ * involved. Counting it as "left stale" made a deploy that landed mid-tick exit 1. Read from its own launchd plist
+ * (through plutil where it exists, so a binary plist reads; as text where it does not). No plist, an unreadable one,
+ * or ANY KeepAlive (true, or a conditions dict) ⇒ not periodic: it is treated as a long-running job, as before.
+ */
+const AGENTS = process.env.RESTART_LAUNCHAGENTS_DIR || path.join(os.homedir(), 'Library', 'LaunchAgents');
+function plistXml(label) {
+  const f = path.join(AGENTS, `${label}.plist`);
+  if (!fs.existsSync(f)) return null;
+  try { return execFileSync('plutil', ['-convert', 'xml1', '-o', '-', f], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); }
+  catch { try { const t = fs.readFileSync(f, 'utf8'); return t.includes('<plist') ? t : null; } catch { return null; } }
+}
+function isPeriodic(label) {
+  const xml = plistXml(label);
+  if (!xml || !/<key>(StartInterval|StartCalendarInterval)<\/key>/.test(xml)) return false;
+  const ka = /<key>KeepAlive<\/key>\s*<(\w+)/.exec(xml);
+  return !ka || ka[1] === 'false';
+}
+
 function kickstart(label) {
   const r = spawnSync('launchctl', ['kickstart', '-k', `gui/${uid}/${label}`], { encoding: 'utf8' });
   return r.status === 0;
@@ -230,12 +251,15 @@ async function main() {
     if (p0 === p1 && c0 === c1) continue;
     lines.push(`${short(label)}: pid ${p0} → ${p1 ?? 'none'} (${c0} → ${c1})${notes[label] ? ` — ${notes[label]}` : ''}`);
   }
-  const left = Object.keys(after.cls).filter((l) => isStale(after.cls[l]));
+  const staleAfter = Object.keys(after.cls).filter((l) => isStale(after.cls[l]));
+  const periodic = staleAfter.filter((l) => l !== `${P}mcp` && isPeriodic(l));
+  const left = staleAfter.filter((l) => !periodic.includes(l));
   const leftLines = left.map((l) => (l === `${P}mcp`
     ? `mcp — a restart deafens every Claude Code seat until a human runs /mcp reconnect scrum-board. By hand: launchctl kickstart -k gui/${uid}/${P}mcp, then reconnect`
     : `${short(l)} — no readiness check is written down for it; restart it by hand and confirm it`));
   const head = failed ? `⛔ restart-stale STOPPED: ${failed.split('\n')[0]}` : '↻ restart-stale (#1847)';
   const body = [head, ...lines, ...(left.length ? ['NOT restarted (still on an older tree):', ...leftLines.map((l) => `- ${l}`)] : []),
+    ...(periodic.length ? ['Periodic, caught mid-tick (no restart needed):', ...periodic.map((l) => `- ${short(l)} — periodic (no KeepAlive): picks up the served tree at its next start`)] : []),
     ...(afterSnap.ok ? [] : [`⚠️ after-state UNMEASURED (${afterSnap.why})`])].join('\n');
   say(body);
   if (failed && failed.includes('\n')) say(failed);

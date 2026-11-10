@@ -78,7 +78,8 @@ process.stdout.write('p' + pid + '\\nfcwd\\ni' + fs.statSync(p).ino + '\\nn' + p
   const backup = join(dir, 'backup.sh');
   const n = join(dir, 'backup-runs');
   writeFileSync(backup, `#!/bin/sh\necho backup >> ${JSON.stringify(log)}\nif [ -n "\${FAKE_BACKUP_SEQ:-}" ]; then\n  i=$(cat ${JSON.stringify(n)} 2>/dev/null || echo 0); echo $((i + 1)) > ${JSON.stringify(n)}\n  rc=$(printf '%s' "$FAKE_BACKUP_SEQ" | tr ',' '\\n' | sed -n "$((i + 1))p"); [ -n "$rc" ] || rc=$(printf '%s' "$FAKE_BACKUP_SEQ" | tr ',' '\\n' | tail -n 1)\n  exit "$rc"\nfi\nexit \${FAKE_BACKUP_RC:-0}\n`); chmodSync(backup, 0o755);
-  return { dir, serve, stateFile, log, lock, bin, backup, calls: () => readFileSync(log, 'utf8').trim().split('\n').filter(Boolean) };
+  const agents = join(dir, 'LaunchAgents'); mkdirSync(agents);   // #1876 — the plists this world's jobs have; empty unless a row writes one
+  return { dir, serve, stateFile, log, lock, bin, backup, agents, calls: () => readFileSync(log, 'utf8').trim().split('\n').filter(Boolean) };
 }
 
 /** Fake executor (/health) and REST (/api/health, /api/conversations), logging into the world's log. */
@@ -112,7 +113,7 @@ function restart(w, svc, args, extraEnv = {}) {
       env: {
         PATH: `${w.bin}:${process.env.PATH}`, DEPLOY_LOCK: w.lock, DEPLOY_BOARD_API: svc.restUrl,
         RESTART_REST_URL: svc.restUrl, RESTART_EXECUTOR_URL: svc.execUrl, RESTART_BACKUP_CMD: w.backup,
-        RESTART_POLL_MS: '30', RESTART_READY_TIMEOUT_MS: '1500', ...extraEnv,
+        RESTART_POLL_MS: '30', RESTART_READY_TIMEOUT_MS: '1500', RESTART_LAUNCHAGENTS_DIR: w.agents, ...extraEnv,
       },
     });
     let out = ''; c.stdout.on('data', (d) => { out += d; }); c.stderr.on('data', (d) => { out += d; });
@@ -274,5 +275,63 @@ test('S12 ANOTHER JOB LEFT STALE beside MCP → exit 1 (a real leftover), not 4'
     const r = await restart(w, svc, ['--holder', 'alpha']);
     assert.equal(r.status, 1, r.out);
     assert.match(r.out, /fanoutwatch/);
+  } finally { await svc.close(); }
+});
+
+// ── #1876: a PERIODIC job (StartInterval / StartCalendarInterval, no KeepAlive) caught mid-tick is not a failure ──
+function plist(w, label, keys) {
+  const body = Object.entries(keys).map(([k, v]) => `\t<key>${k}</key>\n\t${v}`).join('\n');
+  writeFileSync(join(w.agents, `${P}${label}.plist`), `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+\t<key>Label</key>
+\t<string>${P}${label}</string>
+${body}
+</dict>
+</plist>
+`);
+}
+
+test('S13 #1876 A PERIODIC JOB CAUGHT MID-TICK → named as periodic, not kickstarted, exit 0 (it picks up the served tree at its next start)', async () => {
+  const w = world({ 'guestwake-alpha': { pid: 21, cwd: 'previous' } }); const svc = await services(w);
+  plist(w, 'guestwake-alpha', { StartInterval: '<integer>60</integer>', RunAtLoad: '<true/>' });
+  try {
+    const r = await restart(w, svc, ['--holder', 'alpha']);
+    assert.equal(r.status, 0, r.out);
+    assert.deepEqual(kicks(w.calls()), [], 'a periodic job is not kickstarted');
+    assert.match(r.out, /guestwake-alpha[^\n]*periodic[^\n]*next start/);
+    assert.doesNotMatch(r.out, /no readiness check is written down for it/);
+  } finally { await svc.close(); }
+});
+
+test('S14 #1876 MCP + a PERIODIC job (StartCalendarInterval) left → exit 4, ACTION NEEDED for MCP only', async () => {
+  const w = world({ mcp: { pid: 14, cwd: 'previous' }, 'nightly-alpha': { pid: 22, cwd: 'previous' } }); const svc = await services(w);
+  plist(w, 'nightly-alpha', { StartCalendarInterval: '<dict>\n\t\t<key>Hour</key>\n\t\t<integer>3</integer>\n\t</dict>' });
+  try {
+    const r = await restart(w, svc, ['--holder', 'alpha']);
+    assert.equal(r.status, 4, r.out);
+    assert.match(r.out, /nightly-alpha[^\n]*periodic/);
+    assert.deepEqual(kicks(w.calls()), []);
+  } finally { await svc.close(); }
+});
+
+test('S15 #1876 A StartInterval job WITH KeepAlive is long-running → still named for a hand restart, exit 1', async () => {
+  const w = world({ 'watch-alpha': { pid: 23, cwd: 'previous' } }); const svc = await services(w);
+  plist(w, 'watch-alpha', { StartInterval: '<integer>60</integer>', KeepAlive: '<true/>' });
+  try {
+    const r = await restart(w, svc, ['--holder', 'alpha']);
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, /watch-alpha — no readiness check is written down for it/);
+  } finally { await svc.close(); }
+});
+
+test('S16 #1876 a stale job with NO plist, or KeepAlive given as a dict, is not presumed periodic → exit 1', async () => {
+  const w = world({ 'ghost-alpha': { pid: 24, cwd: 'previous' }, 'cond-alpha': { pid: 25, cwd: 'previous' } }); const svc = await services(w);
+  plist(w, 'cond-alpha', { StartInterval: '<integer>60</integer>', KeepAlive: '<dict>\n\t\t<key>SuccessfulExit</key>\n\t\t<false/>\n\t</dict>' });
+  try {
+    const r = await restart(w, svc, ['--holder', 'alpha']);
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, /ghost-alpha — no readiness check/); assert.match(r.out, /cond-alpha — no readiness check/);
   } finally { await svc.close(); }
 });
