@@ -42,7 +42,7 @@
 #   scripts/deploy.sh                pull, ASK CI (refuse unless green), re-export, restart ONLY the
 #                                    services whose inputs changed (#1138), verify, then restart
 #                                    what the swap left on the old tree (#1847: never MCP; a job
-#                                    left stale makes the exit non-zero)
+#                                    left stale makes the exit 1; MCP alone left is exit 4, ACTION NEEDED)
 #   scripts/deploy.sh --no-restart   pull + ask CI + re-export only
 #   scripts/deploy.sh export         ask CI + re-export from the current clone HEAD
 #   scripts/deploy.sh unlock         open the serve dir — the escape hatch
@@ -526,6 +526,8 @@ RS_SCRIPT="$CLONE/scripts/restart-stale.mjs"
 if [ -f "$RS_SCRIPT" ]; then
   node "$RS_SCRIPT" --serve "$SERVE" --under-lock deploy --holder "$OP_HOLDER" || RESTART_STALE_RC=$?
   [ "$RESTART_STALE_RC" = 3 ] && report_serve_cwd
+  # 4 = everything restarted except MCP: ACTION NEEDED, not FAILED (the exit stays 4)
+  [ "$RESTART_STALE_RC" = 4 ] && say "👉 ACTION NEEDED (not a failure): MCP is still on the old tree — kickstart it by hand, then every Claude Code seat runs /mcp reconnect scrum-board"
 else
   say "⚠️ no $RS_SCRIPT in the clone — nothing the swap left behind is restarted"
   report_serve_cwd

@@ -30,12 +30,16 @@
  *      to the room in ONE post. REST down → the post is skipped and that is said; the lock file still carried the
  *      claim and note while it acted.
  *
- * Exit: 0 nothing left stale · 1 something left stale or a step failed · 2 no baseline · 3 the lock refused.
+ * Exit: 0 nothing left stale · 1 a step failed, or a job other than MCP is left stale · 2 no baseline · 3 the lock
+ * refused · 4 ACTION NEEDED: everything restarted except MCP, which needs a human (kickstart, then /mcp reconnect).
+ * 4 is separate from 1 on purpose: MCP is left on almost every deploy, and a failure that fires every time is ignored
+ * the one time it is real.
  *
  * Environment (names only): DEPLOY_LOCK or DEPLOY_SHA_STAMP (the lock's file, as operation-lock.sh),
  *   DEPLOY_BOARD_API (room posts; default RESTART_REST_URL), RESTART_REST_URL (default http://127.0.0.1:3141),
  *   RESTART_EXECUTOR_URL (default http://127.0.0.1:3143), RESTART_BACKUP_CMD (a command to run instead of the backup
- *   tick's), RESTART_READY_TIMEOUT_MS (default 90000), RESTART_POLL_MS (default 2000).
+ *   tick's), RESTART_READY_TIMEOUT_MS (default 90000), RESTART_POLL_MS (default 2000), RESTART_BACKUP_TRIES (default 3)
+ *   and RESTART_BACKUP_WAIT_MS (default 30000) for a backup tick that holds its lock (exit 7).
  */
 import fs from 'node:fs';
 import os from 'node:os';
@@ -61,6 +65,8 @@ const EXEC = (process.env.RESTART_EXECUTOR_URL || 'http://127.0.0.1:3143').repla
 const BOARD = (process.env.DEPLOY_BOARD_API || REST).replace(/\/$/, '');
 const READY_MS = Number(process.env.RESTART_READY_TIMEOUT_MS || 90000);
 const POLL_MS = Number(process.env.RESTART_POLL_MS || 2000);
+const BACKUP_TRIES = Math.max(1, Number(process.env.RESTART_BACKUP_TRIES || 3));
+const BACKUP_WAIT_MS = Number(process.env.RESTART_BACKUP_WAIT_MS || 30000);
 const uid = process.getuid();
 const say = (s) => console.log(s);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -163,8 +169,16 @@ async function main() {
     if (!b) failed = 'no backup command (no RESTART_BACKUP_CMD, no readable backup-tick plist) — the executor is not restarted without one';
     else {
       say(`⇣ backup first (${b.from})`);
-      const r = spawnSync(b.cmd, b.argv, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-      if (r.status !== 0) failed = `the backup exited ${r.status} — the executor is NOT restarted\n${(r.stdout + r.stderr).trim().split('\n').slice(-5).join('\n')}`;
+      // exit 7 = the scheduled tick holds its .tick.lock (graph-store-backup-schedule.mjs): not a broken backup, a busy one.
+      // Wait and try again; a deploy landing on a tick should not read as a backup failure (the slice 2 review, post 52152).
+      let r;
+      for (let t = 1; t <= BACKUP_TRIES; t += 1) {
+        r = spawnSync(b.cmd, b.argv, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+        if (r.status !== 7) break;
+        if (t < BACKUP_TRIES) { say(`   a scheduled backup is running (exit 7); waiting ${BACKUP_WAIT_MS} ms, try ${t + 1} of ${BACKUP_TRIES}`); await sleep(BACKUP_WAIT_MS); }
+      }
+      if (r.status === 7) failed = `a scheduled backup is running and held its lock through ${BACKUP_TRIES} tries — the executor is NOT restarted; re-run in a minute`;
+      else if (r.status !== 0) failed = `the backup exited ${r.status} — the executor is NOT restarted\n${(r.stdout + r.stderr).trim().split('\n').slice(-5).join('\n')}`;
     }
     if (!failed) {
       const h0 = await getJson(`${EXEC}/health`);
@@ -228,7 +242,8 @@ async function main() {
   if (lines.length || left.length || failed) {
     if (!(await post(body))) say('   (not posted to the commons — REST unreachable; tell the room by hand)');
   }
-  return failed || left.length || !afterSnap.ok ? 1 : 0;
+  if (failed || !afterSnap.ok || left.some((l) => l !== `${P}mcp`)) return 1;
+  return left.length ? 4 : 0;   // 4 = only MCP left: ACTION NEEDED, not a failure (a failure on every deploy gets ignored)
 }
 
 let code = 1;

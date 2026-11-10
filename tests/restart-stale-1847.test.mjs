@@ -76,7 +76,8 @@ process.stdout.write('p' + pid + '\\nfcwd\\ni' + fs.statSync(p).ino + '\\nn' + p
 `);
   chmodSync(join(bin, 'launchctl'), 0o755); chmodSync(join(bin, 'lsof'), 0o755);
   const backup = join(dir, 'backup.sh');
-  writeFileSync(backup, `#!/bin/sh\necho backup >> ${JSON.stringify(log)}\nexit \${FAKE_BACKUP_RC:-0}\n`); chmodSync(backup, 0o755);
+  const n = join(dir, 'backup-runs');
+  writeFileSync(backup, `#!/bin/sh\necho backup >> ${JSON.stringify(log)}\nif [ -n "\${FAKE_BACKUP_SEQ:-}" ]; then\n  i=$(cat ${JSON.stringify(n)} 2>/dev/null || echo 0); echo $((i + 1)) > ${JSON.stringify(n)}\n  rc=$(printf '%s' "$FAKE_BACKUP_SEQ" | tr ',' '\\n' | sed -n "$((i + 1))p"); [ -n "$rc" ] || rc=$(printf '%s' "$FAKE_BACKUP_SEQ" | tr ',' '\\n' | tail -n 1)\n  exit "$rc"\nfi\nexit \${FAKE_BACKUP_RC:-0}\n`); chmodSync(backup, 0o755);
   return { dir, serve, stateFile, log, lock, bin, backup, calls: () => readFileSync(log, 'utf8').trim().split('\n').filter(Boolean) };
 }
 
@@ -129,7 +130,7 @@ test('S1 THE DONE-WHEN: executor + projector + MCP stale, readGate lost 2 → ba
   try {
     const r = await restart(w, svc, ['--holder', 'alpha', '--ask', 'post-9', '--note', 'after f7cc787']);
     const calls = w.calls();
-    assert.notEqual(r.status, 0, `MCP is still stale, so the run is not clean\n${r.out}`);
+    assert.equal(r.status, 4, `only MCP is left: ACTION NEEDED (4), not a failure (1) — the slice 2 review, post 52152\n${r.out}`);
     assert.deepEqual(kicks(calls), ['graph-executor', 'rest', 'activity-projector'], `restarted, in order, never MCP\n${calls.join('\n')}`);
     const at = (pred) => calls.findIndex(pred);
     const iBackup = at((c) => c === 'backup'); const iExec = at((c) => c.startsWith('kickstart graph-executor'));
@@ -242,5 +243,36 @@ test('S9 NOTHING STALE → no restart, no post, exit 0', async () => {
     assert.deepEqual(w.calls().filter((c) => c === 'backup' || c.startsWith('kickstart')), []);
     assert.equal(svc.posts.length, 0);
     assert.ok(statSync(w.serve));
+  } finally { await svc.close(); }
+});
+
+test('S10 A SCHEDULED BACKUP TICK HOLDS ITS LOCK (exit 7) → wait and try again; the executor restarts after the backup that succeeded', async () => {
+  const w = world({ 'graph-executor': { pid: 12, cwd: 'previous' } }); const svc = await services(w);
+  try {
+    const r = await restart(w, svc, ['--holder', 'alpha'], { FAKE_BACKUP_SEQ: '7,0', RESTART_BACKUP_WAIT_MS: '20' });
+    assert.equal(r.status, 0, r.out);
+    const calls = w.calls();
+    assert.deepEqual(calls.filter((c) => c === 'backup' || c.startsWith('kickstart')).map((c) => c.split(' ')[0]), ['backup', 'backup', 'kickstart'], calls.join('\n'));
+  } finally { await svc.close(); }
+});
+
+test('S11 THE TICK NEVER LETS GO → no executor restart, and it says a scheduled backup is running (not that the backup is broken)', async () => {
+  const w = world({ 'graph-executor': { pid: 12, cwd: 'previous' } }); const svc = await services(w);
+  try {
+    const r = await restart(w, svc, ['--holder', 'alpha'], { FAKE_BACKUP_SEQ: '7', RESTART_BACKUP_WAIT_MS: '20', RESTART_BACKUP_TRIES: '3' });
+    assert.equal(r.status, 1, r.out);
+    assert.equal(w.calls().filter((c) => c === 'backup').length, 3, 'three tries, no more');
+    assert.deepEqual(kicks(w.calls()), []);
+    assert.match(r.out, /STOPPED: a scheduled backup is running[^\n]*re-run in a minute/i, 'the VERDICT names the busy tick, not only the retry lines');
+    assert.doesNotMatch(r.out, /backup exited 7/, 'and never reads as a broken backup');
+  } finally { await svc.close(); }
+});
+
+test('S12 ANOTHER JOB LEFT STALE beside MCP → exit 1 (a real leftover), not 4', async () => {
+  const w = world({ mcp: { pid: 14, cwd: 'previous' }, fanoutwatch: { pid: 15, cwd: 'previous' } }); const svc = await services(w);
+  try {
+    const r = await restart(w, svc, ['--holder', 'alpha']);
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, /fanoutwatch/);
   } finally { await svc.close(); }
 });
