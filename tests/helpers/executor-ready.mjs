@@ -1,7 +1,7 @@
 /**
  * #1716 — "the executor answered" is not "OUR executor answered".
  *
- *   waitExecutorReady(baseUrl, { dsid, headers, tries, intervalMs }) -> the counters
+ *   waitExecutorReady(baseUrl, { dsid, headers, tries, intervalMs, stderr }) -> the counters
  *
  * Polls GET <baseUrl>/api/trial/counters. Resolves only when the REST's graph client reads OUR dataset (identity.datasetId
  * === dsid) AND, when the REST controls a trial executor (trialControl), its own child is running (executorRunning).
@@ -11,8 +11,13 @@
  *
  * A DIFFERENT dataset id never becomes ours, so it rejects at once. Everything else (no identity yet, child not up yet)
  * is retried until `tries` runs out, then rejects naming the last identity and executorRunning it saw.
+ *
+ * #1877 — `stderr` (optional, () => string): the REST server's stderr, e.g. startRestServer's `srv.stderr`. When the REST's own
+ * trial child never runs, that stream is where server.js says why ("graph-slice: trial executor did not start: executor exited
+ * <code>: …"), and without it a child that DIED at boot reads the same as one still STARTING. Its tail is appended to the
+ * not-ready rejection only; without the option the message is unchanged.
  */
-export async function waitExecutorReady(baseUrl, { dsid, headers = {}, tries = 200, intervalMs = 50 } = {}) {
+export async function waitExecutorReady(baseUrl, { dsid, headers = {}, tries = 200, intervalMs = 50, stderr } = {}) {
   if (!dsid) throw new Error('waitExecutorReady needs the dsid this test expects');
   let last = null;
   let lastErr = null;
@@ -32,5 +37,17 @@ export async function waitExecutorReady(baseUrl, { dsid, headers = {}, tries = 2
   }
   throw new Error(`executor never became ready as OURS (#1716) after ${tries} tries: identity=${JSON.stringify(last?.identity ?? null)}, `
     + `executorRunning=${JSON.stringify(last?.executorRunning ?? null)}, trialControl=${JSON.stringify(last?.trialControl ?? null)}`
-    + (lastErr ? `, last error: ${lastErr.message}` : ''));
+    + (lastErr ? `, last error: ${lastErr.message}` : '')
+    + stderrTail(stderr));
+}
+
+const STDERR_TAIL = 2000;
+function stderrTail(stderr) {
+  if (typeof stderr !== 'function') return '';
+  let text = '';
+  try { text = String(stderr() ?? ''); } catch (e) { return `\n--- REST server stderr: unreadable (${e?.message ?? e}) ---`; }
+  text = text.trimEnd();
+  if (!text) return '\n--- REST server stderr: empty ---';
+  const tail = text.length > STDERR_TAIL ? `…${text.slice(-STDERR_TAIL)}` : text;
+  return `\n--- REST server stderr (last ${Math.min(text.length, STDERR_TAIL)} chars) ---\n${tail}`;
 }

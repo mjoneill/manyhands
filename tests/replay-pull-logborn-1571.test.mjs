@@ -243,7 +243,8 @@ async function boot({ dsid, unit }) {
   return srv;
 }
 // #1716 — ready means OUR executor (our dataset, our own child running), not whatever answers /health on an unheld port.
-const executorUp = (srv) => waitExecutorReady(srv.baseUrl, { dsid: srv.dsid, headers: { authorization: `Bearer ${TOK.bob}` }, tries: 200, intervalMs: 50 });
+// #1877 — with the REST's stderr: a trial child that died at boot says why there, and CI's TAP otherwise never shows it
+const executorUp = (srv) => waitExecutorReady(srv.baseUrl, { dsid: srv.dsid, headers: { authorization: `Bearer ${TOK.bob}` }, tries: 200, intervalMs: 50, stderr: srv.stderr });
 const H = { 'content-type': 'application/json', authorization: `Bearer ${TOK.bob}` };
 const call = async (srv, method, p, body) => {
   const r = await fetch(`${srv.baseUrl}${p}`, { method, headers: H, body: body === undefined ? undefined : JSON.stringify(body) });

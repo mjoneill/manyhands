@@ -147,3 +147,48 @@ test('#1716 (R6) SYNTHETIC: counters reporting executorRunning true with the ide
   await new Promise((r) => fake.listen(0, '127.0.0.1', r));
   try { await rejects(ready()(`http://127.0.0.1:${fake.address().port}`, FAST), /identity/i, 'R6'); } finally { await new Promise((r) => fake.close(r)); }
 });
+
+// ── #1877: a REST whose trial child never runs. CI 015ca7d attempt 1 (replay-pull-logborn-1571) failed with exactly this body, and
+// the rejection could not say whether the child DIED at boot or was still STARTING. The REST server's stderr knows (server.js logs
+// "graph-slice: trial executor did not start: executor exited <code>: <its stderr>"), so the rejection carries its tail.
+const CI_1877_BODY = { identity: { ok: false, status: 'UNAVAILABLE', reason: 'transport: ECONNREFUSED' }, trialControl: true, executorRunning: false };
+async function neverReady(body) {
+  const fake = http.createServer((req, res) => {
+    if (req.url === '/api/trial/counters') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); return; }
+    res.writeHead(404); res.end();
+  });
+  await new Promise((r) => fake.listen(0, '127.0.0.1', r));
+  return { url: `http://127.0.0.1:${fake.address().port}`, close: () => new Promise((r) => fake.close(r)) };
+}
+
+test('#1877 (R7) the not-ready rejection carries the TAIL of the REST server\'s stderr when the caller gives it', async () => {
+  const f = await neverReady(CI_1877_BODY);
+  const noise = 'x'.repeat(5000);
+  const died = 'graph-slice: trial executor did not start: executor exited 1: OSError: [Errno 48] Address already in use';
+  try {
+    let err = null; try { await ready()(f.url, { ...FAST, tries: 3, stderr: () => `${noise}\n${died}\n` }); } catch (e) { err = e; }
+    assert.ok(err, 'R7: never ready, so it rejects');
+    assert.match(err.message, /never became ready as OURS/, 'R7: the existing reason stays first');
+    assert.match(err.message, /REST server stderr/i, 'R7: the tail is labelled as the REST server\'s stderr');
+    assert.ok(err.message.includes(died), `R7: the exit line reaches the rejection (${err.message.slice(-300)})`);
+    assert.ok(err.message.length < 4000, `R7: a TAIL, not the whole stream (${err.message.length} chars)`);
+  } finally { await f.close(); }
+});
+
+test('#1877 (R8) without a stderr source the rejection is byte-for-byte today\'s message', async () => {
+  const f = await neverReady(CI_1877_BODY);
+  try {
+    let err = null; try { await ready()(f.url, { ...FAST, tries: 3 }); } catch (e) { err = e; }
+    assert.equal(err?.message, 'executor never became ready as OURS (#1716) after 3 tries: identity={"ok":false,"status":"UNAVAILABLE","reason":"transport: ECONNREFUSED"}, executorRunning=false, trialControl=true');
+  } finally { await f.close(); }
+});
+
+test('#1877 (R9) REAL chain: our trial child cannot bind (a stranger holds its port), and the rejection carries the REST server\'s own "did not start" line', T, async () => {
+  const s = await stranger({ status: 401, body: { error: 'unauthorized' } }); const rest = await restAt(s.url);
+  try {
+    let err = null; try { await ready()(rest.baseUrl, { ...FAST, stderr: rest.stderr }); } catch (e) { err = e; }
+    assert.ok(err, 'R9: never ready, so it rejects');
+    assert.match(err.message, /REST server stderr/i, 'R9: the tail is attached');
+    assert.match(err.message, /trial executor did not start: executor exited/, `R9: the server's own reason reaches the rejection (${err.message.slice(-500)})`);
+  } finally { await rest.stop(); await s.close(); }
+});
