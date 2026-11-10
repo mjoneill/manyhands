@@ -367,6 +367,19 @@ test('#1867 R6d — a clean run reports its main call\'s finish reason "stop"; a
   assert.equal(r2.stopReason, null);
 });
 
+test('#1870 R6e — an adapter that says finished:false (the OpenRouter flag on a MISSING finish_reason) is a provider failure and its items are not used; the same reply with no flag at all is not (bubbles 52071)', { skip: SKIP }, async () => {
+  const src = ingestSource({ text: FIXTURE, url: FIXTURE_URL });
+  const { extractor } = extractorWith({ model: fakeModel([{ status: 200, json: reply(...goodItems()), stopReason: null, finished: false }]) });
+  const r = await extractor.run({ source: src, modelKey: 'fake-a', prompt: 'p' });
+  assert.equal(r.counters.providerFailures, 1, `finished:false is a provider failure (${JSON.stringify(r.counters)})`);
+  assert.equal(r.published.length, 0, 'an unproven completion is not published');
+  assert.equal(r.outcome, 'failed');
+  // CONTROL: the adapter's flag decides; finished:true with the same null reason is used
+  const { extractor: ok } = extractorWith({ model: fakeModel([{ status: 200, json: reply(...goodItems()), stopReason: null, finished: true }]) });
+  const r2 = await ok.run({ source: src, modelKey: 'fake-a', prompt: 'p' });
+  assert.equal(r2.outcome, 'complete', 'CONTROL: finished:true is used');
+});
+
 test('#1810 R7 — ZDR on every request body, re-asks included; a non-200 is never retried with the flags removed', { skip: SKIP }, async () => {
   assert.deepEqual(ZDR_PROVIDER, { zdr: true, data_collection: 'deny' });
   const src = ingestSource({ text: FIXTURE, url: FIXTURE_URL });

@@ -105,11 +105,18 @@ export function createOpenRouterModel({ apiKey, baseUrl = 'https://openrouter.ai
     }
     const content = json?.choices?.[0]?.message?.content;
     let parsed = null; try { parsed = typeof content === 'string' ? JSON.parse(content) : content ?? null; } catch { parsed = null; }
-    await ledgerRow({ requestId, by, agent: by, model: id, provider: 'openrouter', protocol: 'openai-completions', ok: true,
+    // #1870: an HTTP 200 is not a finished answer. ok is true only on finish_reason "stop"; a missing one is an
+    // unproven completion, so ok:false too. Scoped to THIS adapter: OpenRouter normally sends a finish_reason, and a
+    // provider that never sends one needs its own rule. The 200 stays visible in `error`.
+    const stopReason = json?.choices?.[0]?.finish_reason ?? null;
+    const finished = stopReason === 'stop';
+    await ledgerRow({ requestId, by, agent: by, model: id, provider: 'openrouter', protocol: 'openai-completions', ok: finished,
+      ...(finished ? {} : { error: stopReason === null ? 'http 200 with no finish_reason: completion unproven' : `http 200 with finish_reason "${stopReason}": the model did not finish` }),
       tokensIn: json?.usage?.prompt_tokens ?? null, tokensOut: json?.usage?.completion_tokens ?? null,
-      stopReason: json?.choices?.[0]?.finish_reason ?? null, latencyMs, at: now() });
-    // #1867 — the finish reason goes to the caller too: a 200 that ended "length" or "error" is not a finished answer
-    return { status: 200, json: parsed, stopReason: json?.choices?.[0]?.finish_reason ?? null };
+      stopReason, latencyMs, at: now() });
+    // #1867 + #1870 (bubbles' ruling, 52071): the caller gets the finish reason AND the same `finished` verdict the
+    // ledger recorded, so the ledger's ok and the extractor's output gate are ONE decision that cannot drift.
+    return { status: 200, json: parsed, stopReason, finished };
   }
 
   return { send, modelId: id };
