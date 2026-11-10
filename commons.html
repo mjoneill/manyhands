@@ -1015,8 +1015,11 @@
         deliveryEl.title = `mode: ${s.mode} · ${s.receivers || 0} receiving · ${s.pending || 0} in flight`;
       } catch (_) { deliveryEl.textContent = ''; }
     }
+    // #1874 — a hidden tab does not poll: each poll reaches the executor (#1776), and nobody is reading the badge.
+    // Becoming visible polls once at once, so the badge is current when it is looked at.
     pollDelivery();
-    setInterval(pollDelivery, 4000);
+    setInterval(() => { if (document.visibilityState !== 'hidden') pollDelivery(); }, 4000);
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') pollDelivery(); });
 
     init();
   </script>

@@ -237,7 +237,8 @@ test('#1346 STALE SWEEP — a delivery left at turn-started by a runner that die
 });
 
 test('#1346 DISCLOSURE — /channel/status carries every channel-mode resident: mode, open, in-turn, stuck', async () => {
-  const pair = await startPair({ board: fresh() });
+  // #1874 — this row watches the counts change between consecutive reads, so the production 30 s minimum interval is off here
+  const pair = await startPair({ board: fresh(), mcpEnv: { SCRUM_STATUS_RESIDENTS_MIN_INTERVAL_MS: '0' } });
   try {
     const rest = pair.rest.baseUrl;
     const mkAgent = (seatKey, extra) => api(rest, 'POST', '/api/agents', { seatKey, prompt: 'p', residency: 'resident', by: 'ada', model: { model: 'fake', protocol: 'ollama-native', baseUrl: 'http://127.0.0.1:1' }, ...extra });
@@ -292,9 +293,63 @@ test('#1346 boundedResidentReader — a slow board does not stall the status pag
   assert.equal(stale.read.at, good.read.at, 'stamped with WHEN it was read, not now');
   assert.match(stale.read.reason, /timeout/);
 
+  t += 1000;   // #1874 — past the hung read's abandon window (10 × timeoutMs); inside it, this call would JOIN that read
   const failed = await read(async () => { throw new Error('ECONNREFUSED'); });
   assert.equal(failed.read.fresh, false); assert.match(failed.read.reason, /ECONNREFUSED/);
   assert.deepEqual(failed.residents, good.residents);
+});
+
+test('#1874 boundedResidentReader — ONE read in flight: a second call while the first is running starts nothing, and both are served from it', async () => {
+  let t = 2_000_000;
+  const read = boundedResidentReader({ timeoutMs: 30, now: () => t });
+  let started = 0; let finish;
+  const slow = () => { started += 1; return new Promise((r) => { finish = r; }); };
+  const a = await read(slow);
+  const b = await read(slow);
+  assert.equal(started, 1, 'a read still running is joined, not duplicated');
+  assert.match(a.residents.error, /timeout after 30ms/); assert.match(b.residents.error, /timeout after 30ms/);
+  finish({ gizmo: { deliveryMode: 'channel', open: 1, inTurn: 0, stuck: 0 } });
+  await new Promise((r) => setImmediate(r));
+  const c = await read(async () => { started += 1; return { gizmo: { deliveryMode: 'channel', open: 9, inTurn: 0, stuck: 0 } }; });
+  assert.equal(started, 2, 'once it has finished, the next call reads again');
+  assert.equal(c.residents.gizmo.open, 9);
+});
+
+test('#1874 boundedResidentReader — a read that outlives its caller\'s bound is still RECORDED, so a slow board stops reading as unreadable', async () => {
+  let t = 3_000_000;
+  const read = boundedResidentReader({ timeoutMs: 30, now: () => t });
+  let finish;
+  const first = await read(() => new Promise((r) => { finish = r; }));
+  assert.match(first.residents.error, /unreadable/);
+  t += 500;
+  finish({ gizmo: { deliveryMode: 'channel', open: 4, inTurn: 0, stuck: 0 } });
+  await new Promise((r) => setImmediate(r));
+  t += 500;
+  const next = await read(() => new Promise(() => {}));
+  assert.equal(next.residents.gizmo?.open, 4, `the late answer is served: ${JSON.stringify(next)}`);
+  assert.equal(next.read.at, new Date(3_000_500).toISOString(), 'stamped with when it ARRIVED');
+  assert.equal(next.read.fresh, false);
+});
+
+test('#1874 boundedResidentReader — a reading younger than minIntervalMs is served without a new read; an older one reads again', async () => {
+  let t = 4_000_000; let started = 0;
+  const read = boundedResidentReader({ timeoutMs: 30, minIntervalMs: 10_000, now: () => t });
+  const fn = async () => { started += 1; return { gizmo: { deliveryMode: 'channel', open: started, inTurn: 0, stuck: 0 } }; };
+  const one = await read(fn);
+  assert.equal(started, 1); assert.equal(one.read.fresh, true);
+  t += 9_999;
+  const two = await read(fn);
+  assert.equal(started, 1, 'inside the interval nothing is read');
+  assert.equal(two.residents.gizmo.open, 1);
+  assert.equal(two.read.at, one.read.at, 'stamped with when it was read, not now');
+  assert.equal(two.read.fresh, false); assert.match(two.read.reason, /younger than 10000ms/);
+  t += 2;
+  const three = await read(fn);
+  assert.equal(started, 2, 'past the interval it reads again'); assert.equal(three.residents.gizmo.open, 2);
+  const noLimit = boundedResidentReader({ timeoutMs: 30, now: () => t });
+  let n = 0; const g = async () => { n += 1; return { x: {} }; };
+  await noLimit(g); await noLimit(g);
+  assert.equal(n, 2, 'minIntervalMs defaults to 0: every call may read');
 });
 
 test('#1346 the status counter and the drain query agree on a third failure — one constant, both sides', async () => {

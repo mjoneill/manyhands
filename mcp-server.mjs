@@ -2821,7 +2821,14 @@ setInterval(reapIdleSessions, REAP_SWEEP_MS).unref();
 // stream. Read from the agent records per fanout — the mode is a field on the
 // board (slice 1), and a cache would be one more place for it to go stale.
 const RESIDENT_TARGET = 'resident:';
-const readResidents = boundedResidentReader({ timeoutMs: Number(process.env.SCRUM_STATUS_RESIDENTS_TIMEOUT_MS) || 1500 });
+// #1874 — one read in flight at a time, a late answer still recorded, and a reading younger than the minimum interval
+// served as-is: the commons tab polls this every 4 s, and each fresh read is a multi-second deliveries query (#1776).
+const envMs = (name, dflt) => { const v = process.env[name]; return v !== undefined && v !== '' && Number.isFinite(Number(v)) ? Number(v) : dflt; };
+const readResidents = boundedResidentReader({
+  timeoutMs: Number(process.env.SCRUM_STATUS_RESIDENTS_TIMEOUT_MS) || 1500,
+  minIntervalMs: envMs('SCRUM_STATUS_RESIDENTS_MIN_INTERVAL_MS', 30_000),
+  abandonAfterMs: envMs('SCRUM_STATUS_RESIDENTS_ABANDON_MS', 60_000),
+});
 async function residentInboxes() {
   return readResidents(async () => {
     const agents = await apiCall('GET', '/api/agents');

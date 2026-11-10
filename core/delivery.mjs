@@ -57,14 +57,33 @@ export function classifyDeliveries(list, opts = {}) {
  * SAY it is stale (when, and why). No reading yet ⇒ an error field, never an
  * empty map pretending to be zero.
  */
-export function boundedResidentReader({ timeoutMs = 1500, now = Date.now } = {}) {
-  let last = null;   // { residents, at }
+export function boundedResidentReader({ timeoutMs = 1500, minIntervalMs = 0, abandonAfterMs = timeoutMs * 10, now = Date.now } = {}) {
+  let last = null;     // { residents, at, atMs } — the last GOOD reading
+  let flight = null;   // { promise, startedMs } — #1874: the one read in flight
+  const stamp = () => { const ms = now(); return { ms, iso: new Date(ms).toISOString() }; };
+  function start(fn) {
+    const startedMs = now();
+    const promise = Promise.resolve().then(fn).then((residents) => {
+      // #1874 — RECORDED whenever it lands, even after every caller stopped waiting: a read slower than the bound
+      // used to be thrown away, so `last` was never set and the status read "unreadable" for as long as the board was slow.
+      const s = stamp(); last = { residents, at: s.iso, atMs: s.ms }; return { residents };
+    }, (e) => ({ error: e?.message ?? String(e) })).finally(() => { if (flight?.promise === promise) flight = null; });
+    flight = { promise, startedMs };
+    return promise;
+  }
   return async function read(fn) {
+    // #1874 — a reading younger than minIntervalMs is answered without a new read (the commons tab polls every 4 s).
+    if (last && minIntervalMs > 0 && now() - last.atMs < minIntervalMs) {
+      return { residents: last.residents, read: { at: last.at, fresh: false, reason: `cached: younger than ${minIntervalMs}ms` } };
+    }
+    // #1874 — SINGLE-FLIGHT: a read still running is joined, not duplicated. One that has run past abandonAfterMs is
+    // presumed hung and a new one starts, so a single stuck request cannot freeze the reading for good.
+    const p = flight && now() - flight.startedMs < abandonAfterMs ? flight.promise : start(fn);
     let timer;
     const bound = new Promise((resolve) => { timer = setTimeout(() => resolve({ timeout: true }), timeoutMs); });
     try {
-      const r = await Promise.race([fn().then((residents) => ({ residents })).catch((e) => ({ error: e?.message ?? String(e) })), bound]);
-      if (r.residents) { last = { residents: r.residents, at: new Date(now()).toISOString() }; return { residents: r.residents, read: { at: last.at, fresh: true } }; }
+      const r = await Promise.race([p, bound]);
+      if (r.residents) return { residents: r.residents, read: { at: last.at, fresh: true } };
       const reason = r.timeout ? `timeout after ${timeoutMs}ms` : r.error;
       if (last) return { residents: last.residents, read: { at: last.at, fresh: false, reason } };
       return { residents: { error: `resident inboxes unreadable: ${reason}` }, read: { at: null, fresh: false, reason } };
