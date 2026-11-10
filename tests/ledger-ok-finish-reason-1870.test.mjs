@@ -54,7 +54,7 @@ test('#1870 L4 (control): finish_reason "stop" records ok:true with no error, an
   assert.deepEqual(r, { status: 200, json: { a: 1 }, stopReason: 'stop', finished: true }, 'the caller gets the same verdict the ledger recorded');
 });
 
-test('#1870 L5: the caller is told the SAME verdict the ledger recorded: a missing finish_reason returns finished:false (bubbles 52071)', async () => {
+test('#1870 L5: the caller is told the SAME verdict the ledger recorded: a missing finish_reason returns finished:false', async () => {
   const { r, row } = await send(undefined);
   assert.equal(r.finished, false);
   assert.equal(r.finished, row.ok, 'one decision, not two that can drift');

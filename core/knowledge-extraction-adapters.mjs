@@ -114,7 +114,7 @@ export function createOpenRouterModel({ apiKey, baseUrl = 'https://openrouter.ai
       ...(finished ? {} : { error: stopReason === null ? 'http 200 with no finish_reason: completion unproven' : `http 200 with finish_reason "${stopReason}": the model did not finish` }),
       tokensIn: json?.usage?.prompt_tokens ?? null, tokensOut: json?.usage?.completion_tokens ?? null,
       stopReason, latencyMs, at: now() });
-    // #1867 + #1870 (bubbles' ruling, 52071): the caller gets the finish reason AND the same `finished` verdict the
+    // #1867 + #1870 (commons ruling 52071): the caller gets the finish reason AND the same `finished` verdict the
     // ledger recorded, so the ledger's ok and the extractor's output gate are ONE decision that cannot drift.
     return { status: 200, json: parsed, stopReason, finished };
   }

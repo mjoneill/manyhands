@@ -326,7 +326,7 @@ test('#1810 R6 — two counters kept apart: a span mismatch is a SPAN invention;
   assert.equal(Number(g.i.value), 1); assert.equal(Number(g.f.value), 1);
 });
 
-// #1867 (spec: bubbles, post 52012) — a 200 is not a finished answer. The provider's finish reason travels with the reply as
+// #1867 (spec: commons post 52012) — a 200 is not a finished answer. The provider's finish reason travels with the reply as
 // `stopReason`; anything but "stop" is a PROVIDER failure and its output is never used. Live specimen: model-call d530379c,
 // a span repair that answered 200 with stopReason "error" and was counted as a success.
 test('#1867 R6b — the FIRST ask ends "length": a provider failure, its items are not used, the run is failed and says why', { skip: SKIP }, async () => {
@@ -367,7 +367,7 @@ test('#1867 R6d — a clean run reports its main call\'s finish reason "stop"; a
   assert.equal(r2.stopReason, null);
 });
 
-test('#1870 R6e — an adapter that says finished:false (the OpenRouter flag on a MISSING finish_reason) is a provider failure and its items are not used; the same reply with no flag at all is not (bubbles 52071)', { skip: SKIP }, async () => {
+test('#1870 R6e — an adapter that says finished:false (the OpenRouter flag on a MISSING finish_reason) is a provider failure and its items are not used; the same reply with no flag at all is not', { skip: SKIP }, async () => {
   const src = ingestSource({ text: FIXTURE, url: FIXTURE_URL });
   const { extractor } = extractorWith({ model: fakeModel([{ status: 200, json: reply(...goodItems()), stopReason: null, finished: false }]) });
   const r = await extractor.run({ source: src, modelKey: 'fake-a', prompt: 'p' });
