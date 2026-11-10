@@ -614,9 +614,21 @@ export async function startPair({
     }
   };
 
-  const rest = await withDeadline(
-    _startRest({ board, port: restPort, mcpNotifyUrl }), restAcquireTimeoutMs, 'REST acquisition',
-  );
+  // #1873 — REST's port is chosen up front as well, so it can lose the same race (PR #212's CI, 11-10: #1118-A,
+  // "REST server failed to start … lost the allocation race"). Nothing is running yet on this path, so a contended
+  // REST start needs no teardown: fresh ports, try the pair again, bounded alike. Any other failure rejects at once.
+  let rest;
+  try {
+    rest = await withDeadline(
+      _startRest({ board, port: restPort, mcpNotifyUrl }), restAcquireTimeoutMs, 'REST acquisition',
+    );
+  } catch (e) {
+    if (CONTENDED.test(String(e && e.message))) {
+      if (pairAttempt < START_ATTEMPTS) continue;
+      throw new Error(`${e.message}\n— pair attempt ${pairAttempt}/${START_ATTEMPTS}: the REST port chosen up front was taken before REST bound it (#1873)`);
+    }
+    throw e;
+  }
 
   let mcp;
   try {
