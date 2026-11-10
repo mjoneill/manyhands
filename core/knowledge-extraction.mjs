@@ -180,9 +180,12 @@ export function createExtractor({ graphClient, runs, model, registry, actor = 'e
       if (r.status !== 200) return { ok: false, failure: `http-${r.status}` };
       // #1867 — a 200 is not a finished answer. Any finish but "stop" (length, error, content_filter) is a PROVIDER failure
       // and its output is never used: model-call d530379c answered 200 with stopReason "error" and was counted a success.
-      // No finish reason at all (older providers, fakes) stays as before.
+      // An adapter that reports `finished` decides (#1870, bubbles' ruling 52071): the OpenRouter adapter's flag is the
+      // SAME verdict its ledger row recorded, so a missing finish_reason there is a failure here too and its output is
+      // dropped. An adapter that reports no `finished` (fakes, other providers) keeps #1867's rule: only a non-"stop" fails.
       const stopReason = typeof r.stopReason === 'string' ? r.stopReason : null;
-      if (stopReason !== null && stopReason !== 'stop') return { ok: false, failure: `finish-${stopReason}`, stopReason };
+      const finished = typeof r.finished === 'boolean' ? r.finished : (stopReason === null || stopReason === 'stop');
+      if (!finished) return { ok: false, failure: `finish-${stopReason ?? 'none'}`, stopReason };
       return { ok: true, json: r.json, stopReason };
     } catch (e) { return { ok: false, failure: e?.message || String(e) }; }
   }
