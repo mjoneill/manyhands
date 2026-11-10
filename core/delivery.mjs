@@ -58,7 +58,7 @@ export function classifyDeliveries(list, opts = {}) {
  * empty map pretending to be zero.
  */
 export function boundedResidentReader({ timeoutMs = 1500, minIntervalMs = 0, abandonAfterMs = timeoutMs * 10, now = Date.now } = {}) {
-  let last = null;     // { residents, at, atMs } — the last GOOD reading
+  let last = null;     // { residents, at, atMs, startedMs } — the last GOOD reading
   let flight = null;   // { promise, startedMs } — #1874: the one read in flight
   const stamp = () => { const ms = now(); return { ms, iso: new Date(ms).toISOString() }; };
   function start(fn) {
@@ -66,7 +66,10 @@ export function boundedResidentReader({ timeoutMs = 1500, minIntervalMs = 0, aba
     const promise = Promise.resolve().then(fn).then((residents) => {
       // #1874 — RECORDED whenever it lands, even after every caller stopped waiting: a read slower than the bound
       // used to be thrown away, so `last` was never set and the status read "unreadable" for as long as the board was slow.
-      const s = stamp(); last = { residents, at: s.iso, atMs: s.ms }; return { residents };
+      // #1875 — but only if this read STARTED no earlier than the one already recorded: a read abandoned as hung that
+      // lands after a newer one would otherwise put OLDER counts under a NEWER stamp, and the status cannot show that.
+      if (last && startedMs < last.startedMs) return { residents, superseded: true };
+      const s = stamp(); last = { residents, at: s.iso, atMs: s.ms, startedMs }; return { residents };
     }, (e) => ({ error: e?.message ?? String(e) })).finally(() => { if (flight?.promise === promise) flight = null; });
     flight = { promise, startedMs };
     return promise;
@@ -83,7 +86,8 @@ export function boundedResidentReader({ timeoutMs = 1500, minIntervalMs = 0, aba
     const bound = new Promise((resolve) => { timer = setTimeout(() => resolve({ timeout: true }), timeoutMs); });
     try {
       const r = await Promise.race([p, bound]);
-      if (r.residents) return { residents: r.residents, read: { at: last.at, fresh: true } };
+      if (r.residents && !r.superseded) return { residents: r.residents, read: { at: last.at, fresh: true } };
+      if (r.superseded) return { residents: last.residents, read: { at: last.at, fresh: false, reason: 'a read that started later landed first' } };
       const reason = r.timeout ? `timeout after ${timeoutMs}ms` : r.error;
       if (last) return { residents: last.residents, read: { at: last.at, fresh: false, reason } };
       return { residents: { error: `resident inboxes unreadable: ${reason}` }, read: { at: null, fresh: false, reason } };

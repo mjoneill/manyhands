@@ -352,6 +352,40 @@ test('#1874 boundedResidentReader — a reading younger than minIntervalMs is se
   assert.equal(n, 2, 'minIntervalMs defaults to 0: every call may read');
 });
 
+test('#1875 boundedResidentReader — a hung read that lands AFTER a newer one does not overwrite it: the reading that STARTED later wins', async () => {
+  let t = 5_000_000;
+  const read = boundedResidentReader({ timeoutMs: 30, abandonAfterMs: 1_000, now: () => t });
+  let finishA; let finishB;
+  await read(() => new Promise((r) => { finishA = r; }));            // A starts at t and hangs
+  t += 1_001;                                                          // past the abandon window
+  await read(() => new Promise((r) => { finishB = r; }));            // B starts
+  t += 10; finishB({ gizmo: { deliveryMode: 'channel', open: 7, inTurn: 0, stuck: 0 } });
+  await new Promise((r) => setImmediate(r));
+  t += 10; finishA({ gizmo: { deliveryMode: 'channel', open: 1, inTurn: 0, stuck: 0 } });
+  await new Promise((r) => setImmediate(r));
+  t += 10;
+  const now = await read(() => new Promise(() => {}));
+  assert.equal(now.residents.gizmo?.open, 7, `B (started later) is kept; A's older counts are dropped: ${JSON.stringify(now)}`);
+  assert.equal(now.read.at, new Date(5_001_011).toISOString(), 'stamped with when B landed');
+});
+
+test('#1875 boundedResidentReader — a caller still waiting on the superseded read is served the newer reading, not the older one, and not as fresh', async () => {
+  let t = 6_000_000;
+  // a bound LONGER than the abandon window is the only way a caller is still waiting when its read is superseded
+  const read = boundedResidentReader({ timeoutMs: 5_000, abandonAfterMs: 0, now: () => t });
+  let finishA; let finishB;
+  const waitingOnA = read(() => new Promise((r) => { finishA = r; })); await new Promise((r) => setImmediate(r));   // fn is called a microtask later
+  t += 1;
+  const waitingOnB = read(() => new Promise((r) => { finishB = r; })); await new Promise((r) => setImmediate(r));   // fn is called a microtask later
+  t += 1; finishB({ gizmo: { deliveryMode: 'channel', open: 7, inTurn: 0, stuck: 0 } });
+  const b = await waitingOnB;
+  assert.equal(b.residents.gizmo.open, 7); assert.equal(b.read.fresh, true);
+  t += 1; finishA({ gizmo: { deliveryMode: 'channel', open: 1, inTurn: 0, stuck: 0 } });
+  const a = await waitingOnA;
+  assert.equal(a.residents.gizmo.open, 7, `the newer reading is served: ${JSON.stringify(a)}`);
+  assert.equal(a.read.fresh, false); assert.match(a.read.reason, /started later landed first/);
+});
+
 test('#1346 the status counter and the drain query agree on a third failure — one constant, both sides', async () => {
   const { classifyDeliveries, isOpenDelivery, DELIVERY_MAX_ATTEMPTS } = await import('../core/delivery.mjs');
   const claim = { state: 'runner-claimed', at: '2026-09-13T00:00:00Z' };
