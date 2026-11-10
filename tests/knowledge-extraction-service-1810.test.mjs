@@ -83,7 +83,7 @@ test('#1810 R13 — the OpenRouter adapter: chat/completions with the key in the
     wire.push({ url: String(url), headers: { ...(opts.headers || {}) }, body: JSON.parse(opts.body) });
     if (wire.length === 2) return new Response(JSON.stringify({ error: { message: 'rate limited' } }), { status: 429, headers: { 'content-type': 'application/json' } });
     const content = JSON.stringify({ items: [{ block: 1, type: 'definition', span: 'A harness is the layer', subject: 'harness', predicate: 'scrum:relatedTo', object: 'model' }] });
-    return new Response(JSON.stringify({ id: 'gen-1', choices: [{ message: { role: 'assistant', content } }], usage: { prompt_tokens: 120, completion_tokens: 40 } }), { status: 200, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify({ id: 'gen-1', choices: [{ message: { role: 'assistant', content }, finish_reason: 'stop' }], usage: { prompt_tokens: 120, completion_tokens: 40 } }), { status: 200, headers: { 'content-type': 'application/json' } });
   };
   const rec = recordingFetch();
   const board = createRestBoard({ baseUrl: SRV.baseUrl, token: TOK, by: 'extractor', fetchImpl: rec.fetch });
@@ -112,7 +112,7 @@ test('#1810 R13b — every OpenRouter call, refused ones included, lands ONE mod
   const fakeFetch = async () => {
     n += 1;
     if (n === 2) return new Response(JSON.stringify({ error: { message: 'rate limited' } }), { status: 429, headers: { 'content-type': 'application/json' } });
-    return new Response(JSON.stringify({ id: 'gen-1', choices: [{ message: { role: 'assistant', content: '{"items":[]}' } }], usage: { prompt_tokens: 120, completion_tokens: 40 } }), { status: 200, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify({ id: 'gen-1', choices: [{ message: { role: 'assistant', content: '{"items":[]}' }, finish_reason: 'stop' }], usage: { prompt_tokens: 120, completion_tokens: 40 } }), { status: 200, headers: { 'content-type': 'application/json' } });
   };
   const rec = recordingFetch();
   const board = createRestBoard({ baseUrl: SRV.baseUrl, token: TOK, by: 'extractor', fetchImpl: rec.fetch });
@@ -144,7 +144,7 @@ test('#1843 R13c — every OpenRouter ledger row carries ONE requestId in the sh
   const fakeFetch = async () => {
     n += 1;
     if (n === 2) return new Response(JSON.stringify({ error: { message: 'rate limited' } }), { status: 429, headers: { 'content-type': 'application/json' } });
-    return new Response(JSON.stringify({ id: 'gen-1', choices: [{ message: { role: 'assistant', content: '{"items":[]}' } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }), { status: 200, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify({ id: 'gen-1', choices: [{ message: { role: 'assistant', content: '{"items":[]}' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1 } }), { status: 200, headers: { 'content-type': 'application/json' } });
   };
   const model = createOpenRouterModel({ apiKey: 'sk-or-test-not-a-real-key', baseUrl: 'https://openrouter.test/api/v1', modelId: 'm/x', fetchImpl: fakeFetch, ledger });
   const body = { model: 'k', messages: [{ role: 'user', content: 'u' }] };
