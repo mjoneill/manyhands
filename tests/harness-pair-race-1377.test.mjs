@@ -72,3 +72,47 @@ test('#1377 contention on EVERY attempt is bounded and reported as the race, wit
   }), /allocation race.*pair attempt 4\/4/s);
   assert.equal(attempts, 4);
 });
+
+// #1873 — THE OTHER HALF. Measured on PR #212's CI (run 42856405749, 2026-11-10): #1118-A failed in 118 ms with
+// "REST server failed to start: port 40991 was answered by a server I did not start (#1259) — lost the allocation
+// race (#1140) (port was requested explicitly, so it is not retried)". The pair retry above wrapped only the MCP
+// acquisition; REST's port is chosen up front too, so a contended REST start rejected straight out of startPair.
+const restContended = (port) => new Error(`REST server failed to start: port ${port} was answered by a server I did not start (#1259) — lost the allocation race (#1140) (port was requested explicitly, so it is not retried)\nstderr: `);
+
+test('#1873 a CONTENDED REST start restarts the pair on a fresh REST port instead of failing the test', async () => {
+  const restPorts = [];
+  let mcpStarts = 0;
+  const pair = await startPair({
+    board: makeBoardFixture(),
+    _startRest: async ({ port }) => {
+      restPorts.push(port);
+      if (restPorts.length === 1) throw restContended(port);
+      return { baseUrl: `http://127.0.0.1:${port}`, port, stop: async () => {} };
+    },
+    _startMcp: async ({ port }) => { mcpStarts += 1; return { port, stop: async () => {} }; },
+  });
+  assert.equal(restPorts.length, 2, 'REST was tried again');
+  assert.notEqual(restPorts[0], restPorts[1], 'on a FRESH port, not the contended one');
+  assert.equal(mcpStarts, 1, 'MCP never started for the lost attempt, and started once for the won one');
+  await pair.stop();
+});
+
+test('#1873 a NON-contention REST failure still rejects at once, with no retry', async () => {
+  let attempts = 0;
+  await assert.rejects(() => startPair({
+    board: makeBoardFixture(),
+    _startRest: async () => { attempts += 1; throw new Error('injected: REST broke for another reason'); },
+    _startMcp: async () => { throw new Error('MCP must not start when REST failed'); },
+  }), /another reason/);
+  assert.equal(attempts, 1);
+});
+
+test('#1873 REST contention on EVERY attempt is bounded and reported as the race, with the count', async () => {
+  let attempts = 0;
+  await assert.rejects(() => startPair({
+    board: makeBoardFixture(),
+    _startRest: async ({ port }) => { attempts += 1; throw restContended(port); },
+    _startMcp: async () => { throw new Error('MCP must not start when REST failed'); },
+  }), /allocation race.*pair attempt 4\/4/s);
+  assert.equal(attempts, 4);
+});
