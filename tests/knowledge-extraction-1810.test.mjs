@@ -374,6 +374,7 @@ test('#1870 R6e — an adapter that says finished:false (the OpenRouter flag on 
   assert.equal(r.counters.providerFailures, 1, `finished:false is a provider failure (${JSON.stringify(r.counters)})`);
   assert.equal(r.published.length, 0, 'an unproven completion is not published');
   assert.equal(r.outcome, 'failed');
+  assert.equal(r.finished, false, 'the run result carries the verdict, so the report can say why');
   // CONTROL: the adapter's flag decides; finished:true with the same null reason is used
   const { extractor: ok } = extractorWith({ model: fakeModel([{ status: 200, json: reply(...goodItems()), stopReason: null, finished: true }]) });
   const r2 = await ok.run({ source: src, modelKey: 'fake-a', prompt: 'p' });

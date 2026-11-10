@@ -115,6 +115,10 @@ test('B3b (#1867): the finish post names the main call\'s finish; an answer that
   assert.match(cut, /the model's answer did not finish \("length"\), so none of it was used/, 'the cut-off is called out in plain words');
   const none = finishBody({ url: URL1, result: { ...result, stopReason: null } });
   assert.doesNotMatch(none, /model finished/, 'no finish reason: nothing is claimed');
+  // #1870: a missing reason the adapter judged unfinished is called out, not left as a bare failure count
+  const unproven = finishBody({ url: URL1, result: { ...result, outcome: 'failed', published: [], stopReason: null, finished: false } });
+  assert.match(unproven, /did not finish \(no finish reason\), so none of it was used/);
+  assert.doesNotMatch(finishBody({ url: URL1, result: { ...result, stopReason: null, finished: true } }), /did not finish/, 'finished:true with no reason claims nothing');
 });
 
 test('B4: the fail post names the source, the reason, and whether it will be retried', () => {
