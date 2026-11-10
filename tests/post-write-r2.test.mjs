@@ -39,8 +39,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { spawn, spawnSync } from 'node:child_process';
-import { freePort, waitForHttp, makeBoardFixture, PROJECT_DIR } from './helpers/harness.mjs';
+import { spawnSync } from 'node:child_process';
+import { spawnBoardServer, makeBoardFixture } from './helpers/harness.mjs';
 import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-executor-proc.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
 
@@ -107,15 +107,17 @@ async function startProxy(execUrl) {
 }
 
 async function spawnServer(boardFile, execUrl, { flag = true, notifyUrl = '' } = {}) {
-  const port = await freePort();
-  const env = { ...process.env, SCRUM_BOARD_FILE: boardFile, SCRUM_PORT: String(port), SCRUM_MCP_NOTIFY_URL: notifyUrl, SCRUM_ATTACHMENTS_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'r2-attach-')),
-    SCRUM_CHANNEL_CONFIG_FILE: path.join(os.tmpdir(), `r2-chan-${process.pid}-${port}.json`), SCRUM_INSTANCE_ID: `r2-${port}`,
-    SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: execUrl, ...(flag ? { SCRUM_GRAPH_UNIT_CONVERSATIONS: '1' } : {}) };
-  const child = spawn('node', ['server.js'], { cwd: PROJECT_DIR, env, stdio: ['ignore', 'pipe', 'pipe'] });
-  const err = []; child.stderr.on('data', (d) => err.push(String(d)));
-  const base = `http://127.0.0.1:${port}`;
-  await waitForHttp(`${base}/api/board`, 15000);
-  return { base, stop: () => { try { child.kill('SIGKILL'); } catch { /* gone */ } }, stderr: () => err.join('') };
+  // #1833 — through the harness: readiness means OUR child answered (#1259), and a stranger on the port is a retry on a
+  // fresh one (#1140). Hand-rolled, this waited on /api/board with NO instance check, so a stranger already on the port
+  // passed readiness and the rows would have run against someone else's board.
+  const attach = fs.mkdtempSync(path.join(os.tmpdir(), 'r2-attach-'));
+  const s = await spawnBoardServer({
+    readyTimeoutMs: 15000, label: 'post-write-r2 server',
+    env: (port) => ({ ...process.env, SCRUM_BOARD_FILE: boardFile, SCRUM_MCP_NOTIFY_URL: notifyUrl, SCRUM_ATTACHMENTS_DIR: attach,
+      SCRUM_CHANNEL_CONFIG_FILE: path.join(os.tmpdir(), `r2-chan-${process.pid}-${port}.json`),
+      SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: execUrl, ...(flag ? { SCRUM_GRAPH_UNIT_CONVERSATIONS: '1' } : {}) }),
+  });
+  return { base: s.baseUrl, stop: s.stop, stderr: s.stderr };
 }
 
 async function stack(b, body, { flag = true } = {}) {

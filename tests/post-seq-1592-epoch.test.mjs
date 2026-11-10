@@ -10,8 +10,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
-import { freePort, waitForHttp, makeBoardFixture, PROJECT_DIR } from './helpers/harness.mjs';
+import { spawnSync } from 'node:child_process';
+import { spawnBoardServer, makeBoardFixture, PROJECT_DIR } from './helpers/harness.mjs';
 
 const MIGRATE = process.env.MIGRATE_POST_SEQ || path.join(PROJECT_DIR, 'scripts', 'migrate-post-seq-1592.mjs');
 const T = (n) => `2026-10-0${n}T12:00:00.000Z`;
@@ -22,13 +22,15 @@ async function api(base, method, route, body) {
   return { status: res.status, body: json, text };
 }
 async function spawnServer(file) {
-  const port = await freePort();
-  const env = { ...process.env, SCRUM_BOARD_FILE: file, SCRUM_PORT: String(port), SCRUM_MCP_NOTIFY_URL: '', SCRUM_ATTACHMENTS_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'ps1592e-attach-')),
-    SCRUM_CHANNEL_CONFIG_FILE: path.join(os.tmpdir(), `ps1592e-chan-${process.pid}-${port}.json`), SCRUM_INSTANCE_ID: `ps1592e-${port}` };
-  const child = spawn('node', ['server.js'], { cwd: PROJECT_DIR, env, stdio: ['ignore', 'pipe', 'pipe'] });
-  const base = `http://127.0.0.1:${port}`;
-  await waitForHttp(`${base}/api/board`, 15000);
-  return { base, stop: () => { try { child.kill('SIGKILL'); } catch { /* gone */ } } };
+  // #1833 — through the harness: readiness means OUR child answered (#1259), and a stranger on the port is a retry on a
+  // fresh one (#1140). Hand-rolled, this waited on /api/board with NO instance check (see post-seq-1592's note).
+  const attach = fs.mkdtempSync(path.join(os.tmpdir(), 'ps1592e-attach-'));
+  const s = await spawnBoardServer({
+    readyTimeoutMs: 15000, label: 'post-seq-1592 epoch server',
+    env: (port) => ({ ...process.env, SCRUM_BOARD_FILE: file, SCRUM_MCP_NOTIFY_URL: '', SCRUM_ATTACHMENTS_DIR: attach,
+      SCRUM_CHANNEL_CONFIG_FILE: path.join(os.tmpdir(), `ps1592e-chan-${process.pid}-${port}.json`) }),
+  });
+  return { base: s.baseUrl, stop: s.stop };
 }
 const GOOD_EPOCH = '11111111-2222-4333-8444-555555555555';
 const three = () => [conv('c1', 'a', T(1), { postSeq: 1 }), conv('c2', 'b', T(2), { postSeq: 2 }), conv('c3', 'c', T(3), { postSeq: 3 })];

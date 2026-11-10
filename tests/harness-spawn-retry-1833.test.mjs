@@ -69,11 +69,10 @@ test('#1833 a stranger on EVERY attempt fails loudly — naming #1259 and the at
 // hand-rolls it fails here, at review, instead of in CI on a lost race.
 const NOT_YET_MIGRATED = new Set([
   'announcement-graph-post-1574-c3c.test.mjs', 'announcement-outbox-1574-c3a.test.mjs', 'announcement-publish-1574-c3b.test.mjs',
-  'boot-gate.test.mjs', 'conversations-list-r1.test.mjs', 'data-dir-1788.test.mjs', 'delivery-graph-post-d1.test.mjs',
+  'boot-gate.test.mjs', 'data-dir-1788.test.mjs',
   'first-run.test.mjs', 'graph-post-discovery-r3-badge.test.mjs', 'graph-post-discovery-r3-idle.test.mjs',
   'graph-post-discovery-r3.test.mjs', 'harness-readiness-identity.test.mjs', 'instance-isolation.test.mjs',
   'memories-log-born-971.test.mjs', 'post-redaction-r4a-addendum.test.mjs', 'post-redaction-r4a.test.mjs',
-  'post-seq-1592-epoch.test.mjs', 'post-seq-1592.test.mjs', 'post-write-r2.test.mjs',
 ]);
 const handRolls = (src) => /\bfreePort\s*\(\s*\)/.test(src) && /spawn\s*\(\s*(?:'node'|"node"|process\.execPath)\s*,\s*\[[^\]]*server\.js/.test(src);
 
