@@ -4,16 +4,18 @@
  * restart that runs INSIDE another operation (a deploy) proves the lock is held by that operation with `holds`, rather
  * than acquiring a second time (which would refuse) or skipping the lock (which is the 19:04Z failure).
  */
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const SCRIPT = fileURLToPath(new URL('../scripts/operation-lock.sh', import.meta.url));
-const fresh = () => join(mkdtempSync(join(tmpdir(), 'op-lock-ask-')), 'operation-lock.json');
+const made = [];
+after(() => { for (const d of made) rmSync(d, { recursive: true, force: true }); });   // the suite's temp-leak teardown (#1672) fails a run that leaves them
+const fresh = () => { const d = mkdtempSync(join(tmpdir(), 'op-lock-ask-')); made.push(d); return join(d, 'operation-lock.json'); };
 const run = (lock, ...args) => spawnSync('sh', [SCRIPT, ...args], { env: { ...process.env, DEPLOY_LOCK: lock }, encoding: 'utf8' });
 
 test('K1 acquire --ask --note: the file holds the ask; a SECOND seat\'s status names the holder AND the ask', () => {
