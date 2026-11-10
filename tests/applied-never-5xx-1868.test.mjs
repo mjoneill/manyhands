@@ -28,9 +28,11 @@ const HAVE_PY = fs.existsSync(PY) && spawnSync(PY, ['-c', 'import pyoxigraph'], 
 const SKIP = HAVE_PY ? false : `UNAVAILABLE: no python with pyoxigraph at ${PY}`;
 const DSID = 'applied-1868';
 const TOK = mintToken();
+const TMP = [];   // every temp dir this file makes, removed in after() (the suite fails a new leak)
+const mkTmp = (prefix) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); TMP.push(d); return d; };
 
 function tokensFile() {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'a1868-tok-'));
+  const d = mkTmp('a1868-tok-');
   const at = (h) => new Date(Date.now() + h * 3600_000).toISOString();
   const f = path.join(d, 'seat-tokens.json');
   fs.writeFileSync(f, JSON.stringify({ seats: { bob: { credentials: [{ tokenHash: hashToken(TOK), scope: 'admin', issuedAt: at(-1), expiresAt: at(24), issuedBy: 'test', revokedAt: null, note: null }] } } }));
@@ -65,14 +67,18 @@ function startProxy(target) {
 let EXE, PROXY, SRV;
 before(async () => {
   if (SKIP) return;
-  EXE = await startExecutor(fs.mkdtempSync(path.join(os.tmpdir(), 'a1868-store-')));
+  EXE = await startExecutor(mkTmp('a1868-store-'));
   PROXY = await startProxy(EXE.base);
   SRV = await startRestServer({ env: {
     SCRUM_GRAPH_EXECUTOR_URL: PROXY.base, SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_UNIT_LOGBORN: '1',
     SCRUM_SEAT_TOKENS: tokensFile(), SCRUM_AUTH: 'required', GRAPH_EXECUTOR_PYTHON: PY,
   } });
 });
-after(async () => { await SRV?.stop(); PROXY?.srv.close(); EXE?.p.kill('SIGKILL'); });
+after(async () => {
+  await SRV?.stop(); PROXY?.srv.close(); EXE?.p.kill('SIGKILL');
+  if (EXE?.p && EXE.p.exitCode === null && EXE.p.signalCode === null) await new Promise((r) => EXE.p.once('exit', r));
+  for (const d of TMP) fs.rmSync(d, { recursive: true, force: true });
+});
 
 const call = async (method, p, body) => {
   const r = await fetch(`${SRV.baseUrl}${p}`, { method, headers: { 'content-type': 'application/json', authorization: `Bearer ${TOK}` }, body: body === undefined ? undefined : JSON.stringify(body) });
