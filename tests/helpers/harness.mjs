@@ -593,7 +593,7 @@ export async function startPair({
   // 0.3 s on exactly that line, on two different runs. So the PAIR retries:
   // on a contended MCP start, stop the REST sibling, allocate fresh ports, go
   // again, bounded like a single server. Any other failure rejects at once.
-  const CONTENDED = /lost the allocation race/;
+  const CONTENDED = PORT_CONTENDED;   // #1796 — ONE definition of the harness's contention text, shared with retryOnPortContention
   for (let pairAttempt = 1; pairAttempt <= START_ATTEMPTS; pairAttempt++) {
   const restPort = await freePort();
   const mcpPort = await freePort();

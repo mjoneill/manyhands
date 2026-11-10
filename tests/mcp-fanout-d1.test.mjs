@@ -34,7 +34,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { makeBoardFixture, startRestServer, startMcpServer, mcpSession, openChannelStream, freePort } from './helpers/harness.mjs';
+import { makeBoardFixture, startRestServer, startMcpServer, mcpSession, openChannelStream, freePort, retryOnPortContention } from './helpers/harness.mjs';
 import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-executor-proc.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
 
@@ -64,13 +64,19 @@ const api = async (base, method, route, body) => {
 async function stack(body, { unit }) {
   let exec = null; const store = unit ? tmpStore('d1f-store-') : null;
   if (unit) exec = await startExecutor({ store, datasetId: DSID, create: true });
-  const mcpPort = await freePort();
-  const board = makeBoardFixture({ conversations: [], postSeqEpoch: EPOCH_DOC, nextPostSeq: 1 });
-  const rest = await startRestServer({ board, mcpNotifyUrl: `http://127.0.0.1:${mcpPort}/internal/notify`,
-    env: { SCRUM_ROSTER_FILE: ROSTER_FILE, ...(unit ? { SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: exec.baseUrl, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1' } : {}) } });
-  let mcp = null; const streams = []; let s = null;
+  let rest = null; let mcp = null; const streams = []; let s = null;
   try {
-    mcp = await startMcpServer({ port: mcpPort, restApiBase: rest.baseUrl });
+    // #1796 — REST needs MCP's notify URL before MCP exists, so the MCP port is chosen UP FRONT, and a stranger can take it
+    // while REST boots (CI, 015ca7d: F5 lost exactly that race). The WHOLE start is the retry unit: fresh port, REST, MCP;
+    // an attempt that loses stops its own REST before the next one. Any other failure is rethrown at once.
+    ({ rest, mcp } = await retryOnPortContention(async () => {
+      const mcpPort = await freePort();
+      const board = makeBoardFixture({ conversations: [], postSeqEpoch: EPOCH_DOC, nextPostSeq: 1 });
+      const r = await startRestServer({ board, mcpNotifyUrl: `http://127.0.0.1:${mcpPort}/internal/notify`,
+        env: { SCRUM_ROSTER_FILE: ROSTER_FILE, ...(unit ? { SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: exec.baseUrl, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1' } : {}) } });
+      try { return { rest: r, mcp: await startMcpServer({ port: mcpPort, restApiBase: r.baseUrl }) }; }
+      catch (e) { await r.stop(); throw e; }
+    }));
     const sessions = {};
     for (const who of ['ada', 'bea', 'reader']) {
       sessions[who] = await mcpSession(mcp.mcpUrl);
@@ -93,7 +99,7 @@ async function stack(body, { unit }) {
       client: () => createGraphClient({ baseUrl: s.exec.baseUrl, expectedDatasetId: DSID }),
     };
     return await body(s);
-  } finally { for (const st of streams) st.close(); if (mcp) await mcp.stop(); await rest.stop(); if (s?.exec || exec) await killExecutor(s?.exec || exec); }
+  } finally { for (const st of streams) st.close(); if (mcp) await mcp.stop(); if (rest) await rest.stop(); if (s?.exec || exec) await killExecutor(s?.exec || exec); }
 }
 
 const importAnnounceless = async (s, p) => { const r = await s.client().update({ kind: 'post.import', opId: `urn:ex:op/backfill/${p.id}`, actor: `${PERSON}board`, post: { id: p.id, body: p.body, author: p.author, createdAt: new Date().toISOString(), attachedTo: null, mentions: [], postSeq: p.postSeq } }); assert.equal(r.outcome, 'APPLIED', JSON.stringify(r)); };
