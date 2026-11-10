@@ -260,6 +260,9 @@ test('#240 wiki: opening a page sets a per-page URL, marks it active, and back n
     // back button returns to Parent (popstate routing)
     await page.goBack();
     await page.waitForFunction(() => new URL(location.href).searchParams.get('node') === 'p', { timeout: 5000 });
+    // #1492 — on back, the BROWSER sets the URL at once, and openNode re-renders only after its fetch of the page returns, so a
+    // title read the instant the URL matches can still see the page we left (under CI load: 'Linker'). Wait for the RENDER.
+    await page.waitForFunction(() => document.querySelector('h1.page-title')?.textContent === 'Parent', { timeout: 5000 }).catch(() => {});
     assert.equal(await page.$eval('h1.page-title', (e) => e.textContent), 'Parent', 'back button routed to Parent');
   }, { server: { board }, launch: { headless: 'new' } });
 });
