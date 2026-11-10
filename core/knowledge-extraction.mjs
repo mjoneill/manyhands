@@ -125,7 +125,7 @@ const JobState = Annotation.Root({
   source: Annotation(), modelKey: Annotation(), prompt: Annotation(),
   runId: Annotation(), performedUsing: Annotation(),
   proposals: Annotation(), items: Annotation(), rejected: Annotation(), counters: Annotation(), repairs: Annotation(), outcome: Annotation(),
-  title: Annotation(), synopsis: Annotation(), stopReason: Annotation(),
+  title: Annotation(), synopsis: Annotation(), stopReason: Annotation(), finished: Annotation(),
   result: Annotation(),
 });
 
@@ -185,8 +185,8 @@ export function createExtractor({ graphClient, runs, model, registry, actor = 'e
       // dropped. An adapter that reports no `finished` (fakes, other providers) keeps #1867's rule: only a non-"stop" fails.
       const stopReason = typeof r.stopReason === 'string' ? r.stopReason : null;
       const finished = typeof r.finished === 'boolean' ? r.finished : (stopReason === null || stopReason === 'stop');
-      if (!finished) return { ok: false, failure: `finish-${stopReason ?? 'none'}`, stopReason };
-      return { ok: true, json: r.json, stopReason };
+      if (!finished) return { ok: false, failure: `finish-${stopReason ?? 'none'}`, stopReason, finished };
+      return { ok: true, json: r.json, stopReason, finished };
     } catch (e) { return { ok: false, failure: e?.message || String(e) }; }
   }
   const body = (modelKey, prompt, user) => ({
@@ -239,7 +239,8 @@ export function createExtractor({ graphClient, runs, model, registry, actor = 'e
     // the title and synopsis are strings or nothing: the schema is closed, a number or a list is not a title (R10b)
     const title = typeof first.json?.title === 'string' && first.json.title.trim() ? first.json.title.trim() : null;
     const synopsis = typeof first.json?.synopsis === 'string' && first.json.synopsis.trim() ? first.json.synopsis.trim() : null;
-    return { proposals: proposed.length, items, rejected, counters, repairs, outcome, title, synopsis, stopReason: first.stopReason ?? null };
+    return { proposals: proposed.length, items, rejected, counters, repairs, outcome, title, synopsis, stopReason: first.stopReason ?? null,
+      finished: typeof first.finished === 'boolean' ? first.finished : null };   // #1870: the main call's verdict, for the report
   }
 
   /**
@@ -266,7 +267,7 @@ export function createExtractor({ graphClient, runs, model, registry, actor = 'e
     const prior = await alreadyPublished(st);
     if (prior) {
       await runs.generated({ run: st.runId, iris: prior.map((p) => p.iri) });
-      return { result: { runId: st.runId, outcome: st.outcome, published: prior, counters: st.counters, repairs: st.repairs ?? null, proposals: st.proposals, stopReason: st.stopReason ?? null,
+      return { result: { runId: st.runId, outcome: st.outcome, published: prior, counters: st.counters, repairs: st.repairs ?? null, proposals: st.proposals, stopReason: st.stopReason ?? null, finished: st.finished ?? null,
         rejected: st.rejected.map((r, k) => ({ iri: `${st.runId}/rejected/${k + 1}`, reason: r.reason, item: r.item, detail: r.detail })) } };
     }
     const intention = await intentionFor({
@@ -282,6 +283,7 @@ export function createExtractor({ graphClient, runs, model, registry, actor = 'e
     const result = {
       runId: st.runId, outcome: st.outcome, published, counters: st.counters, repairs: st.repairs ?? null, proposals: st.proposals,
       stopReason: st.stopReason ?? null,   // #1867: the main call's finish reason ("stop" = it finished on its own)
+      finished: st.finished ?? null,       // #1870: the verdict the failure count used (a missing reason can be false)
       rejected: intention.rejected.map((r, k) => ({ iri: r.iri, reason: r.reason, item: st.rejected[k].item, detail: st.rejected[k].detail })),
     };
     return { result };

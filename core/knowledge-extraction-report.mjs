@@ -88,8 +88,12 @@ export function finishBody({ url, result }) {
     const finish = typeof result?.stopReason === 'string' ? ` · model finished: ${result.stopReason}` : '';
     lines.push(`${proposals}span repairs ${repairs} · span inventions ${c.spanInventions ?? 0} · provider failures ${c.providerFailures ?? 0}${finish}`);
   }
-  if (typeof result?.stopReason === 'string' && result.stopReason !== 'stop') {
-    lines.push(`⚠️ the model's answer did not finish ("${result.stopReason}"), so none of it was used. This is not "the source had nothing more to say".`);
+  // #1870: the warning keys on the same verdict the failure count used, so a MISSING finish reason (finished:false) is
+  // called out too, not left as an unexplained "provider failures 1".
+  const unfinished = result?.finished === false || (typeof result?.stopReason === 'string' && result.stopReason !== 'stop');
+  if (unfinished) {
+    const why = typeof result?.stopReason === 'string' ? `"${result.stopReason}"` : 'no finish reason';
+    lines.push(`⚠️ the model's answer did not finish (${why}), so none of it was used. This is not "the source had nothing more to say".`);
   }
   if (result?.runId) {
     lines.push(`run ${result.runId}`);
