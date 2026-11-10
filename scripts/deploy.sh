@@ -40,7 +40,9 @@
 #
 # Usage:
 #   scripts/deploy.sh                pull, ASK CI (refuse unless green), re-export, restart ONLY the
-#                                    services whose inputs changed (#1138), verify
+#                                    services whose inputs changed (#1138), verify, then restart
+#                                    what the swap left on the old tree (#1847: never MCP; a job
+#                                    left stale makes the exit non-zero)
 #   scripts/deploy.sh --no-restart   pull + ask CI + re-export only
 #   scripts/deploy.sh export         ask CI + re-export from the current clone HEAD
 #   scripts/deploy.sh unlock         open the serve dir — the escape hatch
@@ -511,7 +513,23 @@ until curl -fsS --max-time 3 http://127.0.0.1:3141/api/health 2>/dev/null | grep
   i=$((i + 1)); [ "$i" -gt 40 ] && die "rest did not return ready within 80s"; sleep 2
 done
 say "   mcp 200 · rest 200 · serving $(cat "$SERVE/DEPLOYED-SHA" | cut -c1-7) · restarted: rest=$DO_REST mcp=$DO_MCP"
-report_serve_cwd
+
+# #1847 slice 2 — RESTART WHAT THE SWAP LEFT BEHIND, under THIS deploy's lock
+# (restart-stale proves the lock names us with `operation-lock.sh holds`; a free
+# or foreign lock restarts nothing). It backs up before the executor, waits for
+# each readiness, restarts REST only if readGate lost a slot, NEVER restarts MCP
+# (it names it), and posts the before→after diff. Its exit becomes this deploy's
+# exit, so "MCP still on the old tree" is not a silent success. Missing script, or
+# the lock check refused: fall back to slice 1's report, which names the jobs.
+RESTART_STALE_RC=0
+RS_SCRIPT="$CLONE/scripts/restart-stale.mjs"
+if [ -f "$RS_SCRIPT" ]; then
+  node "$RS_SCRIPT" --serve "$SERVE" --under-lock deploy --holder "$OP_HOLDER" || RESTART_STALE_RC=$?
+  [ "$RESTART_STALE_RC" = 3 ] && report_serve_cwd
+else
+  say "⚠️ no $RS_SCRIPT in the clone — nothing the swap left behind is restarted"
+  report_serve_cwd
+fi
 
 # #1324 — VERIFY AT THE SEATS, NOT ONLY AT THE SERVER. Only when MCP actually
 # restarted (acceptance 5: a check that fires on every deploy is one nobody
@@ -598,3 +616,6 @@ if [ "${DEPLOY_RELEASE:-1}" != "0" ]; then
     rm -f "$NOTES" "$NOTES.err"
   fi
 fi
+
+# #1847 slice 2 — the deploy is not clean while a job is still on the old tree
+exit "$RESTART_STALE_RC"

@@ -10,6 +10,11 @@
 #
 # Usage:
 #   scripts/operation-lock.sh acquire <op> <holder> [note]   exit 0 = yours; 1 = held (says by whom)
+#   scripts/operation-lock.sh acquire <op> <holder> [--ask <postId>] [--note <text>]
+#                                    #1847: the ask is the commons post that asked for the operation, so
+#                                    a second seat's `status` says why, not only who
+#   scripts/operation-lock.sh holds <op> <holder>            exit 0 only if the lock names exactly that op
+#                                    and holder: how a restart running INSIDE a deploy proves the deploy's lock
 #   scripts/operation-lock.sh release <op> <holder>          only the holder; absent lock = no-op
 #   scripts/operation-lock.sh status                         prints the holder, or "free"
 #
@@ -44,24 +49,32 @@ epoch_of() {  # ISO-8601 Z → epoch; macOS date and GNU date spell this differe
 }
 
 describe() {  # prints "holder · op · note · age" for the current file
-  h="$(field holder)"; o="$(field op)"; n="$(field note)"; at="$(field claimedAt)"
+  h="$(field holder)"; o="$(field op)"; n="$(field note)"; at="$(field claimedAt)"; a="$(field ask)"
   age=$(( $(date -u +%s) - $(epoch_of "$at") ))
   mins=$(( age / 60 ))
   stale=""; [ "$mins" -ge "$STALE_MIN" ] && stale=" ⚠️ STALE (> ${STALE_MIN} min; a human clears it: $0 release $o $h)"
-  printf '%s held by %s since %s (%s min ago) — note: %s%s\n' "$o" "$h" "$at" "$mins" "$n" "$stale"
+  printf '%s held by %s since %s (%s min ago) — ask: %s — note: %s%s\n' "$o" "$h" "$at" "$mins" "${a:-none}" "$n" "$stale"
 }
 
 cmd="${1:-status}"
 case "$cmd" in
   acquire)
-    op="${2:-}"; holder="${3:-}"; note="${4:-}"
-    [ -n "$op" ] && [ -n "$holder" ] || { printf 'usage: %s acquire <op> <holder> [note]\n' "$0" >&2; exit 2; }
+    op="${2:-}"; holder="${3:-}"; note=""; ask=""
+    [ -n "$op" ] && [ -n "$holder" ] || { printf 'usage: %s acquire <op> <holder> [note | --ask <postId> --note <text>]\n' "$0" >&2; exit 2; }
+    shift 3 2>/dev/null || set --
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --ask)  [ $# -ge 2 ] || { printf 'acquire: --ask needs a post id\n' >&2; exit 2; }; ask="$2"; shift 2 ;;
+        --note) [ $# -ge 2 ] || { printf 'acquire: --note needs text\n' >&2; exit 2; }; note="$2"; shift 2 ;;
+        *)      note="$1"; shift ;;   # the positional note every existing caller passes
+      esac
+    done
     # The reader below is a one-line sed, not a JSON parser: it does not un-escape,
     # so a holder written as x\"y reads back as x\ and could never release its own
     # lock. Refuse the two characters the writer would have to escape.
-    case "$op$holder$note" in *'"'*|*'\'*) printf '⛔ operation lock: op, holder and note may not contain a double quote or backslash\n' >&2; exit 2 ;; esac
-    body="$(printf '{"holder":"%s","op":"%s","note":"%s","claimedAt":"%s","pid":%s}' \
-      "$holder" "$op" "$note" "$(now_utc)" "$$")"
+    case "$op$holder$note$ask" in *'"'*|*'\'*) printf '⛔ operation lock: op, holder and note may not contain a double quote or backslash\n' >&2; exit 2 ;; esac
+    body="$(printf '{"holder":"%s","op":"%s","note":"%s","ask":"%s","claimedAt":"%s","pid":%s}' \
+      "$holder" "$op" "$note" "$ask" "$(now_utc)" "$$")"
     if ( set -C; printf '%s\n' "$body" > "$LOCK" ) 2>/dev/null; then
       printf '🔒 operation lock: %s held by %s — %s\n' "$op" "$holder" "$LOCK"
       exit 0
@@ -77,8 +90,13 @@ case "$cmd" in
       printf '⛔ operation lock is not yours to release — %s\n' "$(describe)" >&2; exit 1
     fi
     rm -f "$LOCK"; printf '🔓 operation lock released: %s by %s\n' "$op" "$holder"; exit 0 ;;
+  holds)
+    op="${2:-}"; holder="${3:-}"
+    [ -n "$op" ] && [ -n "$holder" ] || { printf 'usage: %s holds <op> <holder>\n' "$0" >&2; exit 2; }
+    [ -f "$LOCK" ] && [ "$(field op)" = "$op" ] && [ "$(field holder)" = "$holder" ] && exit 0
+    exit 1 ;;
   status)
     if [ -f "$LOCK" ]; then printf '🔒 %s\n   file: %s\n' "$(describe)" "$LOCK"; else printf '🔓 operation lock free — %s\n' "$LOCK"; fi
     exit 0 ;;
-  *) printf 'unknown command: %s (acquire|release|status)\n' "$cmd" >&2; exit 2 ;;
+  *) printf 'unknown command: %s (acquire|release|holds|status)\n' "$cmd" >&2; exit 2 ;;
 esac
