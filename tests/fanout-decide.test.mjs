@@ -260,3 +260,76 @@ test('#1229 five days below the floor → ONE entry post; recovery → ONE post;
   tick(t, 5); t += 5 * MIN;   // recovery from a suppressed entry → also silent
   assert.equal(posts.length, m, 'recovery from a flap-suppressed entry is silent too');
 });
+
+// ── #1229 SENT BACK (grader, 2026-11-11T12:04Z): two live silences on
+// 11-08/09. The flap guard measured from the last ENTRY and used the 6 h
+// cooldown, so a collapse 3.5 h after a recovery that HELD was called a flap;
+// and the recovery check asked only whether the ENTRY posted, so a band the
+// room heard about through a DEEPER post never heard it end. The suite above
+// separated its fresh collapse by 7 h, past the cooldown, which is why it
+// stayed green. These rows replay the live shape at 5-minute ticks.
+function floorRun() {
+  let state = { r: 4, s: 8, pendingFrom: null, warned: false, sigTimes: {}, hist: [4, 4, 4, 4, 4, 4] };
+  const posts = [];
+  const tick = (t, receivers, sessions = 8, extra = {}) => {
+    const out = decide({ ...base, now: t, receivers, sessions, state, ...extra });
+    state = out.state; if (out.warnBody) posts.push({ t, body: out.warnBody });
+  };
+  return { posts, tick, get state() { return state; } };
+}
+const FMIN = 60_000;
+const floorPosts = (posts) => posts.filter((p) => /fanout watch: (only \d+ of|back above the floor)/.test(p.body));
+
+test('#1229 sent back: a collapse 3.5 h after a HELD recovery posts, and its recovery posts (live 11-08 13:35Z → 11-09 12:02Z)', () => {
+  const r = floorRun(); let t = T0;
+  r.tick(t, 0); t += 5 * FMIN;                                    // 13:35 entry at 0 → posts
+  r.tick(t, 4); t += 5 * FMIN;                                    // 13:40 recovery → posts
+  for (let i = 0; i < 42; i++) { r.tick(t, 4); t += 5 * FMIN; }   // holds 3.5 h above
+  const before = floorPosts(r.posts).length;
+  assert.equal(before, 2, 'entry and recovery both posted');
+  r.tick(t, 2); t += 5 * FMIN;                                    // 17:18 new collapse to 2
+  assert.equal(floorPosts(r.posts).length, 3, 'a collapse after a recovery that HELD is news, not a flap');
+  assert.match(r.posts.at(-1).body, /only 2 of 8/);
+  for (let i = 0; i < 70; i++) { r.tick(t, 2); t += 5 * FMIN; }   // holds below
+  r.tick(t, 1); t += 5 * FMIN;                                    // 23:48 deeper → posts
+  assert.match(r.posts.at(-1).body, /only 1 of 8/);
+  for (let i = 0; i < 100; i++) { r.tick(t, 1); t += 5 * FMIN; }
+  r.tick(t, 4); t += 5 * FMIN;                                    // 11-09 12:02 recovery
+  assert.match(r.posts.at(-1).body, /back above the floor — 4 of 8/, 'the room that heard the collapse hears it end');
+});
+
+test('#1229 sent back: a band announced ONLY by a deeper post still posts its recovery', () => {
+  const r = floorRun(); let t = T0;
+  r.tick(t, 2); t += 5 * FMIN;                                    // entry → posts
+  r.tick(t, 4); t += 5 * FMIN;                                    // recovery → posts
+  r.tick(t, 2); t += 5 * FMIN;                                    // re-entry 5 min later → flap, silent
+  const n = floorPosts(r.posts).length;
+  assert.equal(n, 2, 'the quick re-entry is a flap');
+  r.tick(t, 1); t += 5 * FMIN;                                    // deeper while below → posts
+  assert.match(r.posts.at(-1).body, /only 1 of 8/);
+  r.tick(t, 4); t += 5 * FMIN;                                    // recovery → must post
+  assert.match(r.posts.at(-1).body, /back above the floor — 4 of 8/);
+});
+
+test('#1229 sent back: a flap-suppressed dip that HOLDS past the flap window posts once, then its recovery posts', () => {
+  const r = floorRun(); let t = T0;
+  r.tick(t, 2); t += 5 * FMIN;
+  r.tick(t, 4); t += 5 * FMIN;
+  r.tick(t, 2); t += 5 * FMIN;                                    // flap, silent
+  for (let i = 0; i < 4; i++) { r.tick(t, 2); t += 5 * FMIN; }    // 25 min below: still a flap
+  assert.equal(floorPosts(r.posts).length, 2, 'inside the flap window, silent');
+  for (let i = 0; i < 30; i++) { r.tick(t, 2); t += 5 * FMIN; }   // holds 2.5 h more
+  const held = r.posts.filter((p) => /only 2 of 8/.test(p.body));
+  assert.equal(held.length, 2, 'the held dip posts ONCE (2 = the original entry + this one)');
+  r.tick(t, 4); t += 5 * FMIN;
+  assert.match(r.posts.at(-1).body, /back above the floor — 4 of 8/);
+});
+
+test('#1229 sent back: an announced-maintenance dip that holds stays silent (the #1273 suppression is not undone by the hold rule)', () => {
+  const r = floorRun(); let t = T0;
+  const maintenance = { by: 'seat-a', at: t };
+  for (let i = 0; i < 24; i++) { r.tick(t, 1, 8, { maintenance }); t += 5 * FMIN; }   // 2 h below under maintenance
+  assert.equal(floorPosts(r.posts).length, 0, 'announced maintenance: no entry, no hold post');
+  r.tick(t, 4); t += 5 * FMIN;
+  assert.equal(floorPosts(r.posts).length, 0, 'and no recovery post for a band nobody was told about');
+});

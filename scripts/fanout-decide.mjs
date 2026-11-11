@@ -25,6 +25,7 @@
  * @param {number}  a.sessions    live sessions, same payload
  * @param {number}  a.floor       total-collapse threshold
  * @param {number}  a.cooldownMs  per-signature mute window
+ * @param {number}  [a.flapMs]   floor flap window, measured from the last recovery (#1229; default 30 min)
  * @param {number}  a.now         epoch ms (never Date.now() in here)
  * @param {object}  a.state       previous state (from the state file)
  * @returns {{state: object, warnBody: string|null}}
@@ -82,7 +83,7 @@ export function maintenanceFrom(changes, { now = Date.now(), windowMs = 10 * 60 
   return best;
 }
 
-export function decide({ receivers, sessions, floor, cooldownMs, now, state, staleSeats: stale = [], stoppedSeats: stopped = [], answeredSeats: answered = [], unconfirmedSeats: unconfirmed = null, writesUnreadableReason = null, stoppedRefireMs = 60 * 60 * 1000, staleFacts = null, maintenance = null, keyStreams = null }) {
+export function decide({ receivers, sessions, floor, cooldownMs, now, state, staleSeats: stale = [], stoppedSeats: stopped = [], answeredSeats: answered = [], unconfirmedSeats: unconfirmed = null, writesUnreadableReason = null, stoppedRefireMs = 60 * 60 * 1000, staleFacts = null, maintenance = null, keyStreams = null, flapMs = 30 * 60 * 1000 }) {
   // Deep-copy the two containers. A spread alone leaves `sigTimes` and `hist`
   // ALIASED to the caller's objects, so decide() would edit state it was only
   // asked to read — invisible in production (each run reads fresh state off
@@ -292,18 +293,30 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
   // 59th of 58. So: post on the TRANSITION into below-floor, post on a
   // DEEPER collapse while below (a real new fact), post ONCE on recovery,
   // and otherwise stay silent — the current state is in the state file and
-  // on the tick line, for anyone who wants "is it still below". The cooldown
-  // survives only as a flap guard: re-entering at the same depth inside the
-  // cooldown of the last entry post is silent.
+  // on the tick line, for anyone who wants "is it still below".
+  //
+  // FLAP GUARD (#1229, sent back 2026-11-11 by its grader): a flap is a quick
+  // BOUNCE — re-entering at the same depth within `flapMs` of the last
+  // RECOVERY. The first cut measured from the last ENTRY and used the 6 h
+  // cooldown, so on 11-08 a collapse 3.5 h after a recovery that HELD was
+  // called a flap and stayed silent for ~19 h. And a flap-suppressed dip that
+  // then HOLDS past `flapMs` is no longer a bounce: it posts once, late.
   const wasBelow = Boolean(st.belowFloor);
+  // Was this band ever announced (entry, deeper, or held-flap post)? A state
+  // written before this field existed falls back to the old entry-time rule.
+  const bandAnnounced = st.floorAnnounced ?? (st.floorEntryAt != null && st.floorEntryAt >= (st.belowFloorSince ?? 0));
   if (receivers < floor) {
     const floorSig = `floor:${receivers}`;
     // Depth is tracked in state, not read off the muted signatures: those
     // expire with the cooldown, and a collapse that deepens six hours in must
     // still post (the first cut missed exactly that).
     const deeper = wasBelow && st.floorDepth != null && receivers < st.floorDepth;
-    const lastEntry = st.floorEntryAt ?? null;
-    const flap = !wasBelow && lastEntry != null && (now - lastEntry) < cooldownMs && st.floorEntryDepth != null && receivers >= st.floorEntryDepth;
+    const lastRecovery = st.floorRecoveredAt ?? null;
+    const flap = !wasBelow && lastRecovery != null && (now - lastRecovery) < flapMs && st.floorEntryDepth != null && receivers >= st.floorEntryDepth;
+    // A suppressed band that has now held below for flapMs is news after all.
+    // (Declared maintenance still blocks it: the post condition below requires
+    // !suppressedByMaintenance for every floor post.)
+    const heldPastFlap = wasBelow && !bandAnnounced && st.belowFloorSince != null && (now - st.belowFloorSince) >= flapMs;
     // #1273 — an ANNOUNCED restart is not news. Suppress the ENTRY post only:
     // a DEEPER collapse while below is a new fact and still posts, because the
     // declaration covers the expected drop and not everything that happens
@@ -317,7 +330,7 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
         announcedAt: maintenance.at ?? null,
       };
     }
-    if (((!wasBelow && !flap) || deeper) && !suppressedByMaintenance) {
+    if (((!wasBelow && !flap) || deeper || heldPastFlap) && !suppressedByMaintenance) {
       warnBody = `⚠️ fanout watch: only ${receivers} of ${sessions} live sessions hold an open stream `
         + `(floor: ${floor}). Seats without a stream receive NOTHING — no queue, no replay (#624). `
         // ⛔ SAME TWO FALSE REMEDIES AS THE DROP BRANCH ABOVE — see the note there
@@ -329,19 +342,25 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
       st.sigTimes[floorSig] = now;
       if (!wasBelow) { st.floorEntryAt = now; st.floorEntryDepth = receivers; }
       st.floorDepth = receivers;
+      st.floorAnnounced = true;
     }
-    if (!wasBelow) { st.belowFloor = true; st.belowFloorSince = now; if (st.floorDepth == null || flap) st.floorDepth = receivers; }
+    if (!wasBelow) {
+      st.belowFloor = true; st.belowFloorSince = now;
+      if (st.floorDepth == null || flap) st.floorDepth = receivers;
+      if (flap || suppressedByMaintenance) st.floorAnnounced = false;
+    }
     st.warned = true;
   } else if (wasBelow) {
-    // Recovery: one post, naming how long it was below — and only if the
-    // entry was announced (a flap-suppressed entry gets no recovery post either).
-    const announced = st.floorEntryAt != null && st.floorEntryAt >= (st.belowFloorSince ?? 0);
-    if (announced) {
+    // Recovery: one post, naming how long it was below — and only if the room
+    // was told about this band at all (entry, deeper, or held-flap post). A
+    // band that stayed silent end to end ends silently too.
+    if (bandAnnounced) {
       const mins = Math.round((now - (st.belowFloorSince ?? now)) / 60000);
       warnBody = `✅ fanout watch: back above the floor — ${receivers} of ${sessions} live sessions hold an open stream `
         + `(floor: ${floor}); it was below for ${mins} min. (#1229)`;
     }
     st.belowFloor = false; st.belowFloorSince = null; st.floorDepth = null; delete st.maintenanceSuppressed;
+    st.floorRecoveredAt = now; delete st.floorAnnounced;
     for (const k of Object.keys(st.sigTimes)) if (k.startsWith('floor:')) delete st.sigTimes[k];
   }
 
