@@ -325,11 +325,28 @@ test('#1229 sent back: a flap-suppressed dip that HOLDS past the flap window pos
   assert.match(r.posts.at(-1).body, /back above the floor — 4 of 8/);
 });
 
-test('#1229 sent back: an announced-maintenance dip that holds stays silent (the #1273 suppression is not undone by the hold rule)', () => {
+test('#1229 sent back: a declared restart is silent for its window; one still down past the flap window posts ONCE, saying how long it has been below', () => {
+  // Production reads maintenance through maintenanceFrom(), which honours a
+  // declaration for MAINTENANCE_WINDOW_MS (default 10 min), NOT for the band.
+  const r = floorRun(); let t = T0;
+  const declaredAt = t; const WINDOW = 10 * FMIN;
+  const tickM = (rec) => { const live = (t - declaredAt) < WINDOW; r.tick(t, rec, 8, live ? { maintenance: { by: 'seat-a', at: declaredAt } } : {}); t += 5 * FMIN; };
+  for (let i = 0; i < 6; i++) tickM(1);                           // 30 min below: declared window, then the flap window
+  assert.equal(floorPosts(r.posts).length, 0, 'inside the declaration and the flap window: silent');
+  for (let i = 0; i < 18; i++) tickM(1);                          // 1.5 h more below
+  const late = floorPosts(r.posts);
+  assert.equal(late.length, 1, 'a restart not back in 30 min is news: ONE post');
+  assert.match(late[0].body, /only 1 of 8/);
+  assert.match(late[0].body, /below since \d\d:\d\dZ/, 'the late post says it is not a new collapse');
+  tickM(4);
+  assert.match(r.posts.at(-1).body, /back above the floor — 4 of 8/, 'and the room hears it end');
+});
+
+test('#1229 sent back: a restart that comes back inside its declared window stays silent end to end', () => {
   const r = floorRun(); let t = T0;
   const maintenance = { by: 'seat-a', at: t };
-  for (let i = 0; i < 24; i++) { r.tick(t, 1, 8, { maintenance }); t += 5 * FMIN; }   // 2 h below under maintenance
-  assert.equal(floorPosts(r.posts).length, 0, 'announced maintenance: no entry, no hold post');
+  r.tick(t, 1, 8, { maintenance }); t += 5 * FMIN;
+  r.tick(t, 1, 8, { maintenance }); t += 5 * FMIN;
   r.tick(t, 4); t += 5 * FMIN;
-  assert.equal(floorPosts(r.posts).length, 0, 'and no recovery post for a band nobody was told about');
+  assert.equal(floorPosts(r.posts).length, 0);
 });

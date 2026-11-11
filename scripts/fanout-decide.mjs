@@ -314,8 +314,11 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
     const lastRecovery = st.floorRecoveredAt ?? null;
     const flap = !wasBelow && lastRecovery != null && (now - lastRecovery) < flapMs && st.floorEntryDepth != null && receivers >= st.floorEntryDepth;
     // A suppressed band that has now held below for flapMs is news after all.
-    // (Declared maintenance still blocks it: the post condition below requires
-    // !suppressedByMaintenance for every floor post.)
+    // Declared maintenance blocks it only while the declaration is live
+    // (maintenanceFrom honours it for MAINTENANCE_WINDOW_MS, 10 min by default):
+    // a restart still down past flapMs is news. The 30 min window is a
+    // judgement: a band that bounces in right after a recovery and clears
+    // inside 30 min stays silent end to end, which is the noise this guards.
     const heldPastFlap = wasBelow && !bandAnnounced && st.belowFloorSince != null && (now - st.belowFloorSince) >= flapMs;
     // #1273 — an ANNOUNCED restart is not news. Suppress the ENTRY post only:
     // a DEEPER collapse while below is a new fact and still posts, because the
@@ -331,8 +334,10 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
       };
     }
     if (((!wasBelow && !flap) || deeper || heldPastFlap) && !suppressedByMaintenance) {
+      // A late (held-flap) post is not a new collapse: say how long it has been below.
+      const lateNote = heldPastFlap ? `, below since ${new Date(st.belowFloorSince).toISOString().slice(11, 16)}Z` : '';
       warnBody = `⚠️ fanout watch: only ${receivers} of ${sessions} live sessions hold an open stream `
-        + `(floor: ${floor}). Seats without a stream receive NOTHING — no queue, no replay (#624). `
+        + `(floor: ${floor}${lateNote}). Seats without a stream receive NOTHING — no queue, no replay (#624). `
         // ⛔ SAME TWO FALSE REMEDIES AS THE DROP BRANCH ABOVE — see the note there
         // for the source proof. Kept in sync because the text a human acts on is
         // duplicated here, and a fix applied to one branch would have left the
