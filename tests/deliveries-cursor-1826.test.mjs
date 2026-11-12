@@ -16,7 +16,7 @@
  * NOT COVERED: prod's size (the rows prove the walk, not its speed at 21.9k); `open=1` pages, whose failed-attempt filter runs
  * after the read (a page may hold fewer than `limit`; `next` still comes from the chosen ids).
  */
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -28,6 +28,9 @@ import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-
 const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)';
 const ROSTER_FILE = path.join(os.tmpdir(), `c1826-roster-${process.pid}.json`);
 fs.writeFileSync(ROSTER_FILE, JSON.stringify({ seats: { ada: { name: 'Ada', glyph: 'a', color: '#7cc4a0' }, gizmo: { name: 'Gizmo', glyph: 'g', color: '#c4a07c' }, board: { name: 'Board', glyph: 'o', color: '#8899aa', kind: 'system' } } }));
+// The suite fails a NEW tmp leak: every path this file makes in the temp dir is removed after the run.
+const TMP = [ROSTER_FILE];
+after(() => { for (const d of TMP) fs.rmSync(d, { recursive: true, force: true }); });
 const EPOCH_DOC = '11111111-2222-4333-8444-555555555555';
 const N = 7;
 // p1 alone first, p2..p6 SHARE one instant, p7 alone last: at limit=2 the shared instant straddles three page boundaries.
@@ -88,7 +91,8 @@ async function startQueryProbe(execUrl) {
 
 async function graphBoard(body) {
   const dsid = 'c1826-test';
-  const exec = await startExecutor({ store: tmpStore('c1826-store-'), datasetId: dsid, create: true });
+  const store = tmpStore('c1826-store-'); TMP.push(store);
+  const exec = await startExecutor({ store, datasetId: dsid, create: true });
   const probe = await startQueryProbe(exec.baseUrl);
   const rest = await startRestServer({
     board: makeBoardFixture({ conversations: posts(), postSeqEpoch: EPOCH_DOC, nextPostSeq: N + 1 }),
