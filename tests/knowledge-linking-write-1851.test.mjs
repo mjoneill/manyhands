@@ -124,3 +124,11 @@ test('W5 the compiler refuses a malformed link before anything is sent', () => {
   assert.throws(() => compile(linkIntention({ proposals: [], minScore: 0.62, model: 'm', at: AT, actor: ACTOR })), /at least one/);
   assert.doesNotThrow(() => compile(intent(proposal(f))), 'CONTROL: a well-formed link compiles');
 });
+
+test('W5b a link whose IRI is NOT link/<sha256(spanKey)> is refused: a caller cannot mint a fresh IRI around a dismissal', () => {
+  const f = fresh();
+  const good = linkIntention({ proposals: [proposal(f)], minScore: 0.62, model: 'm', at: AT, actor: ACTOR });
+  const forged = { ...good, links: [{ ...good.links[0], iri: `https://scrumboard.local/link/${crypto.randomUUID().replace(/-/g, '')}` }] };
+  assert.throws(() => compile(forged), /link\/<sha256\(spanKey\)>/);
+  assert.doesNotThrow(() => compile(good), 'CONTROL: the derived IRI compiles');
+});
