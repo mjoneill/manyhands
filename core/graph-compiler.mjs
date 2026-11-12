@@ -528,7 +528,7 @@ export function staticCheck(sparql, opId) {
 // =====================================================================================
 
 export const RECORD_V = 2;   // 2: memory.revise records the identity it replaces (a MemoryRevision node)
-export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create', 'card.write', 'entity.put', 'origin.prepare', 'refusal.record', 'extraction.publish', 'link.propose']);
+export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create', 'card.write', 'entity.put', 'origin.prepare', 'refusal.record', 'extraction.publish', 'link.propose', 'link.decide']);
 
 const RS = 'https://scrumboard.local/ns#';
 const RSC = 'https://schema.org/';
@@ -586,6 +586,7 @@ export const LOGBORN_TERMS = Object.freeze({
   // #1851 — a machine-proposed "this claim bears on this card" link (core/knowledge-linking.mjs), at link/<sha256(spanKey)>
   BearsOn: `${RS}BearsOn`, fromAssertion: `${RS}fromAssertion`, bearsOnCard: `${RS}bearsOnCard`, score: `${RS}score`, minScore: `${RS}minScore`,
   searchQuery: `${RS}searchQuery`, spanKey: `${RS}spanKey`, Card: `${RS}Card`,
+  LinkDecision: `${RS}LinkDecision`, ofLink: `${RS}ofLink`, linkVerdict: `${RS}linkVerdict`, workingOn: `${RS}workingOn`,
 });
 const TM = LOGBORN_TERMS;
 
@@ -610,7 +611,8 @@ const RECORD_FIELDS = {
   'origin.prepare': ['origin', 'plan'],     // #1629 s2 — the Prepared record of one origin: its descriptor and its frozen business plan
   'refusal.record': ['refusal'],            // #1762 S2 — one content-free refusal, fresh at the IRI its opId derives; never history
   'extraction.publish': ['run', 'source', 'assertions', 'rejected', 'report'],
-  'link.propose': ['links', 'at'],          // #1851 — one linking run's proposed BearsOn links, every claim and card checked, in ONE update   // #1810 — one run's whole output (source, reifiers, rejected, report) in ONE guarded update
+  'link.propose': ['links', 'at'],
+  'link.decide': ['link', 'verdict', 'decision', 'workingOn', 'at'],   // #1851 — a seat's verdict on one link: its status replaced, one LinkDecision appended          // #1851 — one linking run's proposed BearsOn links, every claim and card checked, in ONE update   // #1810 — one run's whole output (source, reifiers, rejected, report) in ONE guarded update
 };
 
 // #1762 S1b — the record kinds whose write records ONE ChangeActivity (part 0) when the intention carries `history`. The
@@ -839,6 +841,17 @@ function canonicalizeRecord(i) {
     if (links.length === 0) fail('a link.propose carries at least one link');
     if (new Set(links.map((l) => l.iri)).size !== links.length) fail('a link.propose names each link once');
     record = { links, at: rStr(i.at, 'at') };
+  } else if (i.kind === 'link.decide') {
+    // #1851 — a confirm names the card the seat was working on (steward 52709): it is the moment #1850's "used" count reads,
+    // so it is never unattributed. A dismiss needs none. The decision node is fresh and lives under its link.
+    const link = checkIri(i.link, 'link');
+    if (!/^https:\/\/scrumboard\.local\/link\/[0-9a-f]{64}$/.test(link)) fail('link must be a link/<sha256> IRI');
+    if (!['confirmed', 'dismissed'].includes(i.verdict)) fail('verdict must be confirmed or dismissed');
+    const decision = checkIri(i.decision, 'decision');
+    if (!decision.startsWith(`${link}/decision/`)) fail('decision must live under its link: <link>/decision/<id>');
+    const workingOn = rOptIri(i.workingOn, 'workingOn');
+    if (i.verdict === 'confirmed' && workingOn == null) fail('a confirm names workingOn, the card the seat was working on: an unattributed confirm cannot be counted as used');
+    record = { link, verdict: i.verdict, decision, workingOn, at: rStr(i.at, 'at') };
   } else if (i.kind === 'post.create') {
     // #1574 C3c — every field comes from the outbox entry's frozen payload plus the two values the server fixed once
     // at the first publish attempt (publicationAt, postSeq). All of it is in `record`, so all of it is digest-covered.
@@ -1171,6 +1184,17 @@ function planRecord(c) {
       add(l.iri, TM.spanKey, L(l.spanKey)); add(l.iri, TM.model, L(l.model)); add(l.iri, TM.status, L('proposed'));
       add(l.iri, TM.dateCreated, L(R.at)); add(l.iri, TM.wasAssociatedWith, I(c.actor)); add(l.iri, TM.recordedBy, ref(c.opId));
     }
+  } else if (c.kind === 'link.decide') {
+    // #1851 — the link must be a BearsOn and a named card a Card; the status is REPLACED (one value), the decision APPENDED
+    target = null;
+    pre.push(`    ${I(R.link)} ${I(TM.type)} ${I(TM.BearsOn)} .`);
+    if (R.workingOn) pre.push(`    ${I(R.workingOn)} ${I(TM.type)} ${I(TM.Card)} .`);
+    fresh.push(R.decision);
+    delAll.push({ s: R.link, p: TM.status });
+    add(R.link, TM.status, L(R.verdict));
+    add(R.decision, TM.type, I(TM.LinkDecision)); add(R.decision, TM.ofLink, I(R.link)); add(R.decision, TM.linkVerdict, L(R.verdict));
+    add(R.decision, TM.decidedBy, I(c.actor)); add(R.decision, TM.workingOn, R.workingOn && I(R.workingOn));
+    add(R.decision, TM.dateCreated, L(R.at)); add(R.decision, TM.recordedBy, ref(c.opId));
   } else if (c.kind === 'post.create') {
     const P = R.post; target = null;   // a create: the post IRI must be fresh
     dispatchHold = `${P.mutationId}:${P.slot}`;   // #1749 A8: the announcement is a dispatch of this obligation

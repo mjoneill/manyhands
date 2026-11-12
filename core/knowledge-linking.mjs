@@ -93,3 +93,11 @@ export async function linkRun({ graphClient, search, run, minScore, perAssertion
   if (w.outcome !== 'APPLIED') return { ok: false, reason: `the links were not written: ${w.outcome} ${w.reason ?? ''}`.trim(), proposed: 0 };
   return { ok: true, assertions: assertions.length, proposed: p.proposals.length, skipped: p.skipped, outcome: w.outcome, links: p.proposals };
 }
+
+/** A seat's verdict on one proposed link: ONE `link.decide`, appending a LinkDecision under the link. */
+export function decideIntention({ link, verdict, workingOn = null, actor, at = new Date().toISOString(), opId = `urn:ex:op/${crypto.randomUUID()}` } = {}) {
+  return {
+    kind: 'link.decide', opId, actor, link, verdict, decision: `${link}/decision/${crypto.randomUUID()}`,
+    workingOn: workingOn == null ? null : `${ENTITY}entity/${workingOn}`, at,
+  };
+}
