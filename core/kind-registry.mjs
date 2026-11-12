@@ -173,6 +173,26 @@ export const KIND_DECLARATIONS = Object.freeze([
       + '`scrum:providerFailures` (transport errors, counted apart and never a quality score). Written in the same guarded '
       + 'update as the run\'s assertions, so a crash mid-run leaves no report and no half-published run.',
   },
+  // #1851 — written by ONE compiler kind, `link.propose`, one linking run per update. Executor-only.
+  {
+    name: 'scrum:BearsOn', eventKind: null, collection: null,
+    createdBy: 'the knowledge linker, after an extraction run (compiler kind link.propose)',
+    definition: 'A MACHINE-PROPOSED link saying an extracted claim bears on one of our cards: `scrum:fromAssertion` the '
+      + 'scrum:Assertion, `scrum:bearsOnCard` the scrum:Card, found by the board\'s own meaning search. It keeps how it was '
+      + 'found (`scrum:searchQuery`, `scrum:score`, the `scrum:minScore` in force, `scrum:model`) and `scrum:status` '
+      + '(proposed at birth; a seat confirms or dismisses). Its IRI is link/<sha256 of `scrum:spanKey`>, a hash of the '
+      + 'claim\'s normalised span and the card, so the same claim re-extracted names the same node and can never be '
+      + 'proposed twice: a dismissal sticks. A proposal is not a room endorsement and is not delivered to anyone by itself.',
+  },
+  {
+    name: 'scrum:LinkDecision', eventKind: null, collection: null,
+    createdBy: 'link_decide (POST /api/links/:id/decide), one per verdict (compiler kind link.decide)',
+    definition: 'A SEAT\'S VERDICT on one scrum:BearsOn link, at <link>/decision/<id>: `scrum:ofLink`, `scrum:linkVerdict` '
+      + '(confirmed or dismissed), `scrum:decidedBy` the authenticated seat, `schema:dateCreated`, and for a confirm '
+      + '`scrum:workingOn`: the card the seat was working on when the claim mattered. A confirm without it is refused, because '
+      + 'a confirm is what counts a claim as USED (#1850) and an unattributed one cannot be told from habit. Appended, never '
+      + 'rewritten: the link\'s own `scrum:status` is replaced by the latest verdict, and these nodes are its history.',
+  },
   // ── decisions and their scaffolding ───────────────────────────────────────
   {
     name: 'scrum:Decision', eventKind: 'decision', collection: null,

@@ -1698,6 +1698,40 @@ function buildMcpServer() {
     return jsonResult(await apiCall('PUT', `/api/seats/${encodeURIComponent(seat)}/state`, args));
   });
 
+  // ── #1851 — "bears on" links: a claim the room read, proposed by machine as bearing on a card ──────────────────
+  mcp.registerTool('link_list', {
+    description: 'List machine-proposed links saying an extracted claim (from a source someone shared) BEARS ON one of our cards. '
+      + 'Each row: id, status (proposed · confirmed · dismissed), the meaning-search score, the card, and the claim\'s verbatim span '
+      + 'and gist. A proposal is not an endorsement. Answer it with link_decide.',
+    inputSchema: {
+      status: z.enum(['proposed', 'confirmed', 'dismissed']).optional().describe('Only links in this status'),
+      card: z.number().int().optional().describe('Only links to this card (short id)'),
+    },
+  }, async ({ status, card } = {}) => {
+    const q = new URLSearchParams(Object.entries({ status, card }).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)])).toString();
+    return jsonResult(await apiCall('GET', `/api/links${q ? `?${q}` : ''}`));
+  });
+
+  // ⛔ THE SEAT COMES FROM THE BOUND SESSION, as seat_declare's does: there is no seat or `by` argument. A verdict is counted
+  // per seat (#1850), so taking the seat from the message would let one seat's count be written by another (review 52706).
+  mcp.registerTool('link_decide', {
+    description: 'Answer a proposed link (from link_list). confirmed: this claim mattered to the card you were working on; '
+      + 'workingOn is REQUIRED and is that card\'s short id: a confirm is what counts a claim as USED, so it is never unattributed. '
+      + 'dismissed: it does not bear on it; that sentence is never proposed for that card again, whichever source it comes from and however often '
+      + 'it is re-extracted. A REWORDED claim is a different sentence and can be proposed again. '
+      + 'Your verdict is recorded under YOUR seat (from this session), appended: a later verdict replaces the status, never the history.',
+    inputSchema: {
+      link: z.string().regex(/^[0-9a-f]{64}$/).describe('The link id from link_list'),
+      verdict: z.enum(['confirmed', 'dismissed']),
+      workingOn: z.number().int().optional().describe('REQUIRED for confirmed: the short id of the card you were working on'),
+    },
+  }, async ({ link, verdict, workingOn }, extra) => {
+    const seat = boundSeatOf(extra);
+    if (!seat) return jsonResult({ error: 'this session is not bound to a seat, so it cannot give a verdict: a verdict is counted per seat.', code: 'UNBOUND' });
+    return jsonResult(await apiCall('POST', `/api/links/${link}/decide`, { verdict, ...(workingOn != null ? { workingOn } : {}), by: seat }));
+  });
+
+
   mcp.registerTool('role_create', {
     description: 'Mint a ROLE the team uses as an entity (#915; ruled a new type, decision f9e31a70) — '
       + 'Product Owner, Scrum Master (the reflective facilitator of #272), Value Steward (#418). One '
