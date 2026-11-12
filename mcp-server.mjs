@@ -1960,18 +1960,26 @@ function buildMcpServer() {
       + 'state is null (read the record from the store). The cursor advances only on an EXPLICIT '
       + 'ack (#1576): this tool acks the page itself, after the board\'s MCP host has received the whole '
       + 'response — a pull that dies in flight, or whose ack fails, is re-served rather than skipped '
-      + '(`ack` in the result says which). After a ROLLBACK of the log-born unit a lane whose earlier '
-      + 'graph rows cannot be proven against the rolled-back records is refused with CURSOR_ROLLED_BACK: '
-      + 'nothing is lost; re-register with resync "rollback" (POST /api/cursors/register) and replay '
-      + 'resumes from the last acked log position, duplicates possible (dedup by reverseExport.opId). Returns '
+      + '(`ack` in the result says which). REFUSALS YOU CAN HEAL YOURSELF (#1728): after a restore '
+      + 'promotion a lane whose executor cursor names another store is refused with CURSOR_EPOCH_CHANGED; '
+      + 'call replay_pull with resync: "epoch" ONCE, then pull again. After a ROLLBACK of the log-born unit '
+      + 'a lane whose earlier graph rows cannot be proven is refused with CURSOR_ROLLED_BACK; call '
+      + 'replay_pull with resync: "rollback" once (replay resumes from the last acked log position, '
+      + 'duplicates possible — dedup by reverseExport.opId). A resync call moves only THIS lane, '
+      + 'serves and acks NO page, and returns what moved plus a re-read obligation: rows served from '
+      + 'the old store may no longer exist, so re-read memories / decisions / seat state from the live '
+      + 'store. On a lane that is not refused it moves nothing and says so. Returns '
       + 'the events plus an envelope: {last_acked_seq, last_served_seq, head_seq, lag, '
       + 'oldest_unserved_at} (with the unit on, also log_lag and graph:{head_commit_seq, '
       + 'last_acked_commit_seq, last_served_commit_seq, lag}; lag is both sources). '
       + 'Lag>0 with a stale oldest_unserved_at means you are behind the room.',
     inputSchema: {
       limit: z.number().int().min(1).optional().describe('Max events this pull (default/ceiling 200)'),
+      // #1728 — the lane heals ITSELF. No identity argument exists: the lane is laneFor(sessionId).
+      resync: z.enum(['epoch', 'rollback']).optional().describe('Only after a CURSOR_EPOCH_CHANGED ("epoch") or '
+        + 'CURSOR_ROLLED_BACK ("rollback") refusal: resync THIS lane, then call replay_pull again. Serves no page.'),
     },
-  }, async ({ limit } = {}, extra) => {
+  }, async ({ limit, resync } = {}, extra) => {
     const lane = laneFor(extra?.sessionId);
     if (!lane) {
       // No durable identity ⇒ no cursor, and it says so rather than answering
@@ -1985,9 +1993,19 @@ function buildMcpServer() {
           + 'name it and no cursor exists. Use changes_since with an explicit timestamp.',
       });
     }
+    if (resync) return jsonResult(await resyncOwnLane(lane, resync));
     const q = new URLSearchParams({ identity: lane.identity, via: lane.via });
     if (limit) q.set('limit', String(limit));
-    const page = await apiCall('GET', `/api/cursors/pull?${q.toString()}`);
+    let page;
+    try {
+      page = await apiCall('GET', `/api/cursors/pull?${q.toString()}`);
+    } catch (e) {
+      // #1728 — the server's hint names a REST call an MCP-only seat cannot make. Name the
+      // remedy it CAN reach, keeping the server's text (and its re-read instruction) intact.
+      const remedy = selfResyncRemedy(e.message);
+      if (remedy) e.message += `\n${remedy}`;
+      throw e;
+    }
     // #1576 — THE ACK, and why it is here. `apiCall` has read and parsed the WHOLE body
     // before it returns, so this process holds the page: that is the delivery evidence
     // the server cannot have (res.end's callback fires for a socket the client destroyed).
@@ -2938,7 +2956,48 @@ function laneFor(sessionId) {
   const id = deliveryIdentity({ registrySeatId, bearerSeat });
   if (!id) return null;
   const epoch = registrySeatId ? seatRegistry.epochForSeat(registrySeatId) : null;
-  return { identity: id.key, kind: id.kind, via: `${epoch ?? 'none'}:${sessionId}` };
+  // `register` is the body that names THIS lane to POST /api/cursors/register (#1728) — derived
+  // here from the session, never from anything the caller sends.
+  const register = id.kind === 'registry' ? { registrySeatId: id.id } : { bearerSeat: id.id };
+  return { identity: id.key, kind: id.kind, via: `${epoch ?? 'none'}:${sessionId}`, register };
+}
+
+// ── #1728 — replay_pull's self-resync ──────────────────────────────────────────
+// A refused lane used to be handed a remedy on a surface it lacks: REST, keyed by
+// whatever lane the body names. Here the lane can resync ITSELF and nothing else —
+// the body is laneFor(sessionId).register — and the call serves and acks no page, so
+// the re-read obligation is the whole answer and cannot ride inside an auto-acked page.
+// POST /api/cursors/register is unchanged (scoping it is an access change, not this card).
+const SELF_RESYNC = Object.freeze({ CURSOR_EPOCH_CHANGED: 'epoch', CURSOR_ROLLED_BACK: 'rollback' });
+function selfResyncRemedy(message) {
+  const m = /\[(CURSOR_EPOCH_CHANGED|CURSOR_ROLLED_BACK)\]/.exec(String(message ?? ''));
+  if (!m) return null;
+  return `remedy (this tool): call replay_pull with resync: "${SELF_RESYNC[m[1]]}" once — it resyncs this lane only `
+    + 'and serves no page — then call replay_pull again, and re-read memories / decisions / seat state from the live store.';
+}
+const REREAD = 'Rows served from the old store may no longer exist: re-read memories / decisions / seat state '
+  + 'from the live store (memory_list, decision_list, seat_states) before relying on anything you remembered from it.';
+async function resyncOwnLane(lane, resync) {
+  const reg = await apiCall('POST', '/api/cursors/register', { ...lane.register, resync });
+  const moved = !!reg?.resynced;
+  const out = { resync, lane: lane.identity, moved, events: [] };
+  if (moved) {
+    out.resynced = reg.resynced;
+    out.reread = REREAD;
+    out.next = 'call replay_pull (no resync) to receive what this lane is owed from the baseline';
+  } else if (reg?.resync_refused) {
+    out.refused = reg.resync_refused;
+  } else {
+    out.note = reg?.fresh
+      ? 'this lane had no cursor; it now has one at the current head, so there was nothing to resync'
+      : reg?.epoch_mismatch
+        ? 'nothing moved: this lane is refused for CURSOR_EPOCH_CHANGED, which resync: "epoch" heals'
+        : 'nothing moved: this lane is not refused';
+  }
+  if (reg?.epoch_mismatch) out.epoch_mismatch = reg.epoch_mismatch;
+  out.envelope = reg?.envelope ?? null;
+  out.ack = { advanced: false, code: 'RESYNC_SERVES_NO_PAGE' };
+  return out;
 }
 
 const seatRegistry = createSeatRegistry();

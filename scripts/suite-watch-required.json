@@ -164,6 +164,7 @@
   "tests/refusal-record-s2-1762.test.mjs",
   "tests/replay-lane-rollback-1561.test.mjs",
   "tests/replay-pull-logborn-1571.test.mjs",
+  "tests/replay-resync-1728.test.mjs",
   "tests/resident-context-changes-c2.test.mjs",
   "tests/resident-scan-graph-t3.test.mjs",
   "tests/resident-tombstone-render-d1.test.mjs",
