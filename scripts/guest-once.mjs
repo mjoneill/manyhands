@@ -47,10 +47,14 @@ const SEAT_BEARER = (() => {
   if (!f) return null;
   try { return fs.readFileSync(f, 'utf8').trim() || null; } catch (e) { console.error(`[#1561] SCRUM_SEAT_TOKEN_FILE unreadable (${e.code || e.message}) — memory, decision and seat writes will be refused`); return null; }
 })();
+// #1650 — every board request names this runner and its seat, so the REST meter's callers line can count one guest's
+// requests per wake. The seat is the run-time --seat value, never written here.
+const RUNNER_UA = () => `manyhands-guest-once/${String(opt('--seat') || 'agent-file').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 32)}`;
 const fetch = (url, opts = {}) => {
   const u = String(url);
-  if (!SEAT_BEARER || !(u === BOARD || u.startsWith(`${BOARD}/`))) return globalThis.fetch(url, opts);
-  return globalThis.fetch(url, { ...opts, headers: { ...(opts.headers || {}), Authorization: `Bearer ${SEAT_BEARER}` } });
+  if (!(u === BOARD || u.startsWith(`${BOARD}/`))) return globalThis.fetch(url, opts);
+  const headers = { ...(opts.headers || {}), 'User-Agent': RUNNER_UA(), ...(SEAT_BEARER ? { Authorization: `Bearer ${SEAT_BEARER}` } : {}) };
+  return globalThis.fetch(url, { ...opts, headers });
 };
 const agentFile = opt('--agent');
 const seatArg = opt('--seat');

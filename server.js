@@ -14315,6 +14315,7 @@ function routeApi(method, urlPath, req, res) {
     const m = urlPath.match(r.re);
     // #1570 — every executor call made for this request, readiness checks included, is metered under its route pattern.
     if (m) return meterRoute.run({ route: `${method} ${r.re.source}`, method, path: urlPath, rid: crypto.randomUUID(), caller: req.headers['user-agent'], peer: req.socket?.remotePort, t0: performance.now() }, () => {
+      EXECUTOR_METER?.request();   // #1650 — this request, counted under its own User-Agent on the callers line
       // #715 — the method decides the read kind for everything this handler
       // does, including after its awaits.
       // ⛔ GET alone. A POST that looks read-only is not: search with a reader

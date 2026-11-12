@@ -23,9 +23,14 @@ import crypto, { createHash } from 'node:crypto';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 
 const ms = (ns) => Math.round(ns / 1e6);
+/** #1650 — how many caller tokens the per-minute callers line names; every further token is summed into other=. */
+export const CALLERS_MAX = 8;
 
 export function createExecutorMeter({ routeOf = () => 'background', ridOf = () => null, callerOf = () => null, peerOf = () => null, extras = () => '', slowMs = 1000, log = (line) => console.error(line), now = () => new Date(), loopResolutionMs = 20, loopFactory = () => monitorEventLoopDelay({ resolution: loopResolutionMs }) } = {}) {
   let buckets = new Map();
+  // #1650 — HTTP requests per caller token this minute (the same token as `caller=`). Logged on its OWN line, bounded to
+  // CALLERS_MAX named tokens, so the minute line keeps its #1570c rule: no caller in it.
+  let callers = new Map();
   // #1570 — who asked, as a single safe token: anything outside the allowed set becomes "_" (so a header can't forge a
   // field or break the line), at most 64 characters, "-" when absent or when reading it throws.
   const callerToken = () => {
@@ -68,6 +73,11 @@ export function createExecutorMeter({ routeOf = () => 'background', ridOf = () =
     return { p50: ms(loop.percentile(50)), p99: ms(loop.percentile(99)), max: ms(loop.max) };
   }
 
+  /** #1650 — one routed HTTP request, counted under its caller's token. Never throws. */
+  function request() {
+    try { const t = callerToken(); callers.set(t, (callers.get(t) || 0) + 1); } catch { /* a meter never breaks the request */ }
+  }
+
   /** A 503 the server sent because the graph could not be read; `code` is the response's code. */
   function unavailable(code) {
     try {
@@ -90,6 +100,14 @@ export function createExecutorMeter({ routeOf = () => 'background', ridOf = () =
     try { extra = extras() || ''; } catch { extra = ''; }
     const line = `${now().toISOString()} executor-meter minute: calls=${calls} loopDelayMs(res=${loopResolutionMs})=${l ? `p50=${l.p50} p99=${l.p99} max=${l.max}` : 'n/a'}${extra ? ` ${extra}` : ''}${parts.length ? ` | ${parts.join(' | ')}` : ''}`;
     log(line);
+    try {
+      const counted = [...callers.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+      callers = new Map();
+      const total = counted.reduce((sum, [, n]) => sum + n, 0);
+      const named = counted.slice(0, CALLERS_MAX);
+      const rest = counted.slice(CALLERS_MAX).reduce((sum, [, n]) => sum + n, 0);
+      log(`${now().toISOString()} executor-meter callers: requests=${total}${named.map(([t, n]) => ` ${t}=${n}`).join('')}${rest ? ` other=${rest}` : ''}`);
+    } catch { /* never breaks the minute line */ }
     return line;
   }
 
@@ -118,7 +136,7 @@ export function createExecutorMeter({ routeOf = () => 'background', ridOf = () =
 
   function stop() { try { loop?.disable(); } catch { /* already off */ } }
 
-  return { record, unavailable, flush, prepareDaily, ackDaily, stop, loopNow };
+  return { record, request, unavailable, flush, prepareDaily, ackDaily, stop, loopNow };
 }
 
 /**
