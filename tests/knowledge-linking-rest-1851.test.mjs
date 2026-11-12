@@ -17,6 +17,7 @@
  *   H6  no bearer: refused (401), nothing written
  *   H7  the list filters: status=confirmed shows the H2 link and not a still-proposed one; card=<shortId> narrows to that card
  *   H8  the list says when it was cut: `truncated` (review 52723 point 2)
+ *   H9  in OBSERVE mode (prod's shape), a verdict on behalf of another seat is still refused (review 52726)
  */
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -137,6 +138,29 @@ test('H8 the list says when it was cut: limit=1 over two or more links returns o
   assert.equal(r.json.truncated, true);
   const all = await call('GET', '/api/links');
   assert.equal(all.json.truncated, false, 'CONTROL: the default page holds every test link');
+});
+
+test('H9 OBSERVE mode, the shape prod runs (no SCRUM_AUTH): a verdict on behalf of another seat is still refused (review 52726)', T, async () => {
+  const o = await wholeBoardWorld({ logborn: true, env: { SCRUM_ROSTER_FILE: ROSTER, SCRUM_SEAT_TOKENS: TOKENS, SCRUM_AUTH: '' } });
+  try {
+    const ogc = createGraphClient({ baseUrl: o.exec.baseUrl, expectedDatasetId: WB_DATASET, timeoutMs: 30000, label: 'kl1851-observe' });
+    const assertion = `https://scrumboard.local/assertion/${crypto.randomUUID()}`;
+    const link = linkIri(spanKey(`observe ${assertion}`, 'uuid-2'));
+    const ep = (await (await fetch(`${o.exec.baseUrl}/health`)).json()).epoch;
+    const seed = await fetch(`${o.exec.baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/seed-${crypto.randomUUID()}`, 'x-epoch': String(ep), 'content-type': 'application/sparql-update', [WRITE_PROTOCOL_HEADER]: WRITE_PROTOCOL },
+      body: `INSERT DATA { <${link}> <${RDF}type> <${RS}BearsOn> ; <${RS}status> "proposed" . }` });
+    assert.equal(seed.status, 200);
+    const id = link.split('/').pop();
+    const post = (body) => fetch(`${o.rest.baseUrl}/api/links/${id}/decide`, { method: 'POST', headers: { authorization: `Bearer ${TOK}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const foreign = await post({ verdict: 'dismissed', by: 'bob' });
+    const ft = await foreign.text();
+    assert.equal(foreign.status, 403, ft);
+    assert.match(ft, /SEAT_NOT_SELF/);
+    const st = await ogc.query(`SELECT ?s WHERE { <${link}> <${RS}status> ?s }`);
+    assert.deepEqual(st.rows.map((x) => x.s.value), ['proposed'], 'nothing written');
+    const own = await post({ verdict: 'dismissed', by: 'ada' });
+    assert.equal(own.status, 200, `CONTROL: answering for herself is accepted in observe too (${await own.text()})`);
+  } finally { await o.stop(); }
 });
 
 test('H7 the list filters by status and by card', T, async () => {
