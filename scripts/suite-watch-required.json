@@ -56,6 +56,7 @@
   "tests/decision-makers-disabled-r1.test.mjs",
   "tests/definitions-graph-d1.test.mjs",
   "tests/delivery-graph-post-d1.test.mjs",
+  "tests/deliveries-cursor-1826.test.mjs",
   "tests/delivery-graph-y1.test.mjs",
   "tests/dispatch-hold-1749.test.mjs",
   "tests/emptied-document-e1.test.mjs",

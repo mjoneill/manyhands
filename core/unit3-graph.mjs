@@ -83,15 +83,46 @@ export const splitDeliveryRows = (iri, rows) => ({ nodeRows: rows.filter((r) => 
  * offered, queued or failed; the caller still applies isOpenDelivery for the failed-attempt rule. `recentSince` (an ISO
  * instant) keeps active deliveries plus those offered at/after it.
  */
-export function deliveriesForQuery({ to, conversation, open, recentSince } = {}) {
-  const sel = `?d <${RDF_TYPE}> ${t('Delivery')}${to ? ` ; ${t('deliveredTo')} ${lit(to)}` : ''}${conversation ? ` ; ${t('ofConversation')} <${ENTITY_PREFIX}${conversation}>` : ''} .`
+function deliverySelector({ to, conversation, open, recentSince, ids } = {}) {
+  // #1826 — `ids` (the delivery IRIs a page query chose) pins ?d first; any id that is not a delivery IRI is dropped, never
+  // spliced into SPARQL.
+  const pin = Array.isArray(ids) ? `VALUES ?d { ${ids.filter((i) => deliverySuffix(i)).map((i) => `<${i}>`).join(' ')} } ` : '';
+  return `${pin}?d <${RDF_TYPE}> ${t('Delivery')}${to ? ` ; ${t('deliveredTo')} ${lit(to)}` : ''}${conversation ? ` ; ${t('ofConversation')} <${ENTITY_PREFIX}${conversation}>` : ''} .`
     + (open ? ` GRAPH ${BK} { ?d <urn:ex:ver> ?xv } ?xls ${t('stepOf')} ?d ; ${t('stepIndex')} ?xv ; ${t('state')} ?xst . FILTER(?xst IN ("offered", "queued", "failed"))` : '')
     // #1582 hotfix 2: `recentSince` keeps deliveries that are still ACTIVE (latest step not published or declined) OR were
     // offered at/after that instant. A seat's whole history is ~9,600 deliveries / 435k rows; the callers that list without
     // `open` (MCP inbox counts, the direct tick, the runner) only ever use active or recent ones.
     + (recentSince ? ` GRAPH ${BK} { ?d <urn:ex:ver> ?xrv } ?d ${t('offeredAt')} ?xro . ?xrs ${t('stepOf')} ?d ; ${t('stepIndex')} ?xrv ; ${t('state')} ?xrst . FILTER(!(?xrst IN ("published", "declined")) || ?xro >= ${lit(recentSince)})` : '');
+}
+
+export function deliveriesForQuery(opts = {}) {
+  const sel = deliverySelector(opts);
   // #1638 — the third branch re-reads the node's `ver` from the bookkeeping graph (it no longer sits beside `?d ?p ?o`)
   return `SELECT ?d ?s ?p ?o WHERE { { ${sel} ?d ?p ?o . BIND(?d AS ?s) } UNION { ${sel} GRAPH ${BK} { ?d <${TM.ver}> ?o } BIND(<${TM.ver}> AS ?p) BIND(?d AS ?s) } UNION { ${sel} ?s ${t('stepOf')} ?d . ?s ?p ?o } }`;
+}
+
+/**
+ * #1826 — a delivery list page is TWO reads. This one chooses the page's deliveries, bounded IN THE QUERY (ORDER BY offeredAt,
+ * then the IRI as a tie-breaker; LIMIT n+1, so the caller knows whether a next page exists). deliveriesForQuery({ ids }) then
+ * reads only those. The filters are the unpaged list's own selector, so a page holds what the unpaged list would, in its
+ * order. `after` is a decoded cursor { offeredAt, iri }: strictly after it in (offeredAt, iri) order, so deliveries sharing
+ * an offeredAt across a page boundary are neither skipped nor repeated. Rows: ?d ?oa.
+ */
+export function deliveryPageQuery({ after, limit, ...filters } = {}) {
+  const cur = after ? ` FILTER(?oa > ${lit(after.offeredAt)} || (?oa = ${lit(after.offeredAt)} && STR(?d) > ${lit(after.iri)}))` : '';
+  return `SELECT ?d ?oa WHERE { ${deliverySelector(filters)} ?d ${t('offeredAt')} ?oa .${cur} } ORDER BY ?oa STR(?d) LIMIT ${Math.floor(Number(limit)) + 1}`;
+}
+
+/** The opaque cursor a page answers as `next`: base64url of [offeredAt, delivery uuid]. */
+export const encodeDeliveryCursor = ({ offeredAt, iri }) => Buffer.from(JSON.stringify([offeredAt, deliverySuffix(iri)])).toString('base64url');
+/** A cursor back to { offeredAt, iri }, or null for anything REST did not mint (its parts never reach SPARQL unchecked). */
+export function decodeDeliveryCursor(s) {
+  if (typeof s !== 'string' || !/^[A-Za-z0-9_-]{1,400}$/.test(s)) return null;
+  let v; try { v = JSON.parse(Buffer.from(s, 'base64url').toString('utf8')); } catch { return null; }
+  if (!Array.isArray(v) || v.length !== 2 || typeof v[0] !== 'string' || typeof v[1] !== 'string') return null;
+  const iri = `${DELIVERY_PREFIX}${v[1]}`;
+  if (!SINCE_RE.test(v[0]) || !deliverySuffix(iri)) return null;
+  return { offeredAt: v[0], iri };
 }
 
 /** Does an opId hold an APPLIED receipt? (Y4/Y10: a caller's own retry gets its own outcome back, not a conflict.) */

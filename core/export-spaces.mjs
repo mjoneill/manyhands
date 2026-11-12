@@ -44,11 +44,13 @@ const NOT_EXPORTABLE = new Set(['columns', 'labelAliases', 'seatStates']);
  * Each route serves both modes (units on: the graph; off: the document), so the exporter reads them the same way on every board.
  *   - /api/conversations with NO params is uncapped by contract (#202). Never page it by seq: under the conversations unit every
  *     seq page re-reads every post, so a walk is one full read per 200 posts.
- *   - /api/deliveries without all=1 is active deliveries plus the last 24 hours (#1582 hotfix 2). #1826 adds a cursor.
+ *   - /api/deliveries without all=1 is active deliveries plus the last 24 hours (#1582 hotfix 2). With all=1 it is read in
+ *     PAGES (#1826): `paged` names the response field holding the next cursor, sent back as `after` until it is null. One
+ *     unbounded all=1 read stopped answering at ~21.9k deliveries (503 after 10 s, measured 2026-11-12).
  */
 export const ROUTE_SOURCES = Object.freeze({
   commons: { source: '/api/conversations', key: null },
-  deliveries: { source: '/api/deliveries?all=1', key: 'deliveries' },
+  deliveries: { source: '/api/deliveries?all=1&limit=500', key: 'deliveries', paged: 'next' },
   'model-calls': { source: '/api/model-calls', key: 'calls' },
   wakes: { source: '/api/wakes', key: null },
   memories: { source: '/api/memories', key: 'memories' },

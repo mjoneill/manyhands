@@ -6718,14 +6718,52 @@ async function graphListDeliveries(q) {
   // (a seat's full history costs the executor seconds to minutes; `all=1` still asks for it, explicitly).
   const openOnly = q.open === '1' || q.open === 'true';
   const recentSince = !openOnly && !q.conversation && q.all !== '1' ? new Date(Date.now() - 86400_000).toISOString() : undefined;
-  const r = await POSTS_BULK_READER.query(U3.deliveriesForQuery({ to: q.to, conversation: q.conversation, open: openOnly, recentSince }));
+  const filters = { to: q.to, conversation: q.conversation, open: openOnly, recentSince };
+  const page = deliveryPageOf(q);
+  if (page.error) return { status: 400, wire: { error: page.error, code: 'BAD_CURSOR' } };
+  if (page.limit) {
+    // #1826 — the bound is IN THE QUERY: one read picks this page's deliveries (ORDER BY offeredAt, IRI; LIMIT n+1), a
+    // second reads only those. A complete history is then a walk of bounded reads, never one unbounded query.
+    const p = await POSTS_BULK_READER.query(U3.deliveryPageQuery({ ...filters, after: page.after, limit: page.limit }));
+    if (!p.ok) return deliveryGraphDown(p.reason || 'unreadable');
+    const chosen = p.rows.map((row) => ({ iri: row.d?.value, offeredAt: row.oa?.value })).filter((x) => U3.deliverySuffix(x.iri));
+    const more = chosen.length > page.limit;
+    const kept = chosen.slice(0, page.limit);
+    let out = [];
+    if (kept.length) {
+      const r = await POSTS_BULK_READER.query(U3.deliveriesForQuery({ ...filters, ids: kept.map((x) => x.iri) }));
+      if (!r.ok) return deliveryGraphDown(r.reason || 'unreadable');
+      out = U3.groupByDelivery(r.rows).map((d) => d.entity);
+    }
+    // `open` keeps isOpenDelivery's failed-attempt rule after the read, so an open page may hold fewer than `limit`;
+    // `next` comes from the page's chosen ids, never from what survived that filter, so the walk still covers every one.
+    if (openOnly) out = out.filter(deliveryOpen);
+    out = sortDeliveryWire(out.map(deliveryToWire));
+    const next = more ? U3.encodeDeliveryCursor(kept[kept.length - 1]) : null;
+    return { status: 200, wire: { deliveries: out, count: out.length, next } };
+  }
+  const r = await POSTS_BULK_READER.query(U3.deliveriesForQuery(filters));
   if (!r.ok) return deliveryGraphDown(r.reason || 'unreadable');
   let out = U3.groupByDelivery(r.rows).map((d) => d.entity);
   if (q.open === '1' || q.open === 'true') out = out.filter(deliveryOpen);
-  out = out.map(deliveryToWire).sort((a, b) => (a.offeredAt < b.offeredAt ? -1 : a.offeredAt > b.offeredAt ? 1 : 0));
-  const limit = Number.parseInt(q.limit, 10);
-  if (Number.isInteger(limit) && limit > 0) out = out.slice(0, limit);
+  out = sortDeliveryWire(out.map(deliveryToWire));
   return { status: 200, wire: { deliveries: out, count: out.length } };
+}
+
+/** #1826 — the list's one order, on both stores: offeredAt, then the delivery id (the cursor's own tie-breaker). */
+const sortDeliveryWire = (out) => out.sort((a, b) => (a.offeredAt < b.offeredAt ? -1 : a.offeredAt > b.offeredAt ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+const DELIVERY_PAGE_MAX = 1000;
+/**
+ * #1826 — `limit` (a positive integer, capped at DELIVERY_PAGE_MAX) and/or `after` (a cursor this route minted as `next`)
+ * turn the list into a page that answers `next` (null on the last page). Neither → the whole list, as before.
+ */
+function deliveryPageOf(q) {
+  const parsed = Number.parseInt(q.limit, 10);
+  const hasLimit = Number.isInteger(parsed) && parsed > 0;
+  if (q.after === undefined && !hasLimit) return {};
+  const after = q.after === undefined ? null : U3.decodeDeliveryCursor(q.after);
+  if (q.after !== undefined && !after) return { error: '`after` is not a cursor this route issued: pass the `next` value of the previous page unchanged' };
+  return { after, limit: Math.min(hasLimit ? parsed : DELIVERY_PAGE_MAX, DELIVERY_PAGE_MAX) };
 }
 
 async function handleListDeliveries(req, res) {
@@ -6741,9 +6779,17 @@ async function handleListDeliveriesInner(req, res) {
   if (q.to) out = out.filter((d) => d['scrum:deliveredTo'] === q.to);
   if (q.conversation) out = out.filter((d) => d['scrum:ofConversation'] === q.conversation);
   if (q.open === '1' || q.open === 'true') out = out.filter(deliveryOpen);
-  out = out.map(deliveryToWire).sort((a, b) => (a.offeredAt < b.offeredAt ? -1 : a.offeredAt > b.offeredAt ? 1 : 0));
-  const limit = Number.parseInt(q.limit, 10);
-  if (Number.isInteger(limit) && limit > 0) out = out.slice(0, limit);
+  out = sortDeliveryWire(out.map(deliveryToWire));
+  // #1826 — the same page contract as the graph unit, so a caller (the exporter) walks either store the same way.
+  const page = deliveryPageOf(q);
+  if (page.error) return sendJSON(res, 400, { error: page.error, code: 'BAD_CURSOR' });
+  if (page.limit) {
+    if (page.after) out = out.filter((d) => d.offeredAt > page.after.offeredAt || (d.offeredAt === page.after.offeredAt && d.id > page.after.iri));
+    const more = out.length > page.limit;
+    out = out.slice(0, page.limit);
+    const last = out[out.length - 1];
+    return sendJSON(res, 200, { deliveries: out, count: out.length, next: more ? U3.encodeDeliveryCursor({ offeredAt: last.offeredAt, iri: last.id }) : null });
+  }
   sendJSON(res, 200, { deliveries: out, count: out.length });
 }
 
