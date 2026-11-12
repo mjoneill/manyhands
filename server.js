@@ -7066,7 +7066,7 @@ async function handleDecideLink(req, res, id) {
       if (!c) return sendJSON(res, 400, { error: `workingOn ${body.workingOn} is not a card on this board` });
       workingOn = c;
     }
-    if (body.verdict === 'confirmed' && !workingOn) return sendJSON(res, 400, { error: 'a confirm names workingOn: the short id of the card you were working on when this claim mattered. An unattributed confirm cannot be counted as used (#1850).' });
+    // a confirm without workingOn is refused by the compiler (link.decide), the one place that rule lives; it reaches here as a 400
     if (!LINK_ID_RE.test(id)) return sendJSON(res, 404, { error: `no link ${id}`, code: 'LINK_NOT_FOUND' });
     const known = await LOGBORN.query(`SELECT ?t WHERE { <${LINK_IRI(id)}> a ?t FILTER(?t = <https://scrumboard.local/ns#BearsOn>) }`);
     if (!known.length) return sendJSON(res, 404, { error: `no link ${id}`, code: 'LINK_NOT_FOUND' });
