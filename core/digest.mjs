@@ -77,8 +77,17 @@ function describeRow(row) {
 export function renderDigest({ standing, now, firstSeen = {} }) {
   const next = {};
   const lines = [];
+  const paused = [];   // #1880 — checks that did not RUN: never silent, never "failing"
   for (const check of standing || []) {
     if (!check || !check.id) continue;
+    if (check.disabled) {
+      // #1880 — a disabled check returns no rows, and skipping it like a clean one made a silent digest read "all clear"
+      // while 3 of 7 checks were off (11-12). It is named on its own ⏸ line, and that line alone is something to say.
+      const key = `${check.id}|disabled`;
+      next[key] = firstSeen[key] || now;
+      paused.push({ id: check.id, reason: check.reason || 'disabled', since: next[key] });
+      continue;
+    }
     if (check.error) {
       // A check that could not run is NOT a clean check (#1162): it is printed
       // as what it is, so "anything automated sees green" cannot happen here.
@@ -100,12 +109,22 @@ export function renderDigest({ standing, now, firstSeen = {} }) {
     const shown = named.slice(0, 6).join(' · ') + (named.length > 6 ? ` · +${named.length - 6} more` : '');
     lines.push(`⚠️ ${rows.length} ${check.id} · oldest ${ageLabel(oldest, now)} · ${check.claim} · ${shown}  → ${VERB[check.id] || 'see /api/checks standing[]'}`);
   }
-  if (lines.length === 0) return { body: null, firstSeen: {}, items: 0 };
-  const total = Object.keys(next).length;
-  const prev = Object.keys(firstSeen).length;
+  if (lines.length === 0 && paused.length === 0) return { body: null, firstSeen: {}, items: 0 };
+  const isItem = (k) => !k.endsWith('|disabled');
+  const total = Object.keys(next).filter(isItem).length;
+  const prev = Object.keys(firstSeen).filter(isItem).length;
   const trend = prev ? ` (was ${prev} yesterday)` : '';
-  const body = `${lines.length} standing check${lines.length === 1 ? '' : 's'} failing, ${total} item${total === 1 ? '' : 's'}${trend} — everything the board knows is wrong that nobody fixed:\n${lines.join('\n')}`;
-  return { body, firstSeen: next, items: total };
+  const out = [];
+  if (lines.length) out.push(`${lines.length} standing check${lines.length === 1 ? '' : 's'} failing, ${total} item${total === 1 ? '' : 's'}${trend} — everything the board knows is wrong that nobody fixed:`, ...lines);
+  else out.push('0 standing checks failing among those that ran — but not every check ran:');
+  if (paused.length) {
+    const byReason = new Map();
+    for (const p of paused) byReason.set(p.reason, [...(byReason.get(p.reason) || []), p.id]);
+    const oldest = paused.reduce((m, p) => (p.since < m ? p.since : m), now);
+    const named = [...byReason.entries()].map(([reason, ids]) => `${ids.join(', ')} (${reason})`).join(' · ');
+    out.push(`⏸ ${paused.length} standing check${paused.length === 1 ? '' : 's'} not running · since ${ageLabel(oldest, now)} · ${named}  → re-enable it, or record why it stays off`);
+  }
+  return { body: out.join('\n'), firstSeen: next, items: total };
 }
 
 function readState(file) {
