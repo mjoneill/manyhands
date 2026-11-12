@@ -82,6 +82,7 @@ import { labelAliasRows, labelAliasEntity, labelAliasIri } from './core/label-al
 import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, auditOutbox, modeProblem, legacyProof, postMatchesEntry, opIdFor, announcePostId, postCreateIntention, obligationIdOf } from './core/announce-outbox.mjs';   // #1574 C3a/C3b/C3c
 import * as U3 from './core/unit3-graph.mjs';   // #1582 — deliveries and model calls in the graph
 import { createGraphClient, setExecutorMeter } from './core/graph-client.mjs';   // #1574 C3b — the conversations unit's executor door
+import { decideIntention as linkDecideIntention } from './core/knowledge-linking.mjs';   // #1851
 import { createExecutorMeter, createKeepAlive, captureCpuProfile } from './core/executor-meter.mjs';   // #1570 — what REST asks the executor, and REST's own loop delay
 import { postFeed, DiscoveryError } from './core/post-discovery.mjs';   // #1574 R3
 import { createReadGate } from './core/read-admission.mjs';   // #1574 A1–A5
@@ -7015,6 +7016,83 @@ async function handleCreateDecision(req, res) {
 // for the twins that were recorded before the rail existed and for the case
 // where the relation is only seen afterwards. Projected by the replica as
 // the same edge a create-time relation gets.
+// ── #1851 — "bears on" links: where a seat FINDS a proposed link, and where she ANSWERS it ─────────────────────────────
+// The linker (core/knowledge-linking.mjs) proposes; these two routes are the human-facing half. A confirm names the card the
+// seat was working on (the compiler refuses one that does not): that is what #1850 counts as USED. The actor is the
+// AUTHENTICATED seat (logbornActor), never the body; `by` is required as on every other write and kept as the domain field.
+const LINK_IRI = (id) => `https://scrumboard.local/link/${id}`;
+const LINK_ID_RE = /^[0-9a-f]{64}$/;
+const linkCardByShortId = (shortId) => readBoard().cards.find((c) => c && c.shortId === shortId) ?? null;
+async function handleListLinks(req, res) {
+  try {
+    if (!LOGBORN) return sendJSON(res, 503, { error: 'links live in the graph executor, and this server does not run the log-born unit (SCRUM_GRAPH_UNIT_LOGBORN)', code: 'LINKS_UNAVAILABLE' });
+    const qs = parseQuery(req.url);
+    const status = qs.status == null ? null : String(qs.status);
+    if (status != null && !['proposed', 'confirmed', 'dismissed'].includes(status)) return sendJSON(res, 400, { error: 'status is proposed, confirmed or dismissed' });
+    let cardFilter = null;
+    if (qs.card != null) {
+      const c = linkCardByShortId(Number(qs.card));
+      if (!c) return sendJSON(res, 400, { error: `card ${qs.card} is not a card on this board` });
+      cardFilter = `https://scrumboard.local/entity/${c.id}`;
+    }
+    const LINKS_MAX = 500;
+    const limit = qs.limit == null ? LINKS_MAX : Number(qs.limit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > LINKS_MAX) return sendJSON(res, 400, { error: `limit is an integer from 1 to ${LINKS_MAX}` });
+    const RS = 'https://scrumboard.local/ns#';
+    const got = await LOGBORN.query(`SELECT ?l ?st ?sc ?c ?a ?span ?gist WHERE { ?l a <${RS}BearsOn> ; <${RS}status> ?st ; <${RS}bearsOnCard> ?c ; <${RS}fromAssertion> ?a `
+      + `OPTIONAL { ?l <${RS}score> ?sc } OPTIONAL { ?a <${RS}anchorText> ?span } OPTIONAL { ?a <${RS}gist> ?gist } `
+      + `${status ? `FILTER(?st = ${JSON.stringify(status)}) ` : ''}${cardFilter ? `FILTER(?c = <${cardFilter}>) ` : ''}} ORDER BY DESC(?sc) ?l LIMIT ${limit + 1}`);   // one past the page: its presence is the truncation signal
+    const truncated = got.length > limit;
+    const rows = got.slice(0, limit);
+    const byId = new Map(readBoard().cards.filter((c) => c && c.id).map((c) => [`https://scrumboard.local/entity/${c.id}`, c]));
+    const links = rows.map((r) => {
+      const card = byId.get(r.c.value);
+      return { id: r.l.value.split('/').pop(), status: r.st.value, score: r.sc ? Number(r.sc.value) : null,
+        card: { shortId: card?.shortId ?? null, title: card?.title ?? null },
+        claim: { iri: r.a.value, span: r.span?.value ?? null, gist: r.gist?.value ?? null } };
+    });
+    sendJSON(res, 200, { links, truncated, means: 'A link is a MACHINE PROPOSAL that a claim the room read bears on a card, found by meaning search. Answer it with POST /api/links/:id/decide (MCP link_decide): confirm names the card you were working on; dismiss keeps it from ever being proposed again.' });
+  } catch (e) {
+    if (executorRefused(res, e)) return;
+    console.error('GET /api/links:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+async function handleDecideLink(req, res, id) {
+  try {
+    if (!LOGBORN) return sendJSON(res, 503, { error: 'links live in the graph executor, and this server does not run the log-born unit (SCRUM_GRAPH_UNIT_LOGBORN)', code: 'LINKS_UNAVAILABLE' });
+    const body = JSON.parse((await readBody(req)) || '{}');
+    const by = body.by;
+    if (typeof by !== 'string' || !by.trim()) return sendJSON(res, 400, { error: 'by is required: a verdict nobody gave cannot be counted' });
+    // a verdict is counted per seat (#1850): one seat answering FOR another is refused, never re-signed. Under enforced auth the
+    // body's foreign `by` arrives rewritten to the key's seat with the claim kept as onBehalfOf (#1569), which is what we read.
+    if (typeof body.onBehalfOf === 'string' && body.onBehalfOf && body.onBehalfOf !== by) {
+      return sendJSON(res, 403, { error: `seat '${by}' may give only its own verdict, not '${body.onBehalfOf}''s`, code: 'SEAT_NOT_SELF' });
+    }
+    if (!['confirmed', 'dismissed'].includes(body.verdict)) return sendJSON(res, 400, { error: 'verdict is confirmed or dismissed' });
+    let workingOn = null;
+    if (body.workingOn != null && body.workingOn !== '') {
+      const c = linkCardByShortId(Number(body.workingOn));
+      if (!c) return sendJSON(res, 400, { error: `workingOn ${body.workingOn} is not a card on this board` });
+      workingOn = c;
+    }
+    // a confirm without workingOn is refused by the compiler (link.decide), the one place that rule lives; it reaches here as a 400
+    if (!LINK_ID_RE.test(id)) return sendJSON(res, 404, { error: `no link ${id}`, code: 'LINK_NOT_FOUND' });
+    const known = await LOGBORN.query(`SELECT ?t WHERE { <${LINK_IRI(id)}> a ?t FILTER(?t = <https://scrumboard.local/ns#BearsOn>) }`);
+    if (!known.length) return sendJSON(res, 404, { error: `no link ${id}`, code: 'LINK_NOT_FOUND' });
+    const actor = logbornActor(req, res, 'link.decide');
+    if (!actor) return;
+    const r = await LOGBORN.write(linkDecideIntention({ link: LINK_IRI(id), verdict: body.verdict, workingOn: workingOn ? workingOn.id : null, actor }));
+    if (r.outcome !== 'APPLIED') return logbornWriteFailed(res, r);
+    // the answer names the seat the graph recorded (the authenticated actor), never the body's `by` (review 52723 point 1)
+    sendJSON(res, 200, { id, verdict: body.verdict, workingOn: workingOn ? workingOn.shortId : null, by: String(actor).replace(/^urn:ex:seat\//, '') });
+  } catch (e) {
+    if (executorRefused(res, e)) return;
+    console.error('POST /api/links/:id/decide:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+
 async function handleRelateDecision(req, res, ref) {
   try {
     const body = JSON.parse(await readBody(req));
@@ -13944,6 +14022,8 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/assert$/,               fn: (req, res) => handleAssert(req, res) },
   { method: 'POST',   re: /^\/api\/decisions$/,            fn: (req, res) => handleCreateDecision(req, res) },
   { method: 'POST',   re: /^\/api\/decisions\/([^\/]+)\/relations$/, fn: (req, res, m) => handleRelateDecision(req, res, m[1]) },   // #1322
+  { method: 'GET',    re: /^\/api\/links$/,                fn: (req, res) => handleListLinks(req, res) },   // #1851
+  { method: 'POST',   re: /^\/api\/links\/([^\/]+)\/decide$/, fn: (req, res, m) => handleDecideLink(req, res, m[1]) },   // #1851
   { method: 'GET',    re: /^\/api\/models$/,               fn: (req, res) => handleListModels(req, res) },                       // #1197
   { method: 'POST',   re: /^\/api\/models$/,               fn: (req, res) => handleCreateModel(req, res) },                      // #1197
   { method: 'PATCH',  re: /^\/api\/models\/([^\/]+)$/,      fn: (req, res, m) => handlePatchModel(req, res, decodeURIComponent(m[1])) },          // #1197
