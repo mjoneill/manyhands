@@ -75,7 +75,7 @@ function tick(stub, state, { live = false } = {}) {
 }
 /** Everything the watch would say to the room this tick: DRYRUN's would-be post, or the real POST bodies the stub captured. */
 const said = (stub, r) => [...r.out.split('\n').filter((l) => /DRYRUN would post:/.test(l)), ...stub.posts.map((p) => p.body ?? '')].join('\n');
-const named = (text) => /SEAT STOPPED/.test(text) && /\balpha\b/.test(text);
+const named = (text) => /activity unconfirmed — please report/.test(text) && /\balpha\b/.test(text);   // #1601 wording
 const NO_WRITE_CLAIM = /no board write (is )?attributed|no board write attributed to it/i;
 
 

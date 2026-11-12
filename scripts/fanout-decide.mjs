@@ -531,7 +531,10 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
         ? ` and its last attributed board write was ${s.lastWriteAt}, itself older than the ${thresholdText(s)} threshold`
         : ' and no board write is attributed to it in the window read'}`
       + (s.answeredAt ? ` — it answered through another door at ${s.answeredAt} (last answered ${Math.round((now - Date.parse(s.answeredAt)) / 60000)} min ago) and nothing since` : ''));
-    const stoppedBody = `⛔ fanout watch: SEAT STOPPED, not deaf (#717) — ${lines.join('; ')}. `
+    // #1601 fix-1 — the only evidence here is SILENCE through the observed doors (no client request, no attributed write).
+    // A seat waiting on a ~30 min CI run or a long local test run produces exactly that, so the headline says what was
+    // measured (activity unconfirmed) and asks, instead of asserting a state (STOPPED) nobody saw. Escalation is unchanged.
+    const stoppedBody = `⛔ fanout watch: activity unconfirmed — please report (#717, #1601) — ${lines.join('; ')}. `
       + `Measured: no request through its MCP client${namedWrite
         ? ` and no board write attributed to it NEWER than the ${thresholdText(stoppedNamed.find((x) => x.lastWriteAt))} threshold`
         : ' and no board write attributed to it in that window'}, while it holds a claim. `

@@ -98,7 +98,7 @@ function tick(stub, state, { live = false } = {}) {
 }
 /** Everything the watch would say to the room this tick: DRYRUN's would-be post, or the real POST bodies the stub captured. */
 const said = (stub, r) => [...r.out.split('\n').filter((l) => /DRYRUN would post:/.test(l)), ...stub.posts.map((p) => p.body ?? '')].join('\n');
-const named = (text) => /SEAT STOPPED/.test(text) && /\balpha\b/.test(text);
+const named = (text) => /activity unconfirmed — please report/.test(text) && /\balpha\b/.test(text);   // #1601 wording
 const NO_WRITE_CLAIM = /no board write (is )?attributed|no board write attributed to it/i;
 
 const FAULTS = [['the request TIMES OUT (the observed case)', 'hang'], ['the connection is destroyed', 'destroy'], ['HTTP 500 whose body is valid JSON', '500json'], ['HTTP 200 with a body that is not JSON', 'html']];
@@ -157,7 +157,8 @@ test('U-live the degraded post really goes out (a real POST, not only DRYRUN) an
     assert.equal(stub.posts.length, 1, `exactly one post this tick: ${JSON.stringify(stub.posts)}`);
     assert.equal(stub.posts[0].author, 'board');
     assert.match(stub.posts[0].body, /UNREADABLE/i); assert.match(stub.posts[0].body, /\balpha\b/);
-    assert.doesNotMatch(stub.posts[0].body, /SEAT STOPPED|no board write/i);
+    // #1601 — the silence alarm's CURRENT wording, or this would pass with the accusation present
+    assert.doesNotMatch(stub.posts[0].body, /activity unconfirmed|SEAT STOPPED|no board write/i);
   } finally { await stub.stop(); }
 });
 

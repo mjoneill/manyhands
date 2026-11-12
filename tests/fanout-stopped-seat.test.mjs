@@ -45,7 +45,7 @@ test('#717 POSITIVE: open stream + stale request + a claim → named STOPPED, an
   assert.deepEqual(stopped[0].claims, [717]);
   const { warnBody } = decide({ ...base, state: healthy, stoppedSeats: stopped, staleSeats: staleSeats(STATUS_STALLED) });
   assert.ok(warnBody);
-  assert.match(warnBody, /SEAT STOPPED/);
+  assert.match(warnBody, /activity unconfirmed — please report/);
   assert.match(warnBody, /alpha/); assert.match(warnBody, /#717/); assert.match(warnBody, /180 min/);
   assert.doesNotMatch(warnBody, /DEAF SEAT|deaf seat named/i, 'stopped is not deaf: the stream is open');
   assert.doesNotMatch(warnBody, /beta|gamma/);
@@ -272,7 +272,7 @@ test('#1358 POSITIVE CONTROL kept: a seat that writes nothing anywhere is still 
   const claims = { alpha: [717] };
   const named = stoppedSeats(STATUS_STALLED, { now: T0, staleMs: 20 * MIN, claimsBySeat: claims, lastWriteBySeat: {} });
   const t1 = decide({ ...base, state: healthy, stoppedSeats: named });
-  assert.match(t1.warnBody ?? '', /SEAT STOPPED/);
+  assert.match(t1.warnBody ?? '', /activity unconfirmed — please report/);
   // A state file written by the old code holds `key: <number>`; the new code must not choke or re-fire.
   const key = `alpha@${STATUS_STALLED.seats.alpha.lastClientRequestAt}`;
   const legacy = { ...healthy, stoppedEpisodes: { [key]: T0 - 5 * MIN } };
@@ -301,4 +301,16 @@ test('#1358 answeredSeatsFrom: a seat whose newest attributed write is NEWER tha
   const out = answeredSeatsFrom(STATUS_STALLED, { claimsBySeat: claims, lastWriteBySeat: { alpha: iso(T0 - 24 * MIN), gamma: iso(T0 - 5 * 60 * MIN) } });
   assert.deepEqual(out, [{ seat: 'alpha', lastClientRequestAt: req, lastWriteAt: iso(T0 - 24 * MIN) }],
     'alpha wrote after her request went quiet ⇒ answered; gamma\'s write predates her request ⇒ not an answer; beta is not stale');
+});
+
+test('#1601 fix-1 WORDING: silence alone is reported as "activity unconfirmed — please report", never as STOPPED, and the seat is still named', () => {
+  // Every firing of this alarm rests on ONE kind of evidence: no request through the observed doors and no attributed write
+  // newer than the threshold. A seat waiting on a ~30 min CI run or a long local test run leaves exactly that (specimens on
+  // #1601: 10-05, 10-19, 11-09 ×2, 11-12 ×2). "STOPPED" asserts a state nobody measured; the evidence supports "unconfirmed".
+  const stopped = stoppedSeats(STATUS_STALLED, { now: T0, staleMs: 20 * MIN, claimsBySeat: CLAIMS });
+  const { warnBody } = decide({ ...base, state: healthy, stoppedSeats: stopped });
+  assert.ok(warnBody, 'POSITIVE CONTROL: the seat is still posted about; only the headline changes');
+  assert.match(warnBody, /activity unconfirmed — please report/);
+  assert.match(warnBody, /\balpha\b/); assert.match(warnBody, /#717/);
+  assert.doesNotMatch(warnBody, /SEAT STOPPED/, 'the headline no longer asserts a state the measurement cannot see');
 });
