@@ -36,7 +36,8 @@ const PY = process.env.GRAPH_EXECUTOR_PYTHON || path.join(PROJECT_DIR, 'graph-ex
 const HAVE_PY = fs.existsSync(PY) && spawnSync(PY, ['-c', 'import pyoxigraph'], { stdio: 'ignore' }).status === 0;
 const SKIP = HAVE_PY ? false : `UNAVAILABLE: no python with pyoxigraph at ${PY}`;
 
-const tmpdir = (p) => fs.mkdtempSync(path.join(os.tmpdir(), `rs1728-${p}-`));
+const TMP = [];   // every temp dir this file makes; removed after the servers stop (the suite fails a new tmp leak)
+const tmpdir = (p) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), `rs1728-${p}-`)); TMP.push(d); return d; };
 const TOK = mintToken();   // a test credential for the memory WRITES that make rows to serve; the lanes use none
 function tokensFile() {
   const f = path.join(tmpdir('tok'), 'seat-tokens.json');
@@ -53,7 +54,10 @@ function initStore(dsid) {
 }
 
 const LIVE = [];
-after(async () => { for (const s of LIVE.reverse()) await s.stop(); });
+after(async () => {
+  for (const s of LIVE.reverse()) await s.stop();
+  for (const d of TMP) fs.rmSync(d, { recursive: true, force: true });
+});
 
 let W = null;
 async function world() {
