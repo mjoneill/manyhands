@@ -830,13 +830,16 @@ export function mountConversationView(opts = {}) {
   // cursor stays null and the poll is the `since=` poll as before.
   const useFeed = !!(doc.defaultView && doc.defaultView.__SCRUM_COMMIT_FEED__ === true);
   let feedCursor = null;
+  // #1879 — true once the server says it serves NO feed (400 GRAPH_DISCOVERY_OFF). Until then a null cursor under the flag
+  // means the load-time `tip` FAILED, and pollOnce asks for it again instead of polling ?since= for the life of the view.
+  let feedOff = false;
   const feedUrl = (after) => baseUrl + '/api/conversations?afterCommit=' + encodeURIComponent(after)
     + (typeof attachedTo === 'string' && attachedTo ? '&attachedTo=' + encodeURIComponent(attachedTo) : '') + '&limit=200';
   async function feedTip() {
     try {
       const res = await f(feedUrl('tip'));
-      if (!res.ok) return null;
-      const page = await res.json();
+      const page = await res.json().catch(() => null);
+      if (!res.ok) { if (res.status === 400 && page && page.code === 'GRAPH_DISCOVERY_OFF') feedOff = true; return null; }   // #1879
       return page && typeof page.nextAfterCommit === 'string' ? page.nextAfterCommit : null;
     } catch (_) { return null; }
   }
@@ -904,13 +907,19 @@ export function mountConversationView(opts = {}) {
         } else data = rows;
       } catch (_) { return; }   // 503 / offline: keep the view, next tick tries again
     } else {
+      // #1879 — the flag is on but there is no cursor: the load-time `tip` failed. Ask again BEFORE this tick's since read
+      // (the same order as load(): a post committed between the two is in the since rows or the first feed read, and ids
+      // dedupe), and take the cursor only when the since read answered, so a failed read can never skip a gap.
+      const retryTip = useFeed && !feedOff ? await feedTip() : null;
       const url = lastTs
         ? conversationsUrl({ baseUrl, attachedTo, since: lastTs })
         : conversationsUrl({ baseUrl, attachedTo, limit });
+      let ok = false;
       try {
         const res = await f(url);
-        if (res.ok) data = await res.json();
+        if (res.ok) { data = await res.json(); ok = true; }
       } catch (_) { return; }
+      if (retryTip && ok && !feedCursor) feedCursor = retryTip;   // #1879 — onto the feed from the next tick
     }
     if (!Array.isArray(data) || !data.length) return;
     const before = new Set(messages.map((m) => m.id));
