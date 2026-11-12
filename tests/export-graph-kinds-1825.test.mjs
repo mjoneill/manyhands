@@ -76,7 +76,7 @@ const delivery = (n) => ({ id: `d-${n}`, to: 'ada', conversation: 'p-1', offered
  * COUNT answers, or to 'fail' for a 503. `deliveriesRecent` is what the bare /api/deliveries serves (the route's 24-hour bound);
  * `callsKey` is the key /api/model-calls answers under.
  */
-function fakeBoard({ posts = [], calls = [], deliveries = [], deliveriesRecent = [], callsKey = 'calls', counts = {}, doc = {} } = {}) {
+function fakeBoard({ posts = [], calls = [], deliveries = [], deliveriesRecent = [], callsKey = 'calls', counts = {}, doc = {}, pager = 'ok' } = {}) {
   const seen = [];
   const srv = http.createServer(async (req, res) => {
     const u = new URL(req.url, 'http://x');
@@ -95,7 +95,17 @@ function fakeBoard({ posts = [], calls = [], deliveries = [], deliveriesRecent =
     if (u.pathname === '/api/memories') return send(200, { total: 0, memories: [] });
     if (u.pathname === '/api/conversations') return send(200, u.searchParams.get('limit') ? posts.slice(-Number(u.searchParams.get('limit'))) : posts, { 'X-Total-Count': String(posts.length) });
     if (u.pathname === '/api/model-calls') return send(200, { [callsKey]: calls, count: calls.length });
-    if (u.pathname === '/api/deliveries') { const d = u.searchParams.get('all') === '1' ? deliveries : deliveriesRecent; return send(200, { deliveries: d, count: d.length }); }
+    if (u.pathname === '/api/deliveries') {
+      const d = u.searchParams.get('all') === '1' ? deliveries : deliveriesRecent;
+      // #1826 — with limit/after the route answers a page and its `next` cursor. The fake pages TWO at a time whatever
+      // limit asks, so an export of 3 deliveries is a real two-page walk.
+      if (!u.searchParams.has('limit') && !u.searchParams.has('after')) return send(200, { deliveries: d, count: d.length });
+      const from = Number(u.searchParams.get('after') ?? 0); const page = d.slice(from, from + 2);
+      // `pager` plants a broken page: 'no-next' drops the cursor field, 'stuck' answers the cursor it was sent.
+      if (pager === 'no-next') return send(200, { deliveries: page, count: page.length });
+      if (pager === 'stuck' && u.searchParams.has('after')) return send(200, { deliveries: page, count: page.length, next: u.searchParams.get('after') });
+      return send(200, { deliveries: page, count: page.length, next: from + 2 < d.length ? String(from + 2) : null });
+    }
     return send(404, { error: `fake board: no route ${u.pathname}` });
   });
   return new Promise((ok) => srv.listen(0, '127.0.0.1', () => ok({ base: `http://127.0.0.1:${srv.address().port}`, seen, close: () => new Promise((d) => srv.close(d)) })));
@@ -224,3 +234,28 @@ test('#1825 F9b: a typed kind whose rows carry a type it does not own is unverif
     assert.match(idx, /agent-prompts[^\n]*unverified[^\n]*prov:Activity/, `a sum that happens to agree (1 + 1 = 2) must not pass a foreign type:\n${idx.slice(0, 1800)}`);
   } finally { await b.close(); }
 });
+
+test('#1826 F3b: the deliveries walk asks for pages and follows `next` to the end (3 deliveries, two pages)', async () => {
+  const all = [delivery(1), delivery(2), delivery(3)];
+  const b = await fakeBoard({ deliveries: all, counts: { 'scrum:Delivery': 3, 'scrum:Card': 1 } });
+  try {
+    const dir = fresh(); const r = await exportAsync(b.base, 'cards,deliveries', dir);
+    assert.equal(r.status, 0, r.out.slice(-600));
+    const reads = b.seen.filter((x) => x.startsWith('GET /api/deliveries'));
+    assert.equal(reads.length, 2, `two pages were read: ${reads.join(' | ')}`);
+    assert.ok(reads.every((x) => /[?&]all=1\b/.test(x) && /[?&]limit=\d+/.test(x)), `every page is the whole history, bounded: ${reads.join(' | ')}`);
+    assert.match(reads[1], /[?&]after=2\b/, 'the second page sends back the first page\'s cursor');
+    assert.ok(allParts(dir).includes('d-3'), 'the delivery on the second page is in the archive');
+  } finally { await b.close(); }
+});
+
+for (const [pager, why] of [['no-next', /without its `next` cursor/], ['stuck', /same cursor twice/]]) {
+  test(`#1826 F3c: a deliveries page that ${pager === 'no-next' ? 'drops its cursor' : 'repeats its cursor'} refuses the export, never a short archive`, async () => {
+    const b = await fakeBoard({ deliveries: [delivery(1), delivery(2), delivery(3)], pager, counts: { 'scrum:Delivery': 3, 'scrum:Card': 1 } });
+    try {
+      const dir = fresh(); const r = await exportAsync(b.base, 'cards,deliveries', dir);
+      assert.notEqual(r.status, 0, `the export refuses: ${r.out.slice(-400)}`);
+      assert.match(r.out, why);
+    } finally { await b.close(); }
+  });
+}

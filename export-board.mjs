@@ -311,15 +311,29 @@ async function main() {
   const overrides = {};
   const wanted = (sp) => sp.key === undefined || args.spaces.includes(sp.space) || (sp.space === 'commons' && args.spaces.includes('cards'));
   for (const sp of exportableSpaces().filter((x) => x.source && wanted(x))) {
-    let j;
-    try {
-      const r = await fetch(`${args.base}${sp.source}`);
-      if (!r.ok) die(`${sp.source} answered ${r.status} — refusing to export ${sp.space} as empty`);
-      j = await r.json();
-    } catch (err) { die(`could not read ${sp.source} — ${err.message}`); }
-    const rows = rowsOfResponse(sp, j);
-    if (rows instanceof Error) die(`${rows.message} — refusing to export ${sp.space} as empty`);
-    overrides[sp.space] = rows;
+    // #1826 — a `paged` source is walked: its cursor field is sent back as `after` until it is null. A page that answers
+    // without that field refuses, like a missing key: stopping early would be the same silent short count.
+    const all = [];
+    let after = null;
+    for (let pages = 0; ; pages += 1) {
+      if (pages > 100000) die(`${sp.source} kept answering a next page — refusing to export ${sp.space}`);
+      const url = `${sp.source}${after ? `&after=${encodeURIComponent(after)}` : ''}`;
+      let j;
+      try {
+        const r = await fetch(`${args.base}${url}`);
+        if (!r.ok) die(`${url} answered ${r.status} — refusing to export ${sp.space} as empty`);
+        j = await r.json();
+      } catch (err) { die(`could not read ${url} — ${err.message}`); }
+      const rows = rowsOfResponse(sp, j);
+      if (rows instanceof Error) die(`${rows.message} — refusing to export ${sp.space} as empty`);
+      all.push(...rows);
+      if (!sp.paged) break;
+      if (!(sp.paged in (j || {}))) die(`${url} answered without its \`${sp.paged}\` cursor — refusing to export ${sp.space} short`);
+      if (j[sp.paged] === null) break;
+      if (j[sp.paged] === after) die(`${url} answered the same cursor twice — refusing to export ${sp.space}`);
+      after = j[sp.paged];
+    }
+    overrides[sp.space] = all;
   }
   // #1825 — the posts come from their own route. GET /api/board omits them under the graph conversations unit, and reading the
   // document's absent key as [] is exactly how an archive of 0 messages called itself complete.
