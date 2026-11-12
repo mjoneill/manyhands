@@ -184,6 +184,7 @@
   "tests/tending-config-collections-1785.test.mjs",
   "tests/tending-config-post-collections-1785.test.mjs",
   "tests/tending-graph-g1.test.mjs",
+  "tests/tip-retry-1879.test.mjs",
   "tests/tmpstore-leak-1672.test.mjs",
   "tests/unbounded-budget-u1.test.mjs",
   "tests/vocabulary-shapes-executor-1645.test.mjs",
