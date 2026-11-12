@@ -2771,6 +2771,8 @@ export const EXECUTOR_ONLY_VOCABULARY = new Set([
   'scrum:contentHash', 'schema:contentUrl', 'schema:encodingFormat', 'scrum:retrievedAt', 'schema:url', 'schema:abstract',
   'scrum:assertionType', 'scrum:assertedBy', 'scrum:expressedIn', 'scrum:anchorText', 'scrum:ofRun', 'scrum:rejectedOf',
   'scrum:proposedPredicate', 'scrum:gist', 'scrum:proposals', 'scrum:spanInventions', 'scrum:providerFailures', 'scrum:publishedCount',
+  // #1851 — a machine-proposed link from an extracted claim to a card it bears on (core/knowledge-linking.mjs, kind link.propose)
+  'scrum:BearsOn', 'scrum:fromAssertion', 'scrum:bearsOnCard', 'scrum:score', 'scrum:minScore', 'scrum:searchQuery', 'scrum:spanKey',
 ]);
 // the executor gate's own set: graph_query on the executor is judged against it, and so is the vocabulary drift the
 // executor route reports (#1645), so the two can never disagree about which terms are known

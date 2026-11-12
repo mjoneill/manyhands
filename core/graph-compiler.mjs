@@ -528,7 +528,7 @@ export function staticCheck(sparql, opId) {
 // =====================================================================================
 
 export const RECORD_V = 2;   // 2: memory.revise records the identity it replaces (a MemoryRevision node)
-export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create', 'card.write', 'entity.put', 'origin.prepare', 'refusal.record', 'extraction.publish']);
+export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create', 'card.write', 'entity.put', 'origin.prepare', 'refusal.record', 'extraction.publish', 'link.propose']);
 
 const RS = 'https://scrumboard.local/ns#';
 const RSC = 'https://schema.org/';
@@ -583,6 +583,9 @@ export const LOGBORN_TERMS = Object.freeze({
   assertionType: `${RS}assertionType`, assertedBy: `${RS}assertedBy`, expressedIn: `${RS}expressedIn`, anchorText: `${RS}anchorText`,
   ofRun: `${RS}ofRun`, rejectedOf: `${RS}rejectedOf`, proposedPredicate: `${RS}proposedPredicate`, gist: `${RS}gist`,
   outcome: `${RS}outcome`, proposals: `${RS}proposals`, spanInventions: `${RS}spanInventions`, providerFailures: `${RS}providerFailures`, publishedCount: `${RS}publishedCount`,
+  // #1851 — a machine-proposed "this claim bears on this card" link (core/knowledge-linking.mjs), at link/<sha256(spanKey)>
+  BearsOn: `${RS}BearsOn`, fromAssertion: `${RS}fromAssertion`, bearsOnCard: `${RS}bearsOnCard`, score: `${RS}score`, minScore: `${RS}minScore`,
+  searchQuery: `${RS}searchQuery`, spanKey: `${RS}spanKey`, Card: `${RS}Card`,
 });
 const TM = LOGBORN_TERMS;
 
@@ -606,7 +609,8 @@ const RECORD_FIELDS = {
   'entity.put': ['entity'],                 // #1624 — one generic storage primitive; the `kind` field selects the projection
   'origin.prepare': ['origin', 'plan'],     // #1629 s2 — the Prepared record of one origin: its descriptor and its frozen business plan
   'refusal.record': ['refusal'],            // #1762 S2 — one content-free refusal, fresh at the IRI its opId derives; never history
-  'extraction.publish': ['run', 'source', 'assertions', 'rejected', 'report'],   // #1810 — one run's whole output (source, reifiers, rejected, report) in ONE guarded update
+  'extraction.publish': ['run', 'source', 'assertions', 'rejected', 'report'],
+  'link.propose': ['links', 'at'],          // #1851 — one linking run's proposed BearsOn links, every claim and card checked, in ONE update   // #1810 — one run's whole output (source, reifiers, rejected, report) in ONE guarded update
 };
 
 // #1762 S1b — the record kinds whose write records ONE ChangeActivity (part 0) when the intention carries `history`. The
@@ -818,6 +822,23 @@ function canonicalizeRecord(i) {
     if (!['complete', 'partial', 'failed'].includes(report.outcome)) fail('report.outcome must be complete, partial or failed');
     if (report.outcome === 'complete' && assertions.length === 0) fail('a run that published nothing is never complete');
     record = { run, source, assertions, rejected, report };
+  } else if (i.kind === 'link.propose') {
+    // #1851 — the IRI is derived from the span key (core/knowledge-linking.mjs linkIri), so a re-extracted claim names the SAME
+    // node and the freshness guard refuses it: the compiler checks that derivation rather than trusting the caller's IRI.
+    const unit = (v, what) => { if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1) fail(`${what}: a score is a number in [0, 1]`); return String(v); };
+    const links = rList(i.links, 'links', (l, what) => {
+      const x = obj(l, ['iri', 'assertion', 'card', 'score', 'minScore', 'query', 'spanKey', 'model'], what);
+      const spanKey = rStr(x.spanKey, `${what}.spanKey`);
+      const iri = checkIri(x.iri, `${what}.iri`);
+      if (iri !== `https://scrumboard.local/link/${createHash('sha256').update(spanKey).digest('hex')}`) fail(`${what}.iri must be link/<sha256(spanKey)>`);
+      const query = rStr(x.query, `${what}.query`);
+      if (!query.trim()) fail(`${what}.query is empty: a link records the text that found it`);
+      return { iri, assertion: checkIri(x.assertion, `${what}.assertion`), card: checkIri(x.card, `${what}.card`), score: unit(x.score, `${what}.score`),
+        minScore: unit(x.minScore, `${what}.minScore`), query, spanKey, model: rStr(x.model, `${what}.model`) };
+    });
+    if (links.length === 0) fail('a link.propose carries at least one link');
+    if (new Set(links.map((l) => l.iri)).size !== links.length) fail('a link.propose names each link once');
+    record = { links, at: rStr(i.at, 'at') };
   } else if (i.kind === 'post.create') {
     // #1574 C3c — every field comes from the outbox entry's frozen payload plus the two values the server fixed once
     // at the first publish attempt (publicationAt, postSeq). All of it is in `record`, so all of it is digest-covered.
@@ -1138,6 +1159,18 @@ function planRecord(c) {
     add(P.iri, TM.type, I(TM.ExtractionReport)); add(P.iri, TM.ofRun, I(X.run)); add(P.iri, TM.outcome, L(P.outcome));
     add(P.iri, TM.proposals, L(P.proposals)); add(P.iri, TM.spanInventions, L(P.spanInventions)); add(P.iri, TM.providerFailures, L(P.providerFailures));
     add(P.iri, TM.publishedCount, L(P.published)); add(P.iri, TM.at, L(P.at)); add(P.iri, TM.recordedBy, ref(c.opId));
+  } else if (c.kind === 'link.propose') {
+    // #1851 — every link is fresh (its IRI is derived from span + card, so a re-proposal is refused here), its claim must be a
+    // published scrum:Assertion and its card a scrum:Card; one failing link refuses the whole run, so a run is all or nothing.
+    target = null;
+    for (const l of R.links) {
+      fresh.push(l.iri);
+      pre.push(`    ${I(l.assertion)} ${I(TM.type)} ${I(TM.Assertion)} .`, `    ${I(l.card)} ${I(TM.type)} ${I(TM.Card)} .`);
+      add(l.iri, TM.type, I(TM.BearsOn)); add(l.iri, TM.fromAssertion, I(l.assertion)); add(l.iri, TM.bearsOnCard, I(l.card));
+      add(l.iri, TM.score, L(l.score)); add(l.iri, TM.minScore, L(l.minScore)); add(l.iri, TM.searchQuery, L(l.query));
+      add(l.iri, TM.spanKey, L(l.spanKey)); add(l.iri, TM.model, L(l.model)); add(l.iri, TM.status, L('proposed'));
+      add(l.iri, TM.dateCreated, L(R.at)); add(l.iri, TM.wasAssociatedWith, I(c.actor)); add(l.iri, TM.recordedBy, ref(c.opId));
+    }
   } else if (c.kind === 'post.create') {
     const P = R.post; target = null;   // a create: the post IRI must be fresh
     dispatchHold = `${P.mutationId}:${P.slot}`;   // #1749 A8: the announcement is a dispatch of this obligation

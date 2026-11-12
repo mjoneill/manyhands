@@ -55,3 +55,17 @@ export async function proposeLinks({ assertions, search, existing = [], minScore
   }
   return { ok: true, proposals, skipped };
 }
+
+const ENTITY = 'https://scrumboard.local/';
+/** The link's IRI, derived from its span key: the same claim re-extracted names the same node (review 52706 point 3). */
+export const linkIri = (key) => `${ENTITY}link/${crypto.createHash('sha256').update(String(key)).digest('hex')}`;
+
+/** The write for one linking run: ONE `link.propose` update carrying every proposal, guarded by the compiler. */
+export function linkIntention({ proposals, minScore, model, at, actor, opId = `urn:ex:op/${crypto.randomUUID()}` } = {}) {
+  return {
+    kind: 'link.propose', opId, actor,
+    links: (proposals ?? []).map((p) => ({ iri: linkIri(p.spanKey), assertion: p.assertion, card: `${ENTITY}entity/${p.card}`,
+      score: p.score, minScore, query: p.query, spanKey: p.spanKey, model })),
+    at,
+  };
+}
