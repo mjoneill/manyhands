@@ -17,6 +17,7 @@
  *   D3   a decision on something that is not a scrum:BearsOn is refused (PRECONDITION_FAILED), nothing written
  *   D4   a workingOn that is not a scrum:Card is refused, nothing written
  *   D5   a dismiss needs no workingOn
+ *   D6   a decision IRI cannot be reused: history is appended, never merged into an old node
  */
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -114,4 +115,16 @@ test('D5 a dismiss needs no workingOn', { skip: SKIP }, async () => {
   assert.equal(w.outcome, 'APPLIED', JSON.stringify(w));
   assert.deepEqual(await statuses(s.link), ['dismissed']);
   assert.equal(await count(`?d <${RS}ofLink> <${s.link}> FILTER NOT EXISTS { ?d <${RS}workingOn> ?w }`), 1);
+});
+
+test('D6 a decision IRI cannot be reused: a second verdict under the same node is refused, so history is never merged', { skip: SKIP }, async () => {
+  const s = await seedLink();
+  const first = decideIntention({ link: s.link, verdict: 'confirmed', workingOn: s.working, actor: SEAT, at: '2026-11-12T20:00:00.000Z' });
+  assert.equal((await client.update(first)).outcome, 'APPLIED');
+  const reuse = decideIntention({ link: s.link, verdict: 'dismissed', workingOn: null, actor: SEAT, at: '2026-11-12T20:05:00.000Z' });
+  reuse.decision = first.decision;   // a caller naming an existing decision node (a fresh opId, so this is not a replay)
+  const w = await client.update(reuse);
+  assert.equal(w.outcome, 'PRECONDITION_FAILED', JSON.stringify(w));
+  assert.deepEqual(await statuses(s.link), ['confirmed'], 'the status did not move');
+  assert.deepEqual((await q(`SELECT ?v WHERE { <${first.decision}> <${RS}linkVerdict> ?v }`)).map((r) => r.v.value), ['confirmed'], 'the first decision is untouched');
 });
