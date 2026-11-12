@@ -91,6 +91,7 @@ const LOGBORN_WRITE_ROUTES = [
   ['POST', /^\/api\/decisions\/[^/]+\/relations$/],
   ['PUT', /^\/api\/seats\/[^/]+\/state$/],
   ['DELETE', /^\/api\/seats\/[^/]+\/state$/],
+  ['POST', /^\/api\/links\/[^/]+\/decide$/],   // #1851 — a seat's verdict on a proposed link
 ];
 export function isLogbornWriteRoute(method, urlPath) {
   const m = String(method).toUpperCase();
