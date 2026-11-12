@@ -34,10 +34,18 @@ function readOnlyFixture() {
   return { dir, serve };
 }
 
-test('#1417 CONTROL — a plain rmSync cannot remove the read-only deploy fixture (EACCES), which is the nightly crash', () => {
-  const { dir } = readOnlyFixture();
+// #1886 — the control measures "undeletable", not one platform's spelling of it. Node 22 reports
+// EACCES/EPERM here; Node 24+ on macOS reports ENOTEMPTY for the same fixture (measured 10-09 and
+// 11-12). Pinning the code made the control fail on a tree where the fixture was still undeletable.
+// Still honest: a fixture that is NOT read-only is removed whole, so the throw does not happen and
+// the row fails; and if a throw ever left nothing behind, the survival check fails it.
+test('#1417 CONTROL — a plain rmSync cannot remove the read-only deploy fixture, which is the nightly crash', () => {
+  const { dir, serve } = readOnlyFixture();
   try {
-    assert.throws(() => fs.rmSync(dir, { recursive: true, force: true }), (e) => e.code === 'EACCES' || e.code === 'EPERM', 'the fixture is genuinely undeletable the old way');
+    let code = null;
+    assert.throws(() => fs.rmSync(dir, { recursive: true, force: true }), (e) => { code = e.code; return true; },
+      'the fixture is genuinely undeletable the old way');
+    assert.ok(fs.existsSync(path.join(serve, 'DEPLOYED-SHA')), `the read-only file survived the plain rmSync (it threw ${code})`);
   } finally { try { rmTreeForce(dir); } catch { /* the feature test below covers it */ } }
 });
 
