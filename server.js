@@ -82,7 +82,7 @@ import { labelAliasRows, labelAliasEntity, labelAliasIri } from './core/label-al
 import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, auditOutbox, modeProblem, legacyProof, postMatchesEntry, opIdFor, announcePostId, postCreateIntention, obligationIdOf } from './core/announce-outbox.mjs';   // #1574 C3a/C3b/C3c
 import * as U3 from './core/unit3-graph.mjs';   // #1582 — deliveries and model calls in the graph
 import { createGraphClient, setExecutorMeter } from './core/graph-client.mjs';   // #1574 C3b — the conversations unit's executor door
-import { decideIntention as linkDecideIntention } from './core/knowledge-linking.mjs';   // #1851
+import { decideIntention as linkDecideIntention, linkCountsQuery, countLinkUse } from './core/knowledge-linking.mjs';   // #1851, #1850
 import { createExecutorMeter, createKeepAlive, captureCpuProfile } from './core/executor-meter.mjs';   // #1570 — what REST asks the executor, and REST's own loop delay
 import { postFeed, DiscoveryError } from './core/post-discovery.mjs';   // #1574 R3
 import { createReadGate } from './core/read-admission.mjs';   // #1574 A1–A5
@@ -7104,6 +7104,27 @@ async function handleListLinks(req, res) {
     sendJSON(res, 500, { error: e.message });
   }
 }
+/** #1850 — per seat, how many links it was SHOWN (decided) and how many it USED (confirmed, naming its working card). */
+async function handleLinkCounts(req, res) {
+  try {
+    if (!LOGBORN) return sendJSON(res, 503, { error: 'links live in the graph executor, and this server does not run the log-born unit (SCRUM_GRAPH_UNIT_LOGBORN)', code: 'LINKS_UNAVAILABLE' });
+    const qs = parseQuery(req.url);
+    const raw = qs.since == null ? '1970-01-01T00:00:00.000Z' : String(qs.since);
+    // the instant reaches SPARQL only re-serialised by Date: a value Date cannot read, or one that is not an ISO date-time, is refused
+    const ms = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/.test(raw) ? Date.parse(raw) : NaN;
+    if (!Number.isFinite(ms)) return sendJSON(res, 400, { error: 'since is an ISO date-time, e.g. 2026-11-05T00:00:00Z' });
+    const since = new Date(ms).toISOString();
+    const rows = await LOGBORN.query(linkCountsQuery(since));
+    const c = countLinkUse(rows.map((r) => ({ by: r.by.value, link: r.l.value, verdict: r.v.value })));
+    sendJSON(res, 200, { since, ...c,
+      means: 'Per seat, over distinct links. shown: links the seat confirmed or dismissed (deliveries will add to it once they exist; a link_list read is not counted). '
+        + 'used: links the seat confirmed, which names the card it was working on. A confirm is the seat\'s own record that it acted on the claim, not proof the claim changed the outcome.' });
+  } catch (e) {
+    if (executorRefused(res, e)) return;
+    console.error('GET /api/links/counts:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
 async function handleDecideLink(req, res, id) {
   try {
     if (!LOGBORN) return sendJSON(res, 503, { error: 'links live in the graph executor, and this server does not run the log-born unit (SCRUM_GRAPH_UNIT_LOGBORN)', code: 'LINKS_UNAVAILABLE' });
@@ -14069,6 +14090,7 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/decisions$/,            fn: (req, res) => handleCreateDecision(req, res) },
   { method: 'POST',   re: /^\/api\/decisions\/([^\/]+)\/relations$/, fn: (req, res, m) => handleRelateDecision(req, res, m[1]) },   // #1322
   { method: 'GET',    re: /^\/api\/links$/,                fn: (req, res) => handleListLinks(req, res) },   // #1851
+  { method: 'GET',    re: /^\/api\/links\/counts$/,         fn: (req, res) => handleLinkCounts(req, res) },   // #1850
   { method: 'POST',   re: /^\/api\/links\/([^\/]+)\/decide$/, fn: (req, res, m) => handleDecideLink(req, res, m[1]) },   // #1851
   { method: 'GET',    re: /^\/api\/models$/,               fn: (req, res) => handleListModels(req, res) },                       // #1197
   { method: 'POST',   re: /^\/api\/models$/,               fn: (req, res) => handleCreateModel(req, res) },                      // #1197

@@ -1712,6 +1712,16 @@ function buildMcpServer() {
     return jsonResult(await apiCall('GET', `/api/links${q ? `?${q}` : ''}`));
   });
 
+  // #1850 — every seat's numbers, so there is no seat argument: reading another seat's count is the point of the Review read
+  mcp.registerTool('link_counts', {
+    description: 'How often extracted claims were SHOWN to each seat and how often they were USED, as two numbers that are never merged. '
+      + 'shown: links the seat confirmed or dismissed. used: links the seat confirmed, naming the card it was working on. '
+      + 'label is set while fewer than three seats have decided any link: the numbers are then self-attributed.',
+    inputSchema: {
+      since: z.string().optional().describe('ISO date-time; only decisions at or after it (default: all)'),
+    },
+  }, async ({ since } = {}) => jsonResult(await apiCall('GET', `/api/links/counts${since ? `?since=${encodeURIComponent(since)}` : ''}`)));
+
   // ⛔ THE SEAT COMES FROM THE BOUND SESSION, as seat_declare's does: there is no seat or `by` argument. A verdict is counted
   // per seat (#1850), so taking the seat from the message would let one seat's count be written by another (review 52706).
   mcp.registerTool('link_decide', {

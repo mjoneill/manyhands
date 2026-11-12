@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { LOGBORN_TERMS as TM } from './graph-compiler.mjs';   // #1850 — the counts read exactly the terms link.decide writes
 /**
  * #1851 (#1848 slice 2) — which of our cards does an extracted claim bear on.
  *
@@ -130,4 +131,35 @@ export function createRestSearch({ base, token, by, k = 8, fetchImpl = fetch, ti
   /** The embed model the board answered with: read from its answer, never assumed (null until a search succeeded). */
   search.model = () => model;
   return search;
+}
+
+/**
+ * #1850 (#1848 slice 1) — SHOWN and USED, two numbers never merged, read from what #1851 records (accepted by the Value Steward,
+ * commons 52810). Per deciding seat, over DISTINCT links:
+ *   shown  links the seat decided, confirmed or dismissed: a seat cannot decide a link it was never shown. (Deliveries, #1852,
+ *          will add to shown; they do not exist yet. A link_list READ is not counted: reads are not recorded.)
+ *   used   links the seat confirmed at least once. A confirm must name the card the seat was working on (the compiler refuses one
+ *          without it), so it records acting on the claim, not agreeing with it. A later dismiss does not unmake that act.
+ * `label` is set while fewer than three distinct seats have decided: the numbers are then the builder's and reviewer's own, and
+ * read as self-attributed. It is a count, never a list of names.
+ */
+export const LINK_COUNTS_MIN_DECIDERS = 3;
+export function linkCountsQuery(since) {
+  // every term from the compiler's own table, never retyped: dateCreated is schema.org's, not scrum:'s, and a hand-typed IRI that
+  // matches nothing returns a clean zero, which would read as "nobody used anything"
+  return `SELECT ?by ?l ?v WHERE { ?d a <${TM.LinkDecision}> ; <${TM.ofLink}> ?l ; <${TM.linkVerdict}> ?v ; <${TM.decidedBy}> ?by ; <${TM.dateCreated}> ?at `
+    + `FILTER(?at >= ${JSON.stringify(since)}) }`;
+}
+export function countLinkUse(rows, { seatNs = 'urn:ex:seat/' } = {}) {
+  const per = new Map();
+  for (const r of rows) {
+    const seat = r.by.startsWith(seatNs) ? r.by.slice(seatNs.length) : r.by;
+    if (!per.has(seat)) per.set(seat, { shown: new Set(), used: new Set() });
+    const p = per.get(seat);
+    p.shown.add(r.link);
+    if (r.verdict === 'confirmed') p.used.add(r.link);
+  }
+  const seats = [...per].map(([seat, p]) => ({ seat, shown: p.shown.size, used: p.used.size })).sort((a, b) => (a.seat < b.seat ? -1 : a.seat > b.seat ? 1 : 0));
+  const deciders = seats.length;
+  return { seats, deciders, label: deciders < LINK_COUNTS_MIN_DECIDERS ? `self-attributed: ${deciders} seat(s) have decided a link, fewer than ${LINK_COUNTS_MIN_DECIDERS}, so these numbers come from the seats that built and reviewed the linker` : null };
 }

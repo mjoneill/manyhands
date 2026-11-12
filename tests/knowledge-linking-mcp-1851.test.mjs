@@ -8,6 +8,7 @@
  *   M3  a bound session's verdict reaches POST /api/links/<id>/decide with by = the session's seat; a `by` argument is
  *       refused by the strict schema and nothing is sent
  *   M4  link_list forwards status and card to GET /api/links
+ *   M5  link_counts (#1850) forwards since to GET /api/links/counts, and takes no seat: it reads every seat's numbers
  */
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -80,4 +81,16 @@ test('M4 link_list forwards status and card', async () => {
   assert.ok(got, 'a list request reached the board');
   const u = new URL(got.url, 'http://x');
   assert.deepEqual({ status: u.searchParams.get('status'), card: u.searchParams.get('card') }, { status: 'proposed', card: '7' });
+});
+
+test('M5 link_counts forwards since to GET /api/links/counts and takes no seat argument (#1850)', async () => {
+  const s = await mcpSession(mcp.mcpUrl, { headers: { Authorization: 'Bearer tok-ada' } });
+  const tools = (await s.listTools()).result?.tools ?? [];
+  const t = tools.find((x) => x.name === 'link_counts');
+  assert.ok(t, 'link_counts is listed');
+  assert.deepEqual(Object.keys(t.inputSchema.properties ?? {}), ['since']);
+  await s.callTool('link_counts', { since: '2026-11-05T00:00:00.000Z' });
+  const got = seen.filter((x) => x.method === 'GET' && x.url.startsWith('/api/links/counts')).at(-1);
+  assert.ok(got, 'a counts request reached the board');
+  assert.equal(got.url, `/api/links/counts?since=${encodeURIComponent('2026-11-05T00:00:00.000Z')}`);
 });
