@@ -4,6 +4,8 @@
  *
  *   K1  DIGEST      the daily digest is rendered from the `standing[]` of /api/checks. Fed the payload of the flag-unset REST and of the flag-on REST over the same data, with each check's rows put in one
  *                   fixed order, `renderDigest` (core/digest.mjs) produces the same body: the same checks, items, counts and wording.
+ *                   #1880 (2026-11-12): the digest now names checks that did not run on a ⏸ line, and there the passes really differ (the executor pass
+ *                   disables graph-store-meter, #1645 2d). K1 compares the failing content as before and pins that one difference exactly.
  *   K1b KNOWN DIFFERENCE (characterisation, not a gate)  the digest prints rows in the order the store returned them and shows the first six, and the standing queries have no ORDER BY. The replica's
  *                   order is stable; the executor's is arbitrary and differs between runs (measured), so the printed order, and which six rows are shown, can differ with the source. The first-seen keys do not.
  *   K2  STALE ASK   with the graph conversations unit on (production's setting) the `stale-claims` standing check answers `disabled` with its reason on BOTH sources, which the MCP tick reads as
@@ -75,9 +77,19 @@ test('#1643 (K1) the digest rendered from the executor\'s standing checks has th
     const da = renderDigest({ standing: sorted(a.standing), now: NOW, firstSeen: {} }); const db = renderDigest({ standing: sorted(b.standing), now: NOW, firstSeen: {} });
     assert.ok(da.body && /phantom-block/.test(da.body), `PRECONDITION: the digest has a body that names a failing standing check (it is not "nothing wrong" twice): ${String(da.body).slice(0, 200)}`);
     assert.ok(/2 phantom-block/.test(da.body), 'PRECONDITION: the failing check has TWO rows, so a dropped row changes the count');
-    assert.equal(db.body, da.body, 'with the rows in one order, the digest body is the same whichever store answered');
-    assert.deepEqual(db.firstSeen, da.firstSeen, 'and so is the first-seen map it carries to the next day (its keys do not depend on row order)');
+    // #1880 — the digest now names checks that did not RUN on a ⏸ line. The two passes really do differ there: the executor
+    // pass disables graph-store-meter (#1645 2d), the replica pass runs it. Before #1880 a disabled check was invisible, so
+    // this row compared equal only by hiding that. K1 pins the FAILING content as before, and pins the ⏸ difference exactly.
+    const failingPart = (body) => body.split('\n').filter((l) => !l.startsWith('⏸ ')).join('\n');
+    const itemKeys = (fs0) => Object.fromEntries(Object.entries(fs0).filter(([k]) => !k.endsWith('|disabled')));
+    assert.equal(failingPart(db.body), failingPart(da.body), 'with the rows in one order, the failing content is the same whichever store answered');
+    assert.deepEqual(itemKeys(db.firstSeen), itemKeys(da.firstSeen), 'and so is the first-seen map of failing items it carries to the next day (its keys do not depend on row order)');
     assert.equal(db.items, da.items);
+    const pausedIds = (fs0) => Object.keys(fs0).filter((k) => k.endsWith('|disabled')).map((k) => k.slice(0, -'|disabled'.length)).sort();
+    const extra = pausedIds(db.firstSeen).filter((id) => !pausedIds(da.firstSeen).includes(id));
+    assert.deepEqual(extra, ['graph-store-meter'], `the ONLY check the executor pass does not run that the replica pass does is graph-store-meter (replica ⏸ ${pausedIds(da.firstSeen)}, executor ⏸ ${pausedIds(db.firstSeen)})`);
+    assert.ok(pausedIds(da.firstSeen).every((id) => pausedIds(db.firstSeen).includes(id)), 'and nothing the replica pass skips is run by the executor pass');
+    assert.match(db.body, /graph-store-meter \(not measured on the executor pass \(#1645 2d\)/, 'the executor digest says so, with its reason');
   });
 });
 
