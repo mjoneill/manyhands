@@ -7064,6 +7064,11 @@ async function handleDecideLink(req, res, id) {
     const body = JSON.parse((await readBody(req)) || '{}');
     const by = body.by;
     if (typeof by !== 'string' || !by.trim()) return sendJSON(res, 400, { error: 'by is required: a verdict nobody gave cannot be counted' });
+    // a verdict is counted per seat (#1850): one seat answering FOR another is refused, never re-signed. Under enforced auth the
+    // body's foreign `by` arrives rewritten to the key's seat with the claim kept as onBehalfOf (#1569), which is what we read.
+    if (typeof body.onBehalfOf === 'string' && body.onBehalfOf && body.onBehalfOf !== by) {
+      return sendJSON(res, 403, { error: `seat '${by}' may give only its own verdict, not '${body.onBehalfOf}''s`, code: 'SEAT_NOT_SELF' });
+    }
     if (!['confirmed', 'dismissed'].includes(body.verdict)) return sendJSON(res, 400, { error: 'verdict is confirmed or dismissed' });
     let workingOn = null;
     if (body.workingOn != null && body.workingOn !== '') {

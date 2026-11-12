@@ -11,7 +11,7 @@
  *
  *   H1  GET lists a proposed link with its card (short id + title) and its claim's span and gist
  *   H2  a confirm with workingOn: 200, and the graph holds status confirmed and a LinkDecision decidedBy the AUTHENTICATED seat
- *   H3  a body naming another seat is recorded as the BEARER's verdict (the server rewrites `by` from the key, #1569)
+ *   H3  a verdict on behalf of another seat is refused: 403 SEAT_NOT_SELF, nothing written
  *   H4  an unknown link id: 404
  *   H5  a confirm with no workingOn: 400 naming workingOn
  *   H6  no bearer: refused (401), nothing written
@@ -96,14 +96,18 @@ test('H2 a confirm with workingOn: 200, and the graph records it as the AUTHENTI
   assert.equal(d[0].wo.value, cardIriOf('uuid-1'));
 });
 
-test('H3 a body naming ANOTHER seat cannot make the verdict theirs: it is recorded as the bearer\'s', T, async () => {
-  // under enforced auth the server rewrites `by` to the credential's seat (#1569), so the identity is the key, never the body
+test('H3 a verdict on behalf of ANOTHER seat is refused (SEAT_NOT_SELF), nothing written (review 52723 point 1, 52724)', T, async () => {
+  // under enforced auth the server rewrites a foreign `by` to the key's seat and keeps the claim as onBehalfOf (#1569); a
+  // verdict is counted per seat, so one seat answering for another is refused rather than silently re-signed
   const s = await seedLink(2);
   const r = await call('POST', `/api/links/${s.id}/decide`, { verdict: 'dismissed', by: 'bob' });
-  assert.equal(r.status, 200, r.text);
-  assert.equal(r.json.by, 'ada', 'the answer names the bearer');
-  const d = await q(`SELECT ?by WHERE { ?d <${RS}ofLink> <${s.link}> ; <${RS}decidedBy> ?by }`);
-  assert.deepEqual(d.map((x) => x.by.value), [seatActor('ada')]);
+  assert.equal(r.status, 403, r.text);
+  assert.equal(r.json.code, 'SEAT_NOT_SELF');
+  assert.deepEqual((await q(`SELECT ?s WHERE { <${s.link}> <${RS}status> ?s }`)).map((x) => x.s.value), ['proposed']);
+  assert.equal((await q(`SELECT ?d WHERE { ?d <${RS}ofLink> <${s.link}> }`)).length, 0);
+  const own = await call('POST', `/api/links/${s.id}/decide`, { verdict: 'dismissed', by: 'ada' });
+  assert.equal(own.status, 200, `CONTROL: the bearer answering for herself is accepted (${own.text})`);
+  assert.equal(own.json.by, 'ada');
 });
 
 test('H4 an unknown link id: 404', T, async () => {
