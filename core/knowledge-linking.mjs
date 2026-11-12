@@ -69,3 +69,28 @@ export function linkIntention({ proposals, minScore, model, at, actor, opId = `u
     at,
   };
 }
+
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const RS = 'https://scrumboard.local/ns#';
+
+/**
+ * One linking run over one extraction Run: read its published claims, read EVERY existing link's span key (no status filter,
+ * so a dismissed pair stays out), search, and write what is new as ONE link.propose. Nothing new ⇒ no update is sent.
+ * Search or graph unavailable ⇒ ok:false and nothing written: a run that could not look never reports "no links".
+ */
+export async function linkRun({ graphClient, search, run, minScore, perAssertion, model, actor, at = new Date().toISOString() } = {}) {
+  if (!graphClient || typeof run !== 'string' || !run) throw new Error('linkRun needs a graphClient and the run IRI');
+  const claims = await graphClient.query(`SELECT ?a ?span ?gist WHERE { ?a <${RDF_TYPE}> <${RS}Assertion> ; <${RS}ofRun> <${run}> ; `
+    + `<${RS}anchorText> ?span OPTIONAL { ?a <${RS}gist> ?gist } } ORDER BY ?a`);
+  if (!claims.ok) return { ok: false, reason: `the run's claims could not be read: ${claims.reason}`, proposed: 0 };
+  const assertions = claims.rows.map((r) => ({ iri: r.a.value, span: r.span.value, ...(r.gist ? { gist: r.gist.value } : {}) }));
+  if (assertions.length === 0) return { ok: true, assertions: 0, proposed: 0, skipped: 0, outcome: 'nothing-to-write' };
+  const have = await graphClient.query(`SELECT ?k WHERE { ?l <${RDF_TYPE}> <${RS}BearsOn> ; <${RS}spanKey> ?k }`);
+  if (!have.ok) return { ok: false, reason: `the existing links could not be read: ${have.reason}`, proposed: 0 };
+  const p = await proposeLinks({ assertions, search, existing: have.rows.map((r) => r.k.value), minScore, perAssertion });
+  if (!p.ok) return { ok: false, reason: p.reason, proposed: 0 };
+  if (p.proposals.length === 0) return { ok: true, assertions: assertions.length, proposed: 0, skipped: p.skipped, outcome: 'nothing-to-write' };
+  const w = await graphClient.update(linkIntention({ proposals: p.proposals, minScore, model, at, actor }));
+  if (w.outcome !== 'APPLIED') return { ok: false, reason: `the links were not written: ${w.outcome} ${w.reason ?? ''}`.trim(), proposed: 0 };
+  return { ok: true, assertions: assertions.length, proposed: p.proposals.length, skipped: p.skipped, outcome: w.outcome, links: p.proposals };
+}
