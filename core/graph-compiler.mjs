@@ -610,9 +610,9 @@ const RECORD_FIELDS = {
   'entity.put': ['entity'],                 // #1624 — one generic storage primitive; the `kind` field selects the projection
   'origin.prepare': ['origin', 'plan'],     // #1629 s2 — the Prepared record of one origin: its descriptor and its frozen business plan
   'refusal.record': ['refusal'],            // #1762 S2 — one content-free refusal, fresh at the IRI its opId derives; never history
-  'extraction.publish': ['run', 'source', 'assertions', 'rejected', 'report'],
-  'link.propose': ['links', 'at'],
-  'link.decide': ['link', 'verdict', 'decision', 'workingOn', 'at'],   // #1851 — a seat's verdict on one link: its status replaced, one LinkDecision appended          // #1851 — one linking run's proposed BearsOn links, every claim and card checked, in ONE update   // #1810 — one run's whole output (source, reifiers, rejected, report) in ONE guarded update
+  'extraction.publish': ['run', 'source', 'assertions', 'rejected', 'report'],   // #1810 — one run's whole output (source, reifiers, rejected, report) in ONE guarded update
+  'link.propose': ['links', 'at'],          // #1851 — one linking run's proposed BearsOn links, every claim and card checked, in ONE update
+  'link.decide': ['link', 'verdict', 'decision', 'workingOn', 'at'],   // #1851 — a seat's verdict on one link: its status replaced, one LinkDecision appended
 };
 
 // #1762 S1b — the record kinds whose write records ONE ChangeActivity (part 0) when the intention carries `history`. The

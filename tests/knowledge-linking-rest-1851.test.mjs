@@ -16,6 +16,7 @@
  *   H5  a confirm with no workingOn: 400 naming workingOn
  *   H6  no bearer: refused (401), nothing written
  *   H7  the list filters: status=confirmed shows the H2 link and not a still-proposed one; card=<shortId> narrows to that card
+ *   H8  the list says when it was cut: `truncated` (review 52723 point 2)
  */
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -122,6 +123,16 @@ test('H6 no bearer: refused, nothing written', T, async () => {
   const r = await call('POST', `/api/links/${s.id}/decide`, { verdict: 'dismissed', by: 'ada' }, { auth: false });
   assert.equal(r.status, 401, r.text);
   assert.deepEqual((await q(`SELECT ?s WHERE { <${s.link}> <${RS}status> ?s }`)).map((x) => x.s.value), ['proposed']);
+});
+
+test('H8 the list says when it was cut: limit=1 over two or more links returns one and truncated:true (review 52723 point 2)', T, async () => {
+  await seedLink(2); await seedLink(3);
+  const r = await call('GET', '/api/links?limit=1');
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.json.links.length, 1);
+  assert.equal(r.json.truncated, true);
+  const all = await call('GET', '/api/links');
+  assert.equal(all.json.truncated, false, 'CONTROL: the default page holds every test link');
 });
 
 test('H7 the list filters by status and by card', T, async () => {

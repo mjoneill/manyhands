@@ -81,8 +81,8 @@ import { moveFenceIds, moveFenceEntity } from './core/move-fences.mjs';   // #17
 import { labelAliasRows, labelAliasEntity, labelAliasIri } from './core/label-aliases.mjs';   // #1640
 import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, auditOutbox, modeProblem, legacyProof, postMatchesEntry, opIdFor, announcePostId, postCreateIntention, obligationIdOf } from './core/announce-outbox.mjs';   // #1574 C3a/C3b/C3c
 import * as U3 from './core/unit3-graph.mjs';   // #1582 — deliveries and model calls in the graph
-import { createGraphClient, setExecutorMeter } from './core/graph-client.mjs';
-import { decideIntention as linkDecideIntention } from './core/knowledge-linking.mjs';   // #1851   // #1574 C3b — the conversations unit's executor door
+import { createGraphClient, setExecutorMeter } from './core/graph-client.mjs';   // #1574 C3b — the conversations unit's executor door
+import { decideIntention as linkDecideIntention } from './core/knowledge-linking.mjs';   // #1851
 import { createExecutorMeter, createKeepAlive, captureCpuProfile } from './core/executor-meter.mjs';   // #1570 — what REST asks the executor, and REST's own loop delay
 import { postFeed, DiscoveryError } from './core/post-discovery.mjs';   // #1574 R3
 import { createReadGate } from './core/read-admission.mjs';   // #1574 A1–A5
@@ -7035,10 +7035,15 @@ async function handleListLinks(req, res) {
       if (!c) return sendJSON(res, 400, { error: `card ${qs.card} is not a card on this board` });
       cardFilter = `https://scrumboard.local/entity/${c.id}`;
     }
+    const LINKS_MAX = 500;
+    const limit = qs.limit == null ? LINKS_MAX : Number(qs.limit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > LINKS_MAX) return sendJSON(res, 400, { error: `limit is an integer from 1 to ${LINKS_MAX}` });
     const RS = 'https://scrumboard.local/ns#';
-    const rows = await LOGBORN.query(`SELECT ?l ?st ?sc ?c ?a ?span ?gist WHERE { ?l a <${RS}BearsOn> ; <${RS}status> ?st ; <${RS}bearsOnCard> ?c ; <${RS}fromAssertion> ?a `
+    const got = await LOGBORN.query(`SELECT ?l ?st ?sc ?c ?a ?span ?gist WHERE { ?l a <${RS}BearsOn> ; <${RS}status> ?st ; <${RS}bearsOnCard> ?c ; <${RS}fromAssertion> ?a `
       + `OPTIONAL { ?l <${RS}score> ?sc } OPTIONAL { ?a <${RS}anchorText> ?span } OPTIONAL { ?a <${RS}gist> ?gist } `
-      + `${status ? `FILTER(?st = ${JSON.stringify(status)}) ` : ''}${cardFilter ? `FILTER(?c = <${cardFilter}>) ` : ''}} ORDER BY DESC(?sc) LIMIT 500`);
+      + `${status ? `FILTER(?st = ${JSON.stringify(status)}) ` : ''}${cardFilter ? `FILTER(?c = <${cardFilter}>) ` : ''}} ORDER BY DESC(?sc) ?l LIMIT ${limit + 1}`);   // one past the page: its presence is the truncation signal
+    const truncated = got.length > limit;
+    const rows = got.slice(0, limit);
     const byId = new Map(readBoard().cards.filter((c) => c && c.id).map((c) => [`https://scrumboard.local/entity/${c.id}`, c]));
     const links = rows.map((r) => {
       const card = byId.get(r.c.value);
@@ -7046,7 +7051,7 @@ async function handleListLinks(req, res) {
         card: { shortId: card?.shortId ?? null, title: card?.title ?? null },
         claim: { iri: r.a.value, span: r.span?.value ?? null, gist: r.gist?.value ?? null } };
     });
-    sendJSON(res, 200, { links, means: 'A link is a MACHINE PROPOSAL that a claim the room read bears on a card, found by meaning search. Answer it with POST /api/links/:id/decide (MCP link_decide): confirm names the card you were working on; dismiss keeps it from ever being proposed again.' });
+    sendJSON(res, 200, { links, truncated, means: 'A link is a MACHINE PROPOSAL that a claim the room read bears on a card, found by meaning search. Answer it with POST /api/links/:id/decide (MCP link_decide): confirm names the card you were working on; dismiss keeps it from ever being proposed again.' });
   } catch (e) {
     if (executorRefused(res, e)) return;
     console.error('GET /api/links:', e.message);
@@ -7074,7 +7079,8 @@ async function handleDecideLink(req, res, id) {
     if (!actor) return;
     const r = await LOGBORN.write(linkDecideIntention({ link: LINK_IRI(id), verdict: body.verdict, workingOn: workingOn ? workingOn.id : null, actor }));
     if (r.outcome !== 'APPLIED') return logbornWriteFailed(res, r);
-    sendJSON(res, 200, { id, verdict: body.verdict, workingOn: workingOn ? workingOn.shortId : null, by });
+    // the answer names the seat the graph recorded (the authenticated actor), never the body's `by` (review 52723 point 1)
+    sendJSON(res, 200, { id, verdict: body.verdict, workingOn: workingOn ? workingOn.shortId : null, by: String(actor).replace(/^urn:ex:seat\//, '') });
   } catch (e) {
     if (executorRefused(res, e)) return;
     console.error('POST /api/links/:id/decide:', e.message);

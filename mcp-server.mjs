@@ -1717,7 +1717,8 @@ function buildMcpServer() {
   mcp.registerTool('link_decide', {
     description: 'Answer a proposed link (from link_list). confirmed: this claim mattered to the card you were working on; '
       + 'workingOn is REQUIRED and is that card\'s short id: a confirm is what counts a claim as USED, so it is never unattributed. '
-      + 'dismissed: it does not bear on it; the same claim is never proposed for that card again, even if the source is re-extracted. '
+      + 'dismissed: it does not bear on it; that sentence is never proposed for that card again, whichever source it comes from and however often '
+      + 'it is re-extracted. A REWORDED claim is a different sentence and can be proposed again. '
       + 'Your verdict is recorded under YOUR seat (from this session), appended: a later verdict replaces the status, never the history.',
     inputSchema: {
       link: z.string().regex(/^[0-9a-f]{64}$/).describe('The link id from link_list'),
