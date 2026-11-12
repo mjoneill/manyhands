@@ -108,6 +108,7 @@
   "tests/knowledge-linking-run-1851.test.mjs",
   "tests/knowledge-linking-decide-1851.test.mjs",
   "tests/knowledge-linking-rest-1851.test.mjs",
+  "tests/link-counts-1850.test.mjs",
   "tests/knowledge-extraction-entry-1810.test.mjs",
   "tests/knowledge-extraction-intake-1810.test.mjs",
   "tests/knowledge-extraction-intake-cursor-1810.test.mjs",
