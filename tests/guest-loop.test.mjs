@@ -143,6 +143,21 @@ test('#1201/#1420 a model failure → NO reply, one ledger row saying why, and O
   assert.equal(ledgerRows(file).length, 2); assert.match(String(ledgerRows(file)[1].error), /empty|content|nothing/i);
 });
 
+test('#1677 a CHANNEL wake\'s failure line does not say "I was named" or ask to be named again — in channel mode a name wakes nothing', async () => {
+  // 2026-10-21 00:47–00:54Z: a channel-mode seat failed on four deliveries, none of which named it, and each notice said
+  // "I was named … name me again to retry". Two seats read that as a self-wake loop; the wake log said channel deliveries.
+  const file = tmp(); const posts = [];
+  const bad = { status: 500, body: null, rawBody: 'boom' };
+  const wake = { kind: 'channel', id: 'w-1', posts: [{ id: 'p-1', author: 'bo', body: 'hello room', createdAt: 't' }], messageIds: ['p-1'], deliveries: ['d-1'] };
+  const r = await guestOnce({ agent: AGENT, wake, callModel: (a, m, o) => callModel(a, m, { ...o, retries: 0, transport: async () => bad }),
+    post: async (b) => { posts.push(b); return { id: 'f-1' }; }, ledgerFile: file });
+  assert.equal(r.posted, false); assert.equal(r.reason, 'model-failed');
+  assert.equal(posts.length, 1, 'still exactly one failure line');
+  assert.match(posts[0].body, /^⚠️ Gizmo: a room post reached me but my model call failed/);
+  assert.doesNotMatch(posts[0].body, /I was named|name me again/);
+  assert.doesNotMatch(posts[0].body, /@/);
+});
+
 test('#1420 the failure line goes WHERE the mention came from (card trail or talk), and a failure of the line itself is logged, never thrown', async () => {
   const file = tmp(); const posts = []; const errs = [];
   const bad = { status: 500, body: null, rawBody: 'boom' };
