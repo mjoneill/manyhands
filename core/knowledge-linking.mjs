@@ -84,7 +84,6 @@ export async function linkRun({ graphClient, search, run, minScore, perAssertion
     + `<${RS}anchorText> ?span OPTIONAL { ?a <${RS}gist> ?gist } } ORDER BY ?a`);
   if (!claims.ok) return { ok: false, reason: `the run's claims could not be read: ${claims.reason}`, proposed: 0 };
   const assertions = claims.rows.map((r) => ({ iri: r.a.value, span: r.span.value, ...(r.gist ? { gist: r.gist.value } : {}) }));
-  if (assertions.length === 0) return { ok: true, assertions: 0, proposed: 0, skipped: 0, outcome: 'nothing-to-write' };
   const have = await graphClient.query(`SELECT ?k WHERE { ?l <${RDF_TYPE}> <${RS}BearsOn> ; <${RS}spanKey> ?k }`);
   if (!have.ok) return { ok: false, reason: `the existing links could not be read: ${have.reason}`, proposed: 0 };
   const p = await proposeLinks({ assertions, search, existing: have.rows.map((r) => r.k.value), minScore, perAssertion });
