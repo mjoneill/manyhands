@@ -109,6 +109,26 @@ test('R4 search unavailable: ok:false with the reason, nothing written', { skip:
   assert.equal(await count(`?l <${RS}fromAssertion> <${s.claims[0].iri}>`), 0);
 });
 
+test('R6 a dry run proposes and writes nothing: the reading before the writing', { skip: SKIP }, async () => {
+  const s = await seedRun();
+  const k = countingClient();
+  const r = await go({ run: s.run, search: s.search, graphClient: k.c, dryRun: true });
+  assert.deepEqual({ ok: r.ok, proposed: r.proposed, outcome: r.outcome }, { ok: true, proposed: 2, outcome: 'dry-run' });
+  assert.equal(r.links.length, 2, 'the proposals are returned to read');
+  assert.equal(k.n(), 0, 'no update was sent');
+  assert.equal(await count(`?l <${RS}fromAssertion> <${s.claims[0].iri}>`), 0);
+});
+
+test('R7 the model may be a function, read when the write is built (the live search learns it from its first answer)', { skip: SKIP }, async () => {
+  const s = await seedRun();
+  let learned = null;
+  const search = async (q) => { learned = 'learned-model'; return s.search(q); };
+  const r = await go({ run: s.run, search, model: () => learned });
+  assert.equal(r.outcome, 'APPLIED', JSON.stringify(r));
+  const m = await q(`SELECT DISTINCT ?m WHERE { ?l <${RS}fromAssertion> <${s.claims[0].iri}> ; <${RS}model> ?m }`);
+  assert.deepEqual(m.map((x) => x.m.value), ['learned-model']);
+});
+
 test('R5 a run with no published claims: ok, nothing proposed, nothing sent, and assertions:0 says why', { skip: SKIP }, async () => {
   const k = countingClient();
   const r = await go({ run: `https://scrumboard.local/activity/run-empty-${crypto.randomUUID()}`, graphClient: k.c, search: async () => { throw new Error('must not search'); } });

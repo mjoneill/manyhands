@@ -78,7 +78,7 @@ const RS = 'https://scrumboard.local/ns#';
  * so a dismissed pair stays out), search, and write what is new as ONE link.propose. Nothing new ⇒ no update is sent.
  * Search or graph unavailable ⇒ ok:false and nothing written: a run that could not look never reports "no links".
  */
-export async function linkRun({ graphClient, search, run, minScore, perAssertion, model, actor, at = new Date().toISOString() } = {}) {
+export async function linkRun({ graphClient, search, run, minScore, perAssertion, model, actor, at = new Date().toISOString(), dryRun = false } = {}) {
   if (!graphClient || typeof run !== 'string' || !run) throw new Error('linkRun needs a graphClient and the run IRI');
   const claims = await graphClient.query(`SELECT ?a ?span ?gist WHERE { ?a <${RDF_TYPE}> <${RS}Assertion> ; <${RS}ofRun> <${run}> ; `
     + `<${RS}anchorText> ?span OPTIONAL { ?a <${RS}gist> ?gist } } ORDER BY ?a`);
@@ -89,7 +89,9 @@ export async function linkRun({ graphClient, search, run, minScore, perAssertion
   const p = await proposeLinks({ assertions, search, existing: have.rows.map((r) => r.k.value), minScore, perAssertion });
   if (!p.ok) return { ok: false, reason: p.reason, proposed: 0 };
   if (p.proposals.length === 0) return { ok: true, assertions: assertions.length, proposed: 0, skipped: p.skipped, outcome: 'nothing-to-write' };
-  const w = await graphClient.update(linkIntention({ proposals: p.proposals, minScore, model, at, actor }));
+  if (dryRun) return { ok: true, assertions: assertions.length, proposed: p.proposals.length, skipped: p.skipped, outcome: 'dry-run', links: p.proposals };
+  const m = typeof model === 'function' ? model() : model;   // the live search learns the model from its first answer
+  const w = await graphClient.update(linkIntention({ proposals: p.proposals, minScore, model: m, at, actor }));
   if (w.outcome !== 'APPLIED') return { ok: false, reason: `the links were not written: ${w.outcome} ${w.reason ?? ''}`.trim(), proposed: 0 };
   return { ok: true, assertions: assertions.length, proposed: p.proposals.length, skipped: p.skipped, outcome: w.outcome, links: p.proposals };
 }
@@ -100,4 +102,32 @@ export function decideIntention({ link, verdict, workingOn = null, actor, at = n
     kind: 'link.decide', opId, actor, link, verdict, decision: `${link}/decision/${crypto.randomUUID()}`,
     workingOn: workingOn == null ? null : `${ENTITY}entity/${workingOn}`, at,
   };
+}
+
+/**
+ * The live `search(q)`: the board's own POST /api/search (the dense index search_all uses). Every answer that did not search
+ * EVERYTHING is refused (available:false, partial:true, a non-200, a transport error), because the linker writes nothing from
+ * a refused search and "no link" must never mean "never searched". The verdict (answer/ask/abstain) is not read: the linker
+ * thresholds the scores itself.
+ */
+export function createRestSearch({ base, token, by, k = 8, fetchImpl = fetch, timeoutMs = 60_000 } = {}) {
+  let model = null;
+  const search = async (q) => {
+    let res;
+    try {
+      res = await fetchImpl(`${String(base).replace(/\/$/, '')}/api/search`, { method: 'POST',
+        headers: { 'content-type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ q, k, by }), signal: AbortSignal.timeout(timeoutMs) });
+    } catch (e) { return { ok: false, reason: `search transport: ${e?.message ?? e}` }; }
+    if (res.status !== 200) return { ok: false, reason: `search answered ${res.status}` };
+    let j; try { j = await res.json(); } catch { return { ok: false, reason: 'search answer is not JSON' }; }
+    if (j?.available !== true) return { ok: false, reason: `search unavailable: ${j?.reason ?? 'no reason given'}` };
+    if (j.partial === true) return { ok: false, reason: `search was partial (${JSON.stringify(j.coverage ?? {})}): it could not search everything` };
+    if (typeof j.model === 'string' && j.model) model = j.model;
+    const hits = (j.results ?? []).map((r) => ({ id: r.id, shortId: r.shortId ?? null, score: r.score, kind: r.kind === 'source' ? 'source' : 'card' }));
+    return { ok: true, hits };
+  };
+  /** The embed model the board answered with: read from its answer, never assumed (null until a search succeeded). */
+  search.model = () => model;
+  return search;
 }
