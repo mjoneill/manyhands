@@ -1993,7 +1993,10 @@ function buildMcpServer() {
           + 'name it and no cursor exists. Use changes_since with an explicit timestamp.',
       });
     }
-    if (resync) return jsonResult(await resyncOwnLane(lane, resync));
+    if (resync) {
+      // #1728 — the lane resyncs ITSELF: the body is laneFor(sessionId).register, never the tool's input
+      return jsonResult(resyncAnswer(lane, resync, await apiCall('POST', '/api/cursors/register', { ...lane.register, resync })));
+    }
     const q = new URLSearchParams({ identity: lane.identity, via: lane.via });
     if (limit) q.set('limit', String(limit));
     let page;
@@ -2977,8 +2980,7 @@ function selfResyncRemedy(message) {
 }
 const REREAD = 'Rows served from the old store may no longer exist: re-read memories / decisions / seat state '
   + 'from the live store (memory_list, decision_list, seat_states) before relying on anything you remembered from it.';
-async function resyncOwnLane(lane, resync) {
-  const reg = await apiCall('POST', '/api/cursors/register', { ...lane.register, resync });
+function resyncAnswer(lane, resync, reg) {
   const moved = !!reg?.resynced;
   const out = { resync, lane: lane.identity, moved, events: [] };
   if (moved) {
