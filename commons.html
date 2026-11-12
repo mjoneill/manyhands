@@ -642,9 +642,15 @@
     // store) re-boots the panel. Without the unit, `convoCursor` stays null and the tick is the `since=` poll as before.
     const blocked = { convos: new Map(), cards: new Map(), convoSince: null, cardSince: null, loaded: false, convoCursor: null };
     const useFeed = window.__SCRUM_COMMIT_FEED__ === true;
+    // #1879 — set once the server says it serves NO feed (400 GRAPH_DISCOVERY_OFF). Until then a null cursor under the flag
+    // means the boot `tip` FAILED, and a later tick asks for it again instead of polling ?since= for the life of the tab.
+    let feedOff = false;
     async function feedTip() {
-      try { const r = await fetch('/api/conversations?afterCommit=tip'); if (!r.ok) return null; const p = await r.json(); return p && typeof p.nextAfterCommit === 'string' ? p.nextAfterCommit : null; }
-      catch { return null; }
+      try {
+        const r = await fetch('/api/conversations?afterCommit=tip'); const p = await r.json().catch(() => null);
+        if (!r.ok) { if (r.status === 400 && p && p.code === 'GRAPH_DISCOVERY_OFF') feedOff = true; return null; }
+        return p && typeof p.nextAfterCommit === 'string' ? p.nextAfterCommit : null;
+      } catch { return null; }
     }
     /** Every row past the cursor, following pages until the feed is live and empty; null on a 409 (re-boot), throws otherwise. */
     // #1795 (#144 review) — pages on a LOCAL cursor and returns it with the rows; the caller commits both together, and only
@@ -702,6 +708,9 @@
         } else {
           // the same rule for the deltas: hold the guard until both settle, and a refused read is an error, not an empty delta
           const okJson = (r) => { if (!r.ok) throw new Error(`delta ${r.status}`); return r.json(); };
+          // #1879 — no cursor under the flag means the boot `tip` failed: ask again BEFORE this tick's since read (a post
+          // committed in between is in the since rows or the first feed read; ids dedupe), and take it only once both reads land.
+          const retryTip = useFeed && !blocked.convoCursor && !feedOff ? await feedTip() : null;
           const [convosR, resR] = await Promise.allSettled([
             blocked.convoCursor
               ? feedSince()
@@ -729,6 +738,7 @@
           }
           blocked.convoSince = maxStamp(blocked.convoSince, Array.isArray(convos) ? convos : [], 'createdAt');
           blocked.cardSince = maxStamp(blocked.cardSince, cards, 'updatedAt');
+          if (retryTip && !blocked.convoCursor) blocked.convoCursor = retryTip;   // #1879 — onto the feed from the next tick
         }
         blockedBackoffMs = 0;   // the reads answered: a later failure starts its backoff from 16 s again
         if (!changed) return;

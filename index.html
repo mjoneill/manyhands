@@ -6419,6 +6419,9 @@ function conversationsSignature(convs) {
 let _lastConvTs = null;
 let _oldestConvTs = null;
 let _convFeedCursor = null;   // #1607 — gc1.… when the graph feed is served; null ⇒ the ?since= poll
+// #1879 — true once the server has said it serves NO feed (400 GRAPH_DISCOVERY_OFF). Until then a null cursor under the
+// injected flag means the first `tip` FAILED, and the poll asks for it again instead of staying on ?since= for the life of the tab.
+let _convFeedOff = false;
 let _convsLoadingOlder = false;
 let _convsReachedStart = false;   // true once load-older hits an empty page
 let _convsScrollWired = false;
@@ -6696,20 +6699,33 @@ function pollConversations() {
   // #1607 — with the graph unit on, the poll follows the commit-ordered feed from a cursor: a quiet poll is one marker
   // read on the server, never a whole-history scan. Without the unit (_convFeedCursor stays null) it is today's ?since= poll.
   if (_convFeedCursor) return pollConversationFeed();
+  // #1879 — the flag is on but there is no cursor: the load-time `tip` failed. Ask again, BEFORE this tick's ?since= read
+  // (the same order as loadConversations: a post committed between the two is in the since rows or the first feed poll,
+  // and the id dedupe drops the overlap). Take the cursor only when the since read answered, so nothing is skipped.
+  if (window.__SCRUM_COMMIT_FEED__ === true && !_convFeedOff) {
+    return fetchConversationTip().then(tip => pollSinceConversations().then(ok => { if (tip && ok && !_convFeedCursor) _convFeedCursor = tip; }));
+  }
+  return pollSinceConversations();
+}
+
+/** The ?since= poll. Resolves true when the server answered (rows or none), false on a refused or failed read. */
+function pollSinceConversations() {
   const url = _lastConvTs
     ? '/api/conversations?since=' + encodeURIComponent(_lastConvTs)
     : '/api/conversations';
   return fetch(url)
-    .then(r => r.ok ? r.json() : [])
-    .catch(() => [])
+    .then(r => r.ok ? r.json() : null)
+    .catch(() => null)
     .then(convs => {
-      if (!Array.isArray(convs) || convs.length === 0) return;
+      if (!Array.isArray(convs)) return false;
+      if (convs.length === 0) return true;
       const have = new Set(conversations.map(c => c.id));
       const fresh = convs.filter(c => c && c.id && !have.has(c.id));
-      if (fresh.length === 0) return;
+      if (fresh.length === 0) return true;
       fresh.forEach(c => conversations.push(c));
       _lastConvTs = _newestConvTs() || _lastConvTs;
       appendConversations(fresh);
+      return true;
     });
 }
 
@@ -6721,8 +6737,8 @@ function pollConversations() {
 async function fetchConversationTip() {
   try {
     const r = await fetch('/api/conversations?afterCommit=tip');
-    if (!r.ok) return null;
-    const page = await r.json();
+    const page = await r.json().catch(() => null);
+    if (!r.ok) { if (r.status === 400 && page && page.code === 'GRAPH_DISCOVERY_OFF') _convFeedOff = true; return null; }   // #1879
     return page && typeof page.nextAfterCommit === 'string' ? page.nextAfterCommit : null;
   } catch { return null; }
 }
