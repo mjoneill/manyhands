@@ -33,29 +33,58 @@ const stripComments = (src) => src.replace(/^\s*\/\/.*$/gm, '');
 // reference (card_create → cardCreateHandler → plainCardCreate) is followed.
 const STMT_AT_DEPTH = /^  (?:const|let|var|async function|function|mcp\.|if|for|while|return|await|export)\b/;
 
+// #1888: two spaces is ALSO the body of every top-level function, so "at depth" alone indexed those functions'
+// locals as helpers (a tool naming `reg` inherited a register call it never makes) and never indexed the top-level
+// helpers themselves (a tool reaching a write only through one went unchecked). Each segment now carries the
+// top-level function it sits in; the main function is the one whose body registers tools.
+const TOP_DEF = /^(?:export\s+)?(?:(?:async\s+)?function\s+([A-Za-z_]\w*)\s*\(|(?:const|let|var)\s+([A-Za-z_]\w*)\s*=)/;
+const CLOSER = /^[)}\]]/;
+
 function segmentsAtDepth(mcpSource) {
   const lines = mcpSource.split('\n');
   const starts = [];
   lines.forEach((line, i) => { if (STMT_AT_DEPTH.test(line) || /^\S/.test(line)) starts.push(i); });
+  const topOf = [];
+  let top = -1;
+  lines.forEach((line, i) => { if (/^\S/.test(line) && !CLOSER.test(line)) top = i; topOf[i] = top; });
   const segs = [];
   for (let k = 0; k < starts.length; k++) {
     const from = starts[k], to = k + 1 < starts.length ? starts[k + 1] : lines.length;
-    segs.push({ first: lines[from], source: lines.slice(from, to).join('\n') });
+    segs.push({ first: lines[from], top: topOf[from], source: lines.slice(from, to).join('\n') });
   }
-  return segs;
+  return { lines, segs };
+}
+
+/** The line index of the top-level function whose body registers tools (-1 when none does). */
+function mainTop({ segs }) {
+  const reg = segs.find((seg) => /^  mcp\.registerTool\(/.test(seg.first));
+  return reg ? reg.top : -1;
 }
 
 export function parseDefinitions(mcpSource) {
+  const parsed = segmentsAtDepth(mcpSource);
+  const main = mainTop(parsed);
   const defs = new Map();
-  for (const seg of segmentsAtDepth(mcpSource)) {
+  for (const seg of parsed.segs) {
+    if (seg.top !== main) continue; // a local of some other top-level function is not a helper of the tools
     const m = seg.first.match(/^  (?:const|let|var)\s+([A-Za-z_]\w*)\s*=/) || seg.first.match(/^  (?:async\s+)?function\s+([A-Za-z_]\w*)\s*\(/);
     if (m) defs.set(m[1], stripComments(seg.source));
   }
+  // top-level helpers, by name, with their whole body (up to the next top-level statement); never the main function
+  const { lines } = parsed;
+  lines.forEach((line, i) => {
+    const m = line.match(TOP_DEF);
+    if (!m || i === main) return;
+    let end = i + 1;
+    while (end < lines.length && !(/^\S/.test(lines[end]) && !CLOSER.test(lines[end]))) end++;
+    const name = m[1] || m[2];
+    if (!defs.has(name)) defs.set(name, stripComments(lines.slice(i, end).join('\n')));
+  });
   return defs;
 }
 
 export function parseRegisterBlocks(mcpSource) {
-  return segmentsAtDepth(mcpSource)
+  return segmentsAtDepth(mcpSource).segs
     .map((seg) => ({ seg, m: seg.first.match(/^  mcp\.registerTool\('([^']+)'/) }))
     .filter(({ m }) => m)
     .map(({ seg, m }) => ({ name: m[1], source: stripComments(seg.source) }));

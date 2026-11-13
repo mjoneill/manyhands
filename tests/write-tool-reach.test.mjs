@@ -34,6 +34,10 @@ const ADJUDICATED = [
   { tool: 'board_status', path: '/api/graph', field: 'by', reason: 'NOT A DEPENDENCY OF THE TOOL\'S INPUT (#1763): board_status composes ONE fixed count query itself (WORK_LEDGER_COUNT_QUERY, source "executor") for the retired ledger\'s history; the body takes nothing from the tool\'s arguments' },
   { tool: 'link_decide', path: '/api/links/${link}/decide', field: 'by', reason: 'NOT A DEPENDENCY OF THE TOOL\'S INPUT (#1851): the tool sends `by` itself, from boundSeatOf(extra) (the session\'s seat), and deliberately has no seat or by argument, as seat_declare; a verdict is counted per seat, so the model must not name it (review 52706, rows M1/M3 in knowledge-linking-mcp-1851)' },
   { tool: 'link_decide', path: '/api/links/${link}/decide', field: 'onBehalfOf', reason: 'NOT A DEPENDENCY OF THE TOOL\'S INPUT (#1851): the SERVER sets onBehalfOf when its auth rewrites a foreign `by` (#1569), and the handler reads it only to REFUSE that request (SEAT_NOT_SELF, rows H3/H9); a tool that could send it would defeat the refusal' },
+  // #1888: visible only once top-level helpers are followed. card_create's throttle (#755) records its own refusal through
+  // the top-level reportRefusal(), composing every field itself: actor from args.createdBy, rule and reason from
+  // decideThrottle's decision, entity/request/route fixed at the call site. Nothing in the body is a field the model sends.
+  ...['actor', 'rule', 'reason', 'entity', 'request', 'route'].map((field) => ({ tool: 'card_create', path: '/api/refusals', field, reason: 'NOT A DEPENDENCY OF THE TOOL\'S INPUT (#1888): card_create\'s throttle refusal (#755) posts a record the tool composes itself via the top-level reportRefusal() (mcp-server.mjs, `reportRefusal({ actor: args.createdBy, rule: decision.reason, …, route: \'mcp card_create\' })`); hidden until #1888 followed top-level helpers' })),
 ];
 // a reviewer 16:26Z: an adjudication that names a `path` excuses that ROUTE only, never the tool+field everywhere
 const isAdjudicated = (g) => ADJUDICATED.some((a) => a.tool === g.tool && a.field === g.field && (a.path == null || a.path === g.path));
@@ -130,4 +134,50 @@ test('#1163 at ZERO population the analyzer reports zero gaps — the green that
   const r = analyzeWriteToolReach({ mcpSource: FIX_MCP, serverSource: FIX_SERVER, tools: [] });
   assert.equal(r.n, 0);
   assert.equal(r.gaps.length, 0, 'zero gaps at zero population is exactly the green that must not count');
+});
+
+// #1888: the analyzer's depth rule assumed two spaces means "inside the server's main function", but the body of a
+// top-level function is indented two spaces too. So its locals were indexed as helpers (a tool naming `reg` inherited
+// a register call it never makes: false GAP, seen on 11-12), and top-level helpers were never indexed by name (a tool
+// reaching a write only through one went unchecked: possible false green).
+const SCOPE_MCP = `
+async function resyncOwnLane() {
+  const reg = await apiCall('POST', '/api/cursors/register', { identity: 'lane' });
+  return reg;
+}
+function writeThing(id, patch) {
+  return apiCall('PATCH', \`/api/things/\${encodeURIComponent(id)}\`, patch);
+}
+export async function main() {
+  mcp.registerTool('thing_note', {
+    description: 'a note; never written from main',
+    inputSchema: { id: z.string() },
+  }, async ({ id }) => { const reg = id; return jsonResult({ reg }); });
+  mcp.registerTool('thing_update', {
+    inputSchema: { id: z.string(), body: z.string().optional() },
+  }, async ({ id, ...patch }) => jsonResult(await writeThing(id, patch)));
+}
+`;
+const SCOPE_SERVER = FIX_SERVER.replace('const routes = [', `async function handleRegisterCursor(req, res) {
+  const body = JSON.parse(await readBody(req));
+  return sendJSON(res, 200, { identity: body.identity });
+}
+
+const routes = [
+  { method: 'POST', re: /^\\/api\\/cursors\\/register$/, fn: (req, res) => handleRegisterCursor(req, res) },`);
+const scopeTools = [
+  { name: 'thing_note', inputSchema: { properties: { id: {} } } },
+  { name: 'thing_update', inputSchema: { properties: { id: {}, body: {} } } },
+];
+
+test('#1888 a local of a top-level function is not a helper, and neither is the main function: a tool that only says either name is not credited with its call', () => {
+  const r = analyzeWriteToolReach({ mcpSource: SCOPE_MCP, serverSource: SCOPE_SERVER, tools: scopeTools });
+  assert.deepEqual(r.rows.filter((row) => row.tool === 'thing_note').map((row) => `${row.method} ${row.path}`), [], 'thing_note makes no write call');
+  assert.deepEqual(r.unmapped, []);
+});
+
+test('#1888 a top-level helper IS followed: a tool that reaches a write only through one is credited, and its gaps are found', () => {
+  const r = analyzeWriteToolReach({ mcpSource: SCOPE_MCP, serverSource: SCOPE_SERVER, tools: scopeTools });
+  assert.deepEqual(r.rows.filter((row) => row.tool === 'thing_update').map((row) => `${row.method} ${row.handler}`), ['PATCH handleUpdateThing']);
+  assert.deepEqual(r.gaps.map((g) => `${g.tool}:${g.field}`).sort(), ['thing_update:by', 'thing_update:ifVersion']);
 });
