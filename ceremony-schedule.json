@@ -1,7 +1,7 @@
 {
   "enabled": true,
   "ceremonies": [
-    { "kind": "review", "weekday": 3, "time": "16:00" },
+    { "kind": "review", "weekday": 3, "time": "16:00", "preRead": "1892" },
     { "kind": "retro", "weekday": 3, "time": "17:00" },
     { "kind": "planning", "weekday": 4, "time": "11:00", "note": "Before Planning closes: file the new sprint card." }
   ]
