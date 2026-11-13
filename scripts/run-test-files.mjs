@@ -18,6 +18,10 @@ const start = treeState();
 // the same list with a `location: '…'` regex over TAP, which depends on the
 // reporter's formatting. Here the file and its verdict are both in hand.
 const failedFiles = [];
+// #1864 — the files whose test process exited non-zero WITHOUT being a hang, with how they ended. A hang and a tmp
+// leak print their own lines; a plain non-zero exit used to reach only the ledger, so a CI log could read `# fail 0`,
+// exit 1, and name nothing. Printed after the summary by finish().
+const exitedFiles = [];
 const requested = Number(process.env.RUN_TESTS_CONCURRENCY);
 const workers = Number.isInteger(requested) && requested > 0
   ? requested
@@ -165,6 +169,10 @@ function record() {
 function finish() {
   if (settleTmp()) failed = true;   // #1672 — a new leak or a retained folder is part of the verdict
   emitSummary();
+  // #1864 — name every file that exited non-zero, after the summary, where a reader of a red log looks.
+  for (const { file, code, signal } of exitedFiles) {
+    process.stdout.write(`# ⛔ FILE EXITED ${signal ? `by ${signal}` : `with code ${code}`}: ${file}\n`);
+  }
   record();
   process.exitCode = failed || totals.fail > 0 ? 1 : 0;
 }
@@ -209,7 +217,7 @@ function launch() {
     // without allowing them to become another TAP summary.
     child.stderr.on('data', (chunk) => { process.stderr.write(chunk); });
     child.on('error', () => { failed = true; failedFiles.push(file); });
-    child.on('close', (code) => {
+    child.on('close', (code, signal) => {
       clearTimeout(timer);
       live.delete(child.pid); // #998 — reaped or exited; no longer ours to kill
       if (hung) {
@@ -225,7 +233,7 @@ function launch() {
           + `#    process alive after its tests finish. Raise RUN_TESTS_FILE_TIMEOUT_MS if ${FILE_TIMEOUT_MS}ms\n`
           + '#    is genuinely too short for this file.\n',
         );
-      } else if (code !== 0) { failed = true; failedFiles.push(file); }
+      } else if (code !== 0) { failed = true; failedFiles.push(file); exitedFiles.push({ file, code, signal }); }
       emitCompletedFile(file, stdout);
       active -= 1;
       if (next === files.length && active === 0) finish();

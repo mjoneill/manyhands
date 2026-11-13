@@ -154,6 +154,7 @@ echo "── $scope ──"
 if [ "$rc" -ne 0 ]; then
   echo "── FAILURES ──"
   grep -B1 -A12 "^not ok" "$out" | head -80
+  grep "^# ⛔ FILE EXITED" "$out"   # #1864 — a file that exited non-zero with no failing row
 fi
 rm -f "$out"
 
