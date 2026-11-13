@@ -92,3 +92,21 @@ test('#1864 E4 run-tests.sh shows the FILE EXITED lines in its FAILURES block', 
   const block = sh.slice(sh.indexOf('── FAILURES ──'));
   assert.match(block, /FILE EXITED/, 'the FAILURES block greps the FILE EXITED lines too');
 });
+
+// M6 from the review of PR #235: `if (signal) exitedFiles.push(…)` passed E1–E4, because every row died by a
+// signal the runner saw. A SIGTERM to the inner `node --test` lets it exit on its own with CODE 1 and no signal at
+// close — the shape CI actually showed. This row holds that the plain-code exit is named too.
+const TERMED = `${PASSING}test('then the test process is terminated', () => { setTimeout(() => process.kill(process.ppid, 'SIGTERM'), 50); });\n`;
+
+test('#1864 E5 a file whose test process exits with a CODE (no signal) and no failing row is NAMED "with code"', async () => {
+  const { dir, file } = plant('exits-quietly.test.mjs', TERMED);
+  try {
+    const { code, out } = await runRunner([file]);
+    assert.equal(code, 1, 'the verdict is still red');
+    assert.match(out, /^# fail 0$/m, 'the shape under test: no failing row at all');
+    const line = out.split('\n').find((l) => l.startsWith('# ⛔ FILE EXITED'));
+    assert.ok(line, `a ⛔ FILE EXITED line is printed; got:\n${out.slice(-800)}`);
+    assert.ok(line.includes(file), `the line names the file: ${line}`);
+    assert.match(line, /with code \d+/, `the line says it exited with a code: ${line}`);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
