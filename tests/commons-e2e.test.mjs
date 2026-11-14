@@ -714,3 +714,305 @@ test('#504 mirror: with NO roster configured, the shipped example seats DO retur
     assert.ok(opts.includes('alex'), `expected the shipped examples; got ${opts.join(', ')}`);
   }, { server: { board }, launch: { headless: 'new' } });
 });
+
+// ── #1689 — ambient recall: the line under a room post, and the Reading page's "what have we read about…" ───────────
+// The server side (the `recall` field, /api/recall, /api/recall/opened) is built separately against a fixed contract,
+// so these rows STUB those answers with request interception and test only what the pages draw and send.
+const RECALL_RUN = 'run-44d706e1-16af-4a45-8671-d4baef63563b';
+const RECALL_RUN2 = 'run-61b68b31-9196-44af-a223-d16d4b6f61e0';
+const recallItem = (extra = {}) => ({
+  source: { title: 'How Complex Systems Fail', url: 'urn:sha256:' + 'a'.repeat(64) },
+  readingPage: `/reading.html?run=${RECALL_RUN}`,
+  readAt: '2026-11-14T15:45:51.430Z',
+  why: {
+    gist: 'Root-cause reasoning is socially motivated blame rather than technical analysis.',
+    quote: 'Post-accident attribution to a root cause is fundamentally wrong because overt failure requires multiple faults.',
+    quoteTruncated: false, claim: 'https://scrumboard.local/assertion/x',
+  },
+  score: 0.635,
+  ...extra,
+});
+const XSS = '<img src=x onerror="window.__recallXss=1"><script>window.__recallXss=2</script>';
+const recallPosts = () => [
+  { id: 'p-none', body: 'a post that touches nothing we have read', author: 'sage', attachedTo: null, createdAt: ts(1), mentions: [] },
+  { id: 'p-with', body: 'why do we keep blaming one root cause?', author: 'alex', attachedTo: null, createdAt: ts(2), mentions: [],
+    recall: { items: [recallItem(), recallItem({ readingPage: `https://evil.example/reading.html?run=${RECALL_RUN2}`, source: { title: 'A second source', url: 'https://evil.example/x' } })] } },
+  { id: 'p-down', body: 'the index is down right now', author: 'sage', attachedTo: null, createdAt: ts(3), mentions: [], recall: { unavailable: 'the embedding model is not loaded' } },
+  { id: 'p-xss', body: 'hostile text in a recall', author: 'alex', attachedTo: null, createdAt: ts(4), mentions: [],
+    recall: { items: [recallItem({ source: { title: 'T ' + XSS, url: 'javascript:alert(1)' }, why: { gist: 'G ' + XSS, quote: 'Q ' + XSS } })] } },
+  { id: 'p-long', body: 'a long quote', author: 'sage', attachedTo: null, createdAt: ts(5), mentions: [],
+    recall: { items: [recallItem({ source: { title: 'T'.repeat(300) }, why: { gist: 'g'.repeat(400), quote: 'q'.repeat(900) } })] } },
+];
+const emptyBoard = { cards: [], columns: [{ id: 'backlog', name: 'Backlog', order: 0 }], conversations: [], nextShortId: 1 };
+
+/** Serve `posts` for the list fetch; everything else goes to the fixture server. */
+async function stubConversations(page, posts) {
+  await page.setRequestInterception(true);
+  page.on('request', (r) => {
+    const u = new URL(r.url());
+    if (u.pathname === '/api/conversations' && r.method() === 'GET' && !u.searchParams.has('afterCommit')) {
+      return r.respond({ status: 200, contentType: 'application/json', body: JSON.stringify(u.searchParams.has('since') || u.searchParams.has('before') ? [] : posts) });
+    }
+    return r.continue();
+  });
+}
+
+test('#1689 commons.html: a post with recall carries one quiet aside; without it, or when recall is unavailable, nothing changes', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 900 });
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    await stubConversations(page, recallPosts());
+    await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'networkidle0' });
+    await page.waitForSelector('.cv-msg[data-id="p-with"]', { timeout: 5000 });
+
+    const shape = await page.evaluate(() => Object.fromEntries([...document.querySelectorAll('.cv-msg')].map((m) => [m.dataset.id, [...m.children].map((c) => c.className)])));
+    assert.deepEqual(shape['p-none'], ['cv-msg-meta', 'cv-msg-body prose'], 'a post with no recall is drawn exactly as before: meta, body');
+    assert.deepEqual(shape['p-down'], ['cv-msg-meta', 'cv-msg-body prose'], 'an unavailable recall draws nothing in the room');
+    assert.deepEqual(shape['p-with'], ['cv-msg-meta', 'cv-msg-body prose', 'cv-recall'], 'the aside sits directly under the body');
+
+    const w = await page.$eval('.cv-msg[data-id="p-with"] .cv-recall', (box) => ({
+      tag: box.tagName, label: box.getAttribute('aria-label'),
+      rows: [...box.children].map((r) => ({ tag: r.tagName, href: r.getAttribute('href'), text: r.textContent, links: r.querySelectorAll('a').length })),
+    }));
+    assert.equal(w.tag, 'ASIDE');
+    assert.match(w.label, /room has read/i, 'the aside says what it is');
+    assert.equal(w.rows.length, 2);
+    assert.equal(w.rows[0].tag, 'A');
+    assert.equal(w.rows[0].href, `/reading.html?run=${RECALL_RUN}&from=recall&post=p-with`, 'the row links to the reading, saying it was opened from this post');
+    assert.match(w.rows[0].text, /^📚 the room has read · How Complex Systems Fail \(Nov 14\)/);
+    assert.match(w.rows[0].text, /socially motivated blame/);
+    assert.match(w.rows[0].text, /multiple faults/);
+    assert.equal(w.rows[1].tag, 'DIV', 'a readingPage off the one allowed shape draws no link');
+    assert.equal(w.rows[1].href, null);
+    assert.equal(w.rows[1].links, 0);
+    assert.match(w.rows[1].text, /A second source/, 'the title is still shown, as plain text');
+
+    // keyboard: the row is reachable and focusable
+    await page.focus('.cv-msg[data-id="p-with"] a.cv-recall-item');
+    assert.equal(await page.evaluate(() => document.activeElement.className), 'cv-recall-item');
+
+    // an aside, not the author's words: smaller and muted next to the body, and no taller than about four lines a row
+    const look = await page.evaluate(() => {
+      const body = document.querySelector('.cv-msg[data-id="p-with"] .cv-msg-body');
+      const row = document.querySelector('.cv-msg[data-id="p-with"] .cv-recall-item');
+      const bs = getComputedStyle(body); const rs = getComputedStyle(row);
+      const long = document.querySelector('.cv-msg[data-id="p-long"] .cv-recall-item');
+      return { bodyPx: parseFloat(bs.fontSize), rowPx: parseFloat(rs.fontSize), bodyColor: bs.color, rowColor: rs.color,
+        rowLine: parseFloat(rs.lineHeight), longH: long.getBoundingClientRect().height };
+    });
+    assert.ok(look.rowPx < look.bodyPx, `the aside is smaller than the post (${look.rowPx} vs ${look.bodyPx})`);
+    assert.notEqual(look.rowColor, look.bodyColor, 'the aside is muted');
+    assert.ok(look.longH <= look.rowLine * 4.6, `a row with a very long title, gist and quote stays about four lines (${look.longH}px, line ${look.rowLine}px)`);
+
+    // untrusted text stays text
+    const x = await page.$eval('.cv-msg[data-id="p-xss"] .cv-recall', (box) => ({ text: box.textContent, imgs: box.querySelectorAll('img').length, scripts: box.querySelectorAll('script').length, href: box.querySelector('a').getAttribute('href') }));
+    assert.equal(x.imgs, 0);
+    assert.equal(x.scripts, 0);
+    assert.ok(x.text.includes('T <img src=x onerror=') && x.text.includes('G <img') && x.text.includes('Q <img') && x.text.includes('<script>'), 'the markup is shown as text in every field');
+    assert.equal(x.href, `/reading.html?run=${RECALL_RUN}&from=recall&post=p-xss`, 'a javascript: source url is never the link');
+    assert.equal(await page.evaluate(() => window.__recallXss), undefined, 'nothing in the recall ran');
+    assert.deepEqual(errors, []);
+  }, { server: { board: emptyBoard }, launch: { headless: 'new' } });
+});
+
+test('#1689 commons.html at 390px: a long unbroken quote does not scroll the page sideways', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 390, height: 844 });
+    await stubConversations(page, recallPosts());
+    await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'networkidle0' });
+    await page.waitForSelector('.cv-msg[data-id="p-long"] .cv-recall', { timeout: 5000 });
+    const m = await page.evaluate(() => {
+      const box = document.querySelector('.cv-msg[data-id="p-long"] .cv-recall').getBoundingClientRect();
+      return { sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth, right: box.right };
+    });
+    assert.ok(m.sw <= m.cw, `no horizontal scroll at 390px (scrollWidth ${m.sw} > ${m.cw})`);
+    assert.ok(m.right <= m.cw, `the aside stays inside the viewport (right ${m.right})`);
+  }, { server: { board: emptyBoard }, launch: { headless: 'new' } });
+});
+
+test('#1689 the board\'s slide-in commons panel draws the same aside, and nothing for a post without recall', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await browser.newPage();
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    await stubConversations(page, recallPosts());
+    await page.goto(`${server.baseUrl}/`, { waitUntil: 'networkidle0' });
+    await page.click('[data-commons-toggle]');
+    await page.waitForSelector('#convs-panel.visible .conv-msg[data-id="p-with"] .cv-recall', { timeout: 5000 });
+    const shape = await page.evaluate(() => Object.fromEntries([...document.querySelectorAll('#convs-feed .conv-msg')].map((m) => [m.dataset.id, [...m.children].map((c) => c.className)])));
+    assert.deepEqual(shape['p-none'], ['conv-msg-meta', 'conv-msg-body']);
+    assert.deepEqual(shape['p-down'], ['conv-msg-meta', 'conv-msg-body']);
+    assert.deepEqual(shape['p-with'], ['conv-msg-meta', 'conv-msg-body', 'cv-recall']);
+    const href = await page.$eval('#convs-feed .conv-msg[data-id="p-with"] a.cv-recall-item', (a) => a.getAttribute('href'));
+    assert.equal(href, `/reading.html?run=${RECALL_RUN}&from=recall&post=p-with`);
+    assert.equal(await page.evaluate(() => window.__recallXss), undefined);
+    assert.deepEqual(errors, []);
+  }, { server: { board: emptyBoard }, launch: { headless: 'new' } });
+});
+
+/** The Reading page against stubbed readings and a stubbed recall. Returns the recall and opened requests it saw. */
+async function stubReading(page, { opened = 200 } = {}) {
+  const seen = { recall: [], opened: [], held: null };
+  await page.setRequestInterception(true);
+  const json = (r, body, status = 200) => r.respond({ status, contentType: 'application/json', body: JSON.stringify(body) });
+  page.on('request', (r) => {
+    const u = new URL(r.url());
+    if (u.pathname === '/api/readings') {
+      return json(r, { readings: [{ id: RECALL_RUN, title: 'How Complex Systems Fail', url: 'urn:sha256:' + 'a'.repeat(64), outcome: 'complete', startedAt: '2026-11-14T15:42:50.448Z', finishedAt: '2026-11-14T15:45:51.430Z', claims: 3, links: 0 }], truncated: false });
+    }
+    if (u.pathname === `/api/readings/${RECALL_RUN}`) {
+      return json(r, { run: { id: RECALL_RUN, outcome: 'complete', startedAt: '2026-11-14T15:42:50.448Z', finishedAt: '2026-11-14T15:45:51.430Z', links: 0 }, source: { title: 'How Complex Systems Fail', url: 'urn:sha256:' + 'a'.repeat(64) }, claims: [{ id: 'c1', type: 'empirical', gist: 'Failure needs many faults.', quote: 'overt failure requires multiple faults' }] });
+    }
+    if (u.pathname === '/api/recall/opened') {
+      seen.opened.push({ method: r.method(), body: JSON.parse(r.postData() || 'null') });
+      return json(r, opened === 200 ? { ok: true } : { error: 'no' }, opened);
+    }
+    if (u.pathname === '/api/recall') {
+      const body = JSON.parse(r.postData() || 'null');
+      seen.recall.push(body);
+      const t = body && body.text;
+      if (t === 'slow') { seen.held = r; return undefined; }
+      if (t === 'neterr') return r.abort('failed');
+      if (t === 'nothing') return json(r, { available: true, bar: 0.62, partial: false, items: [], searched: { claims: 251, embedded: 251, sources: 6 }, means: 'cosine similarity' });
+      if (t === 'partial') return json(r, { available: true, bar: 0.62, partial: true, items: [recallItem()], searched: { claims: 251, embedded: 200, sources: 6 }, means: 'cosine similarity' });
+      if (t === 'down') return json(r, { available: false, reason: 'the embedding model is not loaded', items: [] });
+      if (t === 'hostile') return json(r, { available: true, bar: 0.62, partial: false, items: [recallItem({ source: { title: 'T ' + XSS }, readingPage: 'javascript:alert(1)', why: { gist: 'G ' + XSS, quote: 'Q ' + XSS } })], searched: { claims: 1, embedded: 1, sources: 1 } });
+      return json(r, { available: true, bar: 0.62, partial: false, items: [recallItem(), recallItem({ readingPage: `/reading.html?run=${RECALL_RUN2}`, source: { title: 'Drift into Failure' }, score: 0.631 })], searched: { claims: 251, embedded: 251, sources: 6 }, means: 'cosine similarity' });
+    }
+    return r.continue();
+  });
+  return seen;
+}
+
+test('#1689 reading.html: "what have we read about…" says plainly what happened in each state', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await browser.newPage();
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    const seen = await stubReading(page);
+    await page.goto(`${server.baseUrl}/reading.html`, { waitUntil: 'networkidle0' });
+    await page.waitForSelector('.recall-form input[type=search]', { timeout: 5000 });
+    const order = await page.evaluate(() => { const f = document.querySelector('.recall-form'); const l = document.querySelector('.rows'); return !!(f.compareDocumentPosition(l) & Node.DOCUMENT_POSITION_FOLLOWING); });
+    assert.ok(order, 'the box sits above the list');
+    const ask = async (text) => {
+      await page.$eval('.recall-form input[type=search]', (i, v) => { i.value = v; }, text);
+      await page.click('.recall-form button[type=submit]');
+    };
+    const out = () => page.$eval('.recall-out', (e) => e.textContent);
+
+    // empty input does nothing
+    await ask('   ');
+    await new Promise((r) => setTimeout(r, 150));
+    assert.equal(seen.recall.length, 0, 'an empty box sends nothing');
+    assert.equal(new URL(page.url()).search, '');
+
+    // searching
+    await ask('slow');
+    await page.waitForFunction(() => /Looking through what we.ve read/.test(document.querySelector('.recall-out').textContent), { timeout: 5000 });
+    assert.deepEqual(seen.recall.at(-1), { text: 'slow', k: 5 });
+    await seen.held.respond({ status: 200, contentType: 'application/json', body: JSON.stringify({ available: true, bar: 0.62, partial: false, items: [recallItem()], searched: { claims: 251, embedded: 251, sources: 6 } }) });
+    await page.waitForSelector('.recall-out .claim', { timeout: 5000 });
+
+    // results, in the claims' visual language
+    await ask('complex systems');
+    await page.waitForFunction(() => document.querySelectorAll('.recall-out .claim').length === 2, { timeout: 5000 });
+    const cards = await page.$$eval('.recall-out .claim', (els) => els.map((li) => ({
+      title: li.querySelector('.rtitle').textContent, href: li.querySelector('.rtitle a') && li.querySelector('.rtitle a').getAttribute('href'),
+      gist: li.querySelector('.gist').textContent, quote: li.querySelector('.quote').textContent, meta: li.querySelector('.cmeta').textContent,
+    })));
+    assert.equal(cards[0].title, 'How Complex Systems Fail');
+    assert.equal(cards[0].href, `/reading.html?run=${RECALL_RUN}`);
+    assert.match(cards[0].gist, /socially motivated blame/);
+    assert.match(cards[0].quote, /multiple faults/);
+    assert.match(cards[0].meta, /Nov 14/);
+    assert.match(cards[0].meta, /0\.64/, 'the score as a small secondary number');
+    assert.equal(cards[1].href, `/reading.html?run=${RECALL_RUN2}`);
+
+    await ask('nothing');
+    await page.waitForFunction(() => /clears the bar/.test(document.querySelector('.recall-out').textContent), { timeout: 5000 });
+    assert.match(await out(), /Nothing we.ve read clears the bar for that\. The bar is 0\.62\./);
+
+    await ask('partial');
+    await page.waitForFunction(() => /not indexed yet/.test(document.querySelector('.recall-out').textContent), { timeout: 5000 });
+    assert.match(await out(), /Some claims are not indexed yet; this answer may be incomplete\./);
+    assert.equal(await page.$$eval('.recall-out .claim', (e) => e.length), 1, 'a partial answer still shows what it found');
+
+    await ask('down');
+    await page.waitForFunction(() => /Couldn.t look/.test(document.querySelector('.recall-out').textContent), { timeout: 5000 });
+    assert.match(await out(), /Couldn.t look: the embedding model is not loaded/);
+
+    await ask('neterr');
+    await page.waitForFunction(() => /could not be reached/i.test(document.querySelector('.recall-out').textContent), { timeout: 5000 });
+
+    // untrusted text in a result stays text, and a bad readingPage is no link
+    await ask('hostile');
+    await page.waitForSelector('.recall-out .claim', { timeout: 5000 });
+    const h = await page.$eval('.recall-out', (e) => ({ imgs: e.querySelectorAll('img').length, scripts: e.querySelectorAll('script').length, links: e.querySelectorAll('a').length, text: e.textContent }));
+    assert.deepEqual([h.imgs, h.scripts, h.links], [0, 0, 0]);
+    assert.ok(h.text.includes('T <img') && h.text.includes('G <img') && h.text.includes('Q <img'));
+    assert.equal(await page.evaluate(() => window.__recallXss), undefined);
+    assert.deepEqual(errors, []);
+  }, { server: { board: emptyBoard }, launch: { headless: 'new' } });
+});
+
+test('#1689 reading.html: the question is in the address, so it bookmarks, reloads and goes back', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await browser.newPage();
+    const seen = await stubReading(page);
+    const ask = async (text) => {
+      await page.$eval('.recall-form input[type=search]', (i, v) => { i.value = v; }, text);
+      await page.click('.recall-form button[type=submit]');
+    };
+    const two = () => page.waitForFunction(() => document.querySelectorAll('.recall-out .claim').length === 2, { timeout: 5000 });
+    await page.goto(`${server.baseUrl}/reading.html`, { waitUntil: 'networkidle0' });
+    await page.waitForSelector('.recall-form', { timeout: 5000 });
+    assert.equal(seen.recall.length, 0, 'a page opened without ?q= asks nothing');
+
+    await ask('complex systems');
+    await two();
+    assert.equal(new URL(page.url()).searchParams.get('q'), 'complex systems');
+    await ask('nothing');
+    await page.waitForFunction(() => /clears the bar/.test(document.querySelector('.recall-out').textContent), { timeout: 5000 });
+    assert.equal(new URL(page.url()).searchParams.get('q'), 'nothing');
+
+    await page.goBack();
+    await two();
+    assert.equal(new URL(page.url()).searchParams.get('q'), 'complex systems');
+    assert.equal(await page.$eval('.recall-form input[type=search]', (i) => i.value), 'complex systems');
+    await page.goBack();
+    await page.waitForFunction(() => document.querySelector('.recall-out').textContent.trim() === '', { timeout: 5000 });
+    assert.equal(new URL(page.url()).search, '');
+    assert.equal(await page.$eval('.recall-form input[type=search]', (i) => i.value), '');
+
+    // a bookmark: a page opened with ?q= runs that search, once
+    seen.recall.length = 0;
+    await page.goto(`${server.baseUrl}/reading.html?q=${encodeURIComponent('complex systems')}`, { waitUntil: 'networkidle0' });
+    await two();
+    assert.deepEqual(seen.recall, [{ text: 'complex systems', k: 5 }]);
+    assert.equal(await page.$eval('.recall-form input[type=search]', (i) => i.value), 'complex systems');
+  }, { server: { board: emptyBoard }, launch: { headless: 'new' } });
+});
+
+test('#1689 reading.html reports an open from a recall once, only for a valid run, and never shows a failed report', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await browser.newPage();
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    const seen = await stubReading(page, { opened: 500 });
+    const url = `${server.baseUrl}/reading.html?run=${RECALL_RUN}&from=recall&post=p-with`;
+    await page.goto(url, { waitUntil: 'networkidle0' });
+    await page.waitForSelector('.claim', { timeout: 5000 });
+    assert.deepEqual(seen.opened, [{ method: 'POST', body: { run: RECALL_RUN, post: 'p-with' } }], 'one report, with the run and the post');
+    assert.equal(page.url(), url, 'the address bar is left as it is');
+    assert.ok(!/recall|report/i.test(await page.$eval('#main', (e) => e.textContent)), 'a failed report is never shown');
+
+    for (const q of [`run=run-bad&from=recall&post=p-with`, `run=${RECALL_RUN}&post=p-with`, `run=${RECALL_RUN}&from=recall`, `run=${RECALL_RUN}&from=elsewhere&post=p-with`]) {
+      await page.goto(`${server.baseUrl}/reading.html?${q}`, { waitUntil: 'networkidle0' });
+    }
+    assert.equal(seen.opened.length, 1, 'no report without a valid run, from=recall and a post');
+    assert.deepEqual(errors, []);
+  }, { server: { board: emptyBoard }, launch: { headless: 'new' } });
+});

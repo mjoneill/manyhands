@@ -128,3 +128,22 @@
 .cv-ruling-cancel { background: none; border: 1px solid var(--line); color: var(--muted); border-radius: 6px; padding: 6px 10px; font: inherit; cursor: pointer; }
 .cv-ruling-status { font-size: 12px; color: var(--muted); min-height: 1em; }
 .cv-msg.cv-ruled { border-left: 3px solid var(--accent, #7c3aed); padding-left: 8px; }
+
+/* #1689 — what the room has read, under a post that touches it. An aside, not the author's words: smaller, muted,
+   set in from a thin rule, and no taller than four lines a row (head 1, matching sentence 2, the source's own words 1).
+   The clamp is visual only: a screen reader hears all of it, the quote's tooltip holds it, and the reading page has it
+   complete. Tokens only, so it follows whatever surface it is mounted on. */
+.cv-recall { display: grid; gap: 4px; margin: 6px 0 2px; max-width: var(--measure, 65ch); min-width: 0; font-size: .8125rem; line-height: 1.45; }
+.cv-recall-item { display: block; min-width: 0; padding: 3px 8px 3px 10px; border-left: 2px solid var(--line); border-radius: 0 6px 6px 0; color: var(--muted); text-decoration: none; overflow-wrap: anywhere; }
+a.cv-recall-item:hover { background: var(--panel); border-left-color: var(--violet, var(--accent)); }
+a.cv-recall-item:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.cv-recall-head { display: flex; min-width: 0; white-space: nowrap; }
+.cv-recall-mark, .cv-recall-date { flex: none; white-space: pre; }
+.cv-recall-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-style: normal; color: var(--ink); }
+a.cv-recall-item .cv-recall-title { color: var(--link); }
+a.cv-recall-item:hover .cv-recall-title { text-decoration: underline; text-underline-offset: .18em; }
+.cv-recall-gist, .cv-recall-quote { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
+.cv-recall-gist { -webkit-line-clamp: 2; line-clamp: 2; color: var(--ink); opacity: .85; font-weight: 400; }
+.cv-recall-quote { -webkit-line-clamp: 1; line-clamp: 1; font-family: var(--serif); font-style: italic; }
+.cv-recall-quote::before { content: "\201C"; }
+.cv-recall-quote::after { content: "\201D"; }
