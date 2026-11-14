@@ -7222,7 +7222,7 @@ async function handleDecideLink(req, res, id) {
   }
 }
 
-// ── #1852 — DELIVERY: a card's proposed links handed to the seat that claims it, and to a seat the first time she reads it ──
+// ── #1852 — DELIVERY: a card's proposed links handed to the seat that claims it, and to a seat that reads it, until she answers ──
 // Nobody goes looking for a link (#1850), so the claim and the read carry a few (core/knowledge-delivery.mjs holds the rules).
 // A delivery is a courtesy on top of another answer: it never fails that answer, never changes its status, and never holds
 // it past DELIVERY_DEADLINE_MS. What it could not read it calls UNAVAILABLE; "no links" always means it looked.
@@ -7239,9 +7239,9 @@ function deliverySeat(req) {
 }
 async function readDelivery(card, actor, how) {
   const cardIri = `https://scrumboard.local/entity/${card.id}`;
-  const set = selectDeliveries(linksOfDeliveryRows(await LOGBORN.query(deliveryQuery({ card: cardIri, actor }))));
-  // a claim shows the card's set every time; a read shows only what this seat has not been shown
-  const items = how === 'get' ? firstShowings(set) : set;
+  // a claim shows the card's set every time; a read shows what this seat has not ANSWERED, so an unanswered claim is still
+  // there when she reopens the card. Only a first showing is recorded (below); a repeat says shownBefore.
+  const items = selectDeliveries(linksOfDeliveryRows(await LOGBORN.query(deliveryQuery({ card: cardIri, actor }))), { unanswered: how === 'get' });
   if (items.length === 0) return {};
   const sq = deliverySourcesQuery([...new Set(items.map((l) => l.source).filter(Boolean))]);
   const sources = sq ? sourcesOfRows(await LOGBORN.query(sq)) : new Map();
@@ -11601,11 +11601,15 @@ async function handleClaimCard(req, res, idOrShortId) {
     });
     // Outside the lock, fire-and-forget — same contract as an ordinary commons
     // post (#119): a down MCP server must never break claiming.
+    // #1852 — the claimed card's links: the read STARTS here, after the lock is released and only for a claim that succeeded,
+    // and is awaited last. The room must hear "claimed" at once, so both announcement paths fire before that wait.
+    const delivery = result.card ? roomHasRead(req, result.card, 'claim') : null;
     if (result.announced) notifyMcpOfPost(result.announced);
-    // #1852 — the claimed card's links, read here: after the lock is released, and only for a claim that succeeded
-    const d = result.card ? await roomHasRead(req, result.card, 'claim') : {};
+    // #1574 1b — never awaited, so a down executor never costs the claim. It used to follow the answer; the obligation is
+    // already durable in the claim's own write, so nothing here depends on the answer having gone out.
+    if (result.publish) publishAnnouncements(result.publish);
+    const d = delivery ? await delivery : {};
     sendJSON(res, result.status, d.block ? { ...result.payload, roomHasRead: d.block } : result.payload);
-    if (result.publish) publishAnnouncements(result.publish);   // #1574 1b — after the answer: a down executor never costs the claim
     recordShowings(d.show);
   } catch (e) {
     if (e instanceof PostSeqStateCorrupt) return sendJSON(res, 500, e.body);   // #1592

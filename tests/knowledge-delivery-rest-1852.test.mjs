@@ -7,7 +7,7 @@
  * INTERFACE PINNED HERE:
  *   POST /api/cards/:id/claim (200 only) and GET /api/cards/:id[?outline=1] (a seat only) may carry
  *     roomHasRead: { means, items: [{ link, status, gist, quote, quoteTruncated?, source: { title, url }, score,
- *                    answer: { confirm, dismiss } }], recorded?: false }
+ *                    answer: { confirm, dismiss }, shownBefore?: true }], recorded?: false }
  *                | { unavailable: <reason> }
  *   absent when there is nothing to deliver. A seat is the request's own credential (LOGBORN.actorFor), never the body's `by`.
  *   Each first showing is one scrum:LinkShowing (kind link.show), written after the answer.
@@ -16,18 +16,23 @@
  *   C2  the rules through REST: no dismissed link, one per source, at most two, confirmed first
  *   C3  a card with no links: the claim's answer is exactly what it was, with no field
  *   C4  a refused claim (409 held, 404, 400) carries no field and records nothing
- *   C5  a second claim delivers the same set again, and the graph still holds ONE showing per link
+ *   C5  a second claim delivers the same set again (now flagged shownBefore), and the graph still holds ONE showing per link
  *   C6  a claim with no bearer: the block arrives with recorded:false, and nothing is written
  *   C7  the bearer is another seat's than the body's `by`: the showing is the bearer's
  *   G1  a read with no bearer carries no field, byte for byte what a card with no links answers, and records nothing
- *   G2  a seat's first read carries the block (full and outline); it is recorded via "get"; the next read carries no field
- *   G3  a seat that was shown a link at claim is not shown it again on a read
- *   G4  a link that joins the card's two later is shown on the next read, alone
+ *   G2  a seat's first read carries the block (full and outline) and is recorded via "get"; while she has not answered, the
+ *       next read carries the same link with shownBefore:true, and no second showing is recorded
+ *   G3  a link she was shown at claim and has not answered is on her read too, with shownBefore:true
+ *   G4  a link that joins the card's two later arrives beside the one she was shown: news without the flag, the repeat with it
  *   G5  another seat's read is its own first showing
  *   G6  a read-scope key is not a seat that can be recorded: no field
+ *   G7  once she confirms a link it is gone from her reads but still on her claim; once she dismisses one it is gone from both
+ *   G8  answering one of three lets the third surface on her next read
  *   U1  the delivery read fails: the claim still answers 200 with roomHasRead.unavailable; so does a seat's read
  *   U2  the delivery read is slow: the answer goes out at the deadline saying unavailable, and nothing is recorded
  *   U3  without the log-born unit: a claim says unavailable; a read carries no field
+ *   A1  the room hears of a claim before a held delivery read lets the claim answer: the announcement is in the graph while the
+ *       claim is still waiting for its links, and the claim answers 200 saying unavailable while the read is still held
  *   R1  with auth REQUIRED the same holds: the claim carries the block and the showing is the key's seat's
  *   K1  link_counts: a delivery raises `shown` and `delivered`, never `used`, and does not make the seat a decider
  *   K2  a delivered link the seat then confirms is ONE shown link, delivered 1, used 1
@@ -70,9 +75,10 @@ const ENV = { SCRUM_ROSTER_FILE: ROSTER, SCRUM_SEAT_TOKENS: TOKENS, SCRUM_AUTH: 
 
 /** The delivery read is the one query that starts from a card's links and leaves the dismissed ones out. */
 const isDeliveryRead = (body) => body.includes(`${RS}bearsOnCard`) && body.includes('"dismissed"');
-/** A proxy in front of the executor: counts every /query, and can fail (`mode='fail'`) or hold (`mode='slow'`) the delivery read alone. */
+/** A proxy in front of the executor: counts every /query, and can fail (`mode='fail'`), slow (`mode='slow'`) or hold until told
+ *  (`hold()`) the delivery read alone. A held read lets a row assert ORDER (what happened while it was held), not elapsed time. */
 function executorProxy() {
-  const state = { queries: 0, deliveryReads: 0, mode: 'pass', holdMs: 0, server: null };
+  const state = { queries: 0, deliveryReads: 0, mode: 'pass', holdMs: 0, server: null, gate: null };
   const start = (execUrl) => new Promise((resolve) => {
     state.server = http.createServer((req, res) => {
       const chunks = []; req.on('data', (c) => chunks.push(c));
@@ -86,6 +92,7 @@ function executorProxy() {
             state.deliveryReads += 1;
             if (state.mode === 'fail') { res.writeHead(500, { 'content-type': 'text/plain' }); return res.end('injected fault'); }
             if (state.mode === 'slow') await new Promise((r) => setTimeout(r, state.holdMs));
+            if (state.mode === 'hold') { state.gate.arrived(); await state.gate.opened; }
           }
           const f = await fetch(`${execUrl}${req.url}`, { method: req.method, headers, body: req.method === 'GET' ? undefined : body });
           const t = await f.text();
@@ -95,7 +102,14 @@ function executorProxy() {
     });
     state.server.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${state.server.address().port}`));
   });
-  return { state, start, stop: () => new Promise((r) => (state.server ? state.server.close(() => r()) : r())) };
+  /** Hold the next delivery read at the executor's door: `seen` resolves when it arrives; it stays there until `release()`. */
+  const hold = () => {
+    let arrived, open; let held = true;
+    const seen = new Promise((r) => { arrived = r; }); const opened = new Promise((r) => { open = r; });
+    state.gate = { arrived, opened }; state.mode = 'hold';
+    return { seen, held: () => held, release: () => { held = false; state.mode = 'pass'; open(); } };
+  };
+  return { state, start, hold, stop: () => new Promise((r) => (state.server ? state.server.close(() => r()) : r())) };
 }
 
 let w, gc, proxy;
@@ -223,7 +237,8 @@ test('C5 a second claim delivers the same set again, and the graph still holds o
   assert.equal((await release('seat-a', card)).status, 200);
   const second = await claim('seat-a', card);
   assert.equal(second.status, 200, second.text);
-  assert.deepEqual(second.json.roomHasRead, first.json.roomHasRead, 'a claim shows the current set every time');
+  assert.equal('shownBefore' in first.json.roomHasRead.items[0], false, 'PRECONDITION: the first showing is news');
+  assert.deepEqual(second.json.roomHasRead.items, first.json.roomHasRead.items.map((i) => ({ ...i, shownBefore: true })), 'a claim shows the current set every time, and says it is a repeat');
   await settle();
   assert.equal((await showingsOf(s.link)).length, 1, 'the second showing made no second node');
 });
@@ -266,17 +281,21 @@ test('G1 a read with no bearer carries no field, byte for byte, and records noth
   assert.equal(JSON.stringify(rest), r.text, 'and apart from the block the two answers are the same bytes');
 });
 
-test('G2 a seat\'s first read carries the block; it is recorded via "get"; the next read carries no field', T, async () => {
+test('G2 a seat\'s first read carries the block and is recorded via "get"; unanswered, the next read carries it again as a repeat', T, async () => {
   const card = await newCard(); const s = await seedLink(card, { source: await seedSource() });
   const first = await call('seat-a', 'GET', `/api/cards/${card.shortId}`);
   assert.equal(first.status, 200, first.text);
   assert.deepEqual(first.json.roomHasRead.items.map((i) => i.link), [s.id]);
+  assert.equal('shownBefore' in first.json.roomHasRead.items[0], false, 'a first showing is news');
   assert.deepEqual(first.json.roomHasRead.items[0].answer.confirm.args, { link: s.id, verdict: 'confirmed', workingOn: card.shortId });
   const rows = await untilShown(s.link);
   assert.deepEqual({ to: rows[0].to.value, via: rows[0].via.value }, { to: seatActor('seat-a'), via: 'get' });
   const again = await call('seat-a', 'GET', `/api/cards/${card.shortId}`);
-  assert.equal('roomHasRead' in again.json, false, 'a re-read is not shown the same block');
-  assert.equal('roomHasRead' in (await call('seat-a', 'GET', `/api/cards/${card.shortId}?outline=1`)).json, false);
+  assert.deepEqual(again.json.roomHasRead.items.map((i) => [i.link, i.shownBefore]), [[s.id, true]], 'she has not answered it, so it is still there, marked as a repeat');
+  const outlineAgain = await call('seat-a', 'GET', `/api/cards/${card.shortId}?outline=1`);
+  assert.deepEqual(outlineAgain.json.roomHasRead.items.map((i) => [i.link, i.shownBefore]), [[s.id, true]]);
+  await settle();
+  assert.equal((await showingsOf(s.link)).length, 1, 'three reads, ONE showing: a repeat is not recorded again');
   // the outline answer delivers too, to a seat that has not been shown it
   const other = await newCard(); const o = await seedLink(other, { source: await seedSource() });
   const outline = await call('seat-a', 'GET', `/api/cards/${other.shortId}?outline=1`);
@@ -285,21 +304,27 @@ test('G2 a seat\'s first read carries the block; it is recorded via "get"; the n
   assert.equal((await untilShown(o.link))[0].via.value, 'get');
 });
 
-test('G3 a seat that was shown a link at claim is not shown it again on a read', T, async () => {
+test('G3 a link she was shown at claim and has not answered is on her read too, as a repeat', T, async () => {
   const card = await newCard(); const s = await seedLink(card, { source: await seedSource() });
   assert.equal((await claim('seat-a', card)).status, 200);
-  await untilShown(s.link);
+  const shown = await untilShown(s.link);
+  assert.equal(shown[0].via.value, 'claim');
   const r = await call('seat-a', 'GET', `/api/cards/${card.shortId}`);
-  assert.equal('roomHasRead' in r.json, false);
+  assert.deepEqual(r.json.roomHasRead.items.map((i) => [i.link, i.shownBefore]), [[s.id, true]]);
+  await settle();
+  assert.deepEqual((await showingsOf(s.link)).map((x) => x.via.value), ['claim'], 'the read recorded nothing: the claim\'s showing stands');
 });
 
-test('G4 a link that joins the card\'s two later is shown on the next read, alone', T, async () => {
+test('G4 a link that joins the card\'s two later arrives beside the one she was shown', T, async () => {
   const card = await newCard(); const s = await seedLink(card, { source: await seedSource(), score: 0.6 });
   assert.deepEqual((await call('seat-a', 'GET', `/api/cards/${card.shortId}`)).json.roomHasRead.items.map((i) => i.link), [s.id]);
   await untilShown(s.link);
   const later = await seedLink(card, { source: await seedSource(), score: 0.9 });
   const r = await call('seat-a', 'GET', `/api/cards/${card.shortId}`);
-  assert.deepEqual(r.json.roomHasRead.items.map((i) => i.link), [later.id]);
+  assert.deepEqual(r.json.roomHasRead.items.map((i) => [i.link, i.shownBefore ?? false]), [[later.id, false], [s.id, true]]);
+  await untilShown(later.link);
+  await settle();
+  assert.equal((await showingsOf(s.link)).length, 1, 'only the new link was recorded');
 });
 
 test('G5 another seat\'s read is its own first showing', T, async () => {
@@ -320,6 +345,43 @@ test('G6 a read-scope key is not a seat that can be recorded: no field', T, asyn
   assert.equal((await showingsOf(s.link)).length, 0);
   const acting = await call('seat-a', 'GET', `/api/cards/${card.shortId}`);
   assert.deepEqual(acting.json.roomHasRead.items.map((i) => i.link), [s.id], 'CONTROL: the same read with a key that may act carries the block');
+});
+
+const decide = (seat, s, verdict, card) => call(seat, 'POST', `/api/links/${s.id}/decide`, { verdict, ...(verdict === 'confirmed' ? { workingOn: card.shortId } : {}), by: seat });
+const readLinks = async (seat, card) => ((await call(seat, 'GET', `/api/cards/${card.shortId}`)).json.roomHasRead?.items ?? []).map((i) => i.link);
+/** What a claim hands her: claim, read the block, release. */
+async function claimLinks(seat, card) {
+  const r = await claim(seat, card);
+  assert.equal(r.status, 200, `PRECONDITION: ${seat} claimed the card (${r.text})`);
+  assert.equal((await release(seat, card)).status, 200);
+  return (r.json.roomHasRead?.items ?? []).map((i) => i.link);
+}
+
+test('G7 once she confirms a link it is gone from her reads but still on her claim; once she dismisses one it is gone from both', T, async () => {
+  const card = await newCard();
+  const kept = await seedLink(card, { source: await seedSource(), score: 0.9 });
+  const dropped = await seedLink(card, { source: await seedSource(), score: 0.8 });
+  assert.deepEqual(await readLinks('seat-a', card), [kept.id, dropped.id], 'PRECONDITION: unanswered, both are on her read');
+  assert.equal((await decide('seat-a', kept, 'confirmed', card)).status, 200);
+  assert.deepEqual(await readLinks('seat-a', card), [dropped.id], 'the one she confirmed is answered: gone from her reads');
+  assert.deepEqual(await claimLinks('seat-a', card), [kept.id, dropped.id], 'and still on her claim');
+  assert.equal((await decide('seat-a', dropped, 'dismissed', card)).status, 200);
+  assert.deepEqual(await readLinks('seat-a', card), [], 'both answered: her read carries nothing');
+  assert.equal('roomHasRead' in (await call('seat-a', 'GET', `/api/cards/${card.shortId}`)).json, false, 'and the field is absent, not empty');
+  assert.deepEqual(await claimLinks('seat-a', card), [kept.id], 'the one she dismissed is gone from her claim too');
+  assert.deepEqual(await readLinks('seat-b', card), [kept.id, dropped.id], 'CONTROL: another seat, who answered nothing, still reads both');
+});
+
+test('G8 answering one of three lets the third surface on her next read', T, async () => {
+  const card = await newCard();
+  const one = await seedLink(card, { source: await seedSource(), score: 0.9 });
+  const two = await seedLink(card, { source: await seedSource(), score: 0.8 });
+  const three = await seedLink(card, { source: await seedSource(), score: 0.7 });
+  assert.deepEqual(await readLinks('seat-a', card), [one.id, two.id], 'PRECONDITION: the cap holds the third back');
+  // a CONFIRM, because that link stays in the card's two for a claim: only "unanswered first, then the cap" lets the third through
+  assert.equal((await decide('seat-a', one, 'confirmed', card)).status, 200);
+  const next = await call('seat-a', 'GET', `/api/cards/${card.shortId}`);
+  assert.deepEqual(next.json.roomHasRead.items.map((i) => [i.link, i.shownBefore ?? false]), [[two.id, true], [three.id, false]]);
 });
 
 test('U1 the delivery read fails: the claim still answers 200 saying unavailable; so does a seat\'s read', T, async () => {
@@ -374,6 +436,32 @@ test('U3 without the log-born unit: a claim says unavailable; a read carries no 
   } finally { await o.stop(); }
 });
 
+test('A1 the room hears of a claim before a held delivery read lets the claim answer', T, async () => {
+  const card = await newCard(); await seedLink(card, { source: await seedSource() });
+  const announced = async () => (await q(`SELECT ?p WHERE { ?p <${RDF}type> <${SC}Comment> ; <${SC}text> ?t FILTER(CONTAINS(?t, "seat-a claimed #${card.shortId} ")) }`)).length;
+  assert.equal(await announced(), 0, 'PRECONDITION: nothing has announced this claim yet');
+  const gate = proxy.hold();
+  try {
+    let answered = false;
+    const t0 = Date.now();
+    const inflight = claim('seat-a', card).then((r) => { answered = true; return { r, ms: Date.now() - t0 }; });
+    await gate.seen;   // the claim is written and its delivery read is now held at the executor's door
+    let posted = 0; let answeredWhenPosted = null;
+    while (posted === 0 && !answered) {
+      posted = await announced(); answeredWhenPosted = answered;
+      if (posted === 0) await new Promise((x) => setTimeout(x, 10));
+    }
+    assert.equal(posted, 1, 'the claim\'s announcement reached the graph before the claim answered');
+    assert.equal(answeredWhenPosted, false, 'and the claim was still waiting for its links when it did');
+    const { r, ms } = await inflight;
+    assert.equal(gate.held(), true, 'the claim answered while the read was STILL held: the read never held it past the deadline');
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.claimed, true);
+    assert.deepEqual(Object.keys(r.json.roomHasRead), ['unavailable']);
+    assert.ok(ms >= DELIVERY_DEADLINE_MS - 50, `CONTROL: the claim did wait for the read, up to the deadline (${ms} ms)`);
+  } finally { gate.release(); }
+});
+
 test('R1 with auth required the same holds: the claim carries the block and the showing is the key\'s seat\'s', T, async () => {
   const o = await wholeBoardWorld({ logborn: true, env: { ...ENV, SCRUM_AUTH: 'required' } });
   try {
@@ -393,7 +481,7 @@ test('R1 with auth required the same holds: the claim carries the block and the 
     }
     assert.deepEqual(rows.map((x) => x.to.value), [seatActor('seat-a')]);
     const read = await callAt(o.rest.baseUrl, 'seat-a', 'GET', `/api/cards/${card.shortId}`);
-    assert.equal('roomHasRead' in read.json, false, 'and her read after the claim carries no block');
+    assert.deepEqual(read.json.roomHasRead.items.map((i) => [i.link, i.shownBefore]), [[s.id, true]], 'and her read after the claim carries it as a repeat, unanswered');
   } finally { await o.stop(); }
 });
 
@@ -448,13 +536,15 @@ test('L1 cost: a seat\'s read of a card with no links asks the executor one more
   // latency, reported: the same card read 40 times each way, and 20 cards read once each for the first showing
   const N = 40;
   const linked = await newCard(); const src = [await seedSource(), await seedSource()];
-  const l0 = await seedLink(linked, { source: src[0], score: 0.8 }); await seedLink(linked, { source: src[1], score: 0.7 });
+  const l0 = await seedLink(linked, { source: src[0], score: 0.8 }); const l1 = await seedLink(linked, { source: src[1], score: 0.7 });
   await call('seat-a', 'GET', `/api/cards/${linked.shortId}`); await untilShown(l0.link);
   const run = async (who, card) => { const xs = []; for (let i = 0; i < N; i++) xs.push((await timed(who, `/api/cards/${card.shortId}`)).ms); return p50(xs); };
   await run(null, bare);   // warm
   const base = await run(null, bare);
   const noLinks = await run('seat-a', bare);
-  const shownAlready = await run('seat-a', linked);
+  const repeat = await run('seat-a', linked);   // unanswered: delivered again on every read
+  for (const l of [l0, l1]) assert.equal((await decide('seat-a', l, 'dismissed', linked)).status, 200);
+  const answered = await run('seat-a', linked);
   const firsts = [];
   for (let i = 0; i < 20; i++) {
     const c = await newCard(); await seedLink(c, { source: src[0], score: 0.8 }); await seedLink(c, { source: src[1], score: 0.7 });
@@ -464,7 +554,8 @@ test('L1 cost: a seat\'s read of a card with no links asks the executor one more
   }
   const f = (x) => x.toFixed(2);
   console.log(`# L1 GET /api/cards/:id p50 over ${N}: no bearer ${f(base)} ms · seat, card with no links ${f(noLinks)} ms (+${f(noLinks - base)}) · `
-    + `seat, 2 links already shown ${f(shownAlready)} ms (+${f(shownAlready - base)}) · seat, first showing of 2 links (20 cards) ${f(p50(firsts))} ms (+${f(p50(firsts) - base)})`);
+    + `seat, 2 unanswered links shown again ${f(repeat)} ms (+${f(repeat - base)}) · seat, both links answered ${f(answered)} ms (+${f(answered - base)}) · `
+    + `seat, first showing of 2 links (20 cards) ${f(p50(firsts))} ms (+${f(p50(firsts) - base)})`);
   // a wide bound, to catch a delivery that started scanning rather than a slow machine
   assert.ok(noLinks - base < 250, `the no-links read stayed cheap (+${f(noLinks - base)} ms at p50)`);
 });
