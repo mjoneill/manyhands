@@ -514,9 +514,9 @@ test('#1839 R12 — a predicate in plain words ("enables", "is_defined_as") is a
 
 test('#1839 R12b — what is neither a known prefixed term nor one plain word is still bad-shape: unknown prefix, extra colon, spaces, empty, leading digit', { skip: SKIP }, async () => {
   const src = ingestSource({ text: FIXTURE, url: FIXTURE_URL });
-  // #1900: 'is part of' left this list: a short phrase is now a proposed predicate (R12e). A phrase past the word cap, or
-  // with a word that is not a plain word, is still junk.
-  const junk = ['foo:bar', 'scrum:a:b', '', '9lives', 'one two three four five six seven eight nine', 'is part of 9lives', 'is  part:of'];
+  // #1900: 'is part of' left this list: a short phrase is now a proposed predicate (R12e). A phrase past the word cap, one
+  // with a word that is not a plain word, or one that does not START with a plain word, is still junk.
+  const junk = ['foo:bar', 'scrum:a:b', '', '9lives', 'one two three four five six seven eight nine', 'is part:of', '3x faster than', 'is part (of)'];
   const { extractor } = extractorWith({ model: fakeModel([reply(...junk.map((p) => item(1, 'definition', 'A harness is the layer between a model and the world.', 'harness', p, 'layer')))]) });
   const r = await extractor.run({ source: src, modelKey: 'fake-a', prompt: 'p' });
   assert.equal(r.published.length, 0, `nothing published (${JSON.stringify(r.published)})`);
@@ -540,6 +540,16 @@ test('#1900 R12e — a short phrase predicate ("finds jailbreaks in") is a PROPO
   const row = await q(`SELECT ?pp ?span WHERE { <${r.published[0].iri}> <${RS}proposedPredicate> ?pp ; <${RS}anchorText> ?span }`);
   assert.equal(row[0]?.pp?.value, 'finds_jailbreaks_in', 'the graph keeps the joined phrase as the literal');
   assert.equal(row[0]?.span?.value, span, 'the span is the verbatim one: only the label was joined');
+});
+
+test('#1900 R12f — any run of whitespace separates the words, and a word after the first may start with a digit or hold an apostrophe ("is 3x faster than", "doesn\'t reduce"): kept, joined', { skip: SKIP }, async () => {
+  const src = ingestSource({ text: FIXTURE, url: FIXTURE_URL });
+  const cases = [['is  part of', 'is_part_of'], ['scales\twith', 'scales_with'], ['is 3x faster than', 'is_3x_faster_than'], ["doesn't reduce", "doesn't_reduce"], ['beats 23 of 24', 'beats_23_of_24']];
+  const span = 'A harness is the layer between a model and the world.';
+  const { extractor } = extractorWith({ model: fakeModel([reply(...cases.map(([p]) => item(1, 'empirical', span, 'harness', p, 'layer')))]) });
+  const r = await extractor.run({ source: src, modelKey: 'fake-a', prompt: 'p' });
+  assert.equal(r.rejected.length, 0, `nothing rejected (${JSON.stringify(r.rejected.map((x) => x.detail))})`);
+  assert.deepEqual(r.published.map((x) => x.proposedPredicate), cases.map(([, j]) => j));
 });
 
 test('#1839 R12c — the model is told the registered predicates it was handed, and to use one plain word when none fits', { skip: SKIP }, async () => {

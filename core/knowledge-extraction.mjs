@@ -52,15 +52,17 @@ const PREFIXES = Object.freeze({
 const TERM_RE = /^(scrum|schema|prov|rdf):[A-Za-z][A-Za-z0-9_-]*$/;
 /** One plain word (#1839): the model's own name for a relation, kept as a proposed predicate (decision 4cfd9497). */
 const WORD_RE = /^[A-Za-z][A-Za-z0-9_-]*$/;
-/** #1900: a short phrase of plain words ("finds jailbreaks in") is the same proposal, joined into one word with "_". */
+/** #1900: a short phrase ("finds jailbreaks in", any whitespace between words) is the same proposal, joined with "_". */
 export const PHRASE_MAX_WORDS = 8;
+/** A phrase's words may hold an apostrophe ("doesn't"), and a word after the first may start with a digit ("3x", "23"); the first starts with a letter. */
+const PHRASE_WORD_RE = /^[A-Za-z0-9][A-Za-z0-9_'-]*$/;
 /** The model's predicate as the term the graph keeps: a prefixed term or one plain word as given, a short phrase of plain
  *  words joined with "_", anything else null (bad-shape). Only the LABEL is joined: the span, subject and object are untouched. */
 export function predicateTerm(p) {
   if (typeof p !== 'string') return null;
   if (TERM_RE.test(p) || WORD_RE.test(p)) return p;
-  const words = p.trim().split(' ');
-  return words.length <= PHRASE_MAX_WORDS && words.every((w) => WORD_RE.test(w)) ? words.join('_') : null;
+  const [first, ...rest] = p.trim().split(/\s+/);
+  return rest.length < PHRASE_MAX_WORDS && /^[A-Za-z]/.test(first) && PHRASE_WORD_RE.test(first) && rest.every((w) => PHRASE_WORD_RE.test(w)) ? [first, ...rest].join('_') : null;
 }
 
 export class PredicateRefused extends Error {
