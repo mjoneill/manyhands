@@ -8,6 +8,10 @@
  *
  * Pure text here; the caller posts it. createAnnouncer wraps a `post(body)` so that a report can NEVER fail a job: a
  * post that throws comes back as { ok:false, error }, and the caller counts it.
+ *
+ * #1852 (supply): the extractor links each run it publishes to our cards (core/knowledge-linking-supply.mjs), and the end
+ * post is where a person first sees that. It shows the few strongest proposed links, counts the rest, and points at the
+ * run's readable page. A run whose links could not be made says so, with the reason.
  */
 import { conceptIri } from './knowledge-extraction.mjs';
 
@@ -61,7 +65,50 @@ export function startBody({ url, modelKey, jobId, resumed = false }) {
   return `🧪 extraction ${resumed ? 'resuming' : 'started'}: ${url}\nmodel ${modelKey} · job ${jobId}${resumed ? ' (from its last checkpoint: the model is not asked again)' : ''} (#1862)`;
 }
 
-export function finishBody({ url, result }) {
+const LINKS_SHOWN = 3;
+const TITLE_MAX = 60;
+const GIST_MAX = 160;
+const REASON_MAX = 200;
+const oneLine = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+const cut = (s, max) => { const t = oneLine(s); return t.length > max ? `${t.slice(0, max).trimEnd()}…` : t; };
+
+/**
+ * #1852 — the "may bear on" lines for one run, from what the linking step returned (null: the run was not linked, add nothing).
+ * A card is shown once, by its strongest link, and the claim is shown by its GIST: the subject—verb→object triple is already
+ * on the edge lines, and it is the gist that was searched. The total is always stated, so three lines never read as "three
+ * links". Zero is said with the threshold and the number of claims searched, and a run that could not be linked says "not
+ * made" with its reason: "no link" must never be able to mean "never searched" (#1851).
+ */
+function linkLines(links) {
+  if (!links || typeof links !== 'object') return [];
+  if (links.made !== true) return [`links: not made (${cut(links.reason, REASON_MAX) || 'no reason given'})`];
+  const all = Array.isArray(links.links) ? links.links : [];
+  if (all.length === 0) {
+    const at = `at or above ${links.minScore}`;
+    if (links.skipped > 0) return [`links: no new ones; ${plural(links.skipped, 'match', 'matches')} ${at} already had a link (proposed, confirmed or dismissed)`];
+    return [`links: none of the ${plural(links.assertions ?? 0, 'claim')} matched a card ${at} (every claim was searched)`];
+  }
+  const out = [];
+  const cards = new Set();
+  for (const l of [...all].sort((a, b) => b.score - a.score)) {
+    if (cards.has(l.card)) continue;
+    cards.add(l.card);
+    if (out.length >= LINKS_SHOWN) continue;   // keep counting the cards; show only the first few
+    const what = [l.shortId != null ? `#${l.shortId}` : '', cut(l.title, TITLE_MAX)].filter(Boolean).join(' ');
+    out.push(`🔗 may bear on ${what || 'a card'}: "${cut(l.gist, GIST_MAX)}"`);
+  }
+  out.push(`${plural(all.length, 'proposed link')} to ${plural(cards.size, 'card')} (machine guesses; answer them with link_decide)`);
+  return out;
+}
+
+/**
+ * #1852 — where a person reads the run: a page on this board, named by the last segment of the run IRI. It is a PATH, as
+ * plain text: the commons renders bold, italic, lists and #NNN card links and nothing else (core/render.mjs), and nothing in
+ * the code knows the board's public address, so there is no form of this that would be a link there today.
+ */
+const readingPath = (runId) => `/reading.html?run=${encodeURIComponent(String(runId).split('/').pop())}`;
+
+export function finishBody({ url, result, links = null }) {
   const published = Array.isArray(result?.published) ? result.published : [];
   const rejected = Array.isArray(result?.rejected) ? result.rejected : [];
   const outcome = result?.outcome ?? 'unknown';
@@ -95,9 +142,11 @@ export function finishBody({ url, result }) {
     const why = typeof result?.stopReason === 'string' ? `"${result.stopReason}"` : 'no finish reason';
     lines.push(`⚠️ the model's answer did not finish (${why}), so none of it was used. This is not "the source had nothing more to say".`);
   }
+  lines.push(...linkLines(links));
   if (result?.runId) {
     lines.push(`run ${result.runId}`);
     lines.push(`open it with graph_query: ${ofRunQuery(result.runId)}`);
+    if (links) lines.push(`read it on the board: ${readingPath(result.runId)}`);
   }
   lines.push('(#1862)');
   return lines.join('\n');
