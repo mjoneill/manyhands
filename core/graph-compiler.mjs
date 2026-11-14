@@ -528,7 +528,7 @@ export function staticCheck(sparql, opId) {
 // =====================================================================================
 
 export const RECORD_V = 2;   // 2: memory.revise records the identity it replaces (a MemoryRevision node)
-export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create', 'card.write', 'entity.put', 'origin.prepare', 'refusal.record', 'extraction.publish', 'link.propose', 'link.decide', 'link.show']);
+export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create', 'card.write', 'entity.put', 'origin.prepare', 'refusal.record', 'extraction.publish', 'link.propose', 'link.decide', 'link.show', 'recall.offer', 'recall.open', 'recall.read']);
 
 const RS = 'https://scrumboard.local/ns#';
 const RSC = 'https://schema.org/';
@@ -589,6 +589,11 @@ export const LOGBORN_TERMS = Object.freeze({
   LinkDecision: `${RS}LinkDecision`, ofLink: `${RS}ofLink`, linkVerdict: `${RS}linkVerdict`, workingOn: `${RS}workingOn`,
   // #1852 — the first time a link was put in front of a seat (core/knowledge-delivery.mjs), at <link>/shown/<sha256(actor)>
   LinkShowing: `${RS}LinkShowing`, shownTo: `${RS}shownTo`, shownOn: `${RS}shownOn`, shownVia: `${RS}shownVia`,
+  // #1689 — ambient recall (core/knowledge-recall.mjs): a reading a room post was offered, at recall/<sha256(post, source)>; an
+  // opening of one, at <offer>/opened/<sha256(actor)>; a seat's read of a post that carried one, at recall/read/<sha256(post, actor)>
+  RecallOffer: `${RS}RecallOffer`, offerOn: `${RS}offerOn`, offeredSource: `${RS}offeredSource`,
+  RecallOpening: `${RS}RecallOpening`, ofOffer: `${RS}ofOffer`, openedBy: `${RS}openedBy`, openedVia: `${RS}openedVia`,
+  RecallRead: `${RS}RecallRead`, readOf: `${RS}readOf`, readBy: `${RS}readBy`,
 });
 const TM = LOGBORN_TERMS;
 
@@ -616,6 +621,9 @@ const RECORD_FIELDS = {
   'link.propose': ['links', 'at'],          // #1851 — one linking run's proposed BearsOn links, every claim and card checked, in ONE update
   'link.decide': ['link', 'verdict', 'decision', 'workingOn', 'retiresWith', 'at'],   // #1851 — a seat's verdict on one link: one LinkDecision appended; #1852 — the status replaced by a confirm, or by a dismiss that names another seat's
   'link.show': ['showings', 'card', 'how', 'at'],   // #1852 — the links one answer showed a seat for the first time, one LinkShowing each, in ONE update
+  'recall.offer': ['post', 'offers', 'at'],   // #1689 — the readings one room post was offered, one RecallOffer per source, in ONE update
+  'recall.open': ['opening', 'offer', 'via', 'at'],   // #1689 — one offer opened, by a seat or by a browser with no seat
+  'recall.read': ['read', 'post', 'at'],      // #1689 — a seat read a post that carried an offer
 };
 
 // #1762 S1b — the record kinds whose write records ONE ChangeActivity (part 0) when the intention carries `history`. The
@@ -880,6 +888,41 @@ function canonicalizeRecord(i) {
     if (showings.length === 0) fail('a link.show carries at least one showing');
     if (new Set(showings.map((x) => x.link)).size !== showings.length) fail('a link.show names each link once');
     record = { showings, card: checkIri(i.card, 'card'), how: i.how, at: rStr(i.at, 'at') };
+  } else if (i.kind === 'recall.offer') {
+    // #1689 — one node per (post, source): the IRI is derived from both (core/knowledge-recall.mjs offerIri) and checked here,
+    // so a retry after a write that did land names the same node and is refused, never doubled. A post is a schema:Comment at
+    // entity/<id>, which the plan checks; the post itself is never rewritten.
+    const post = checkIri(i.post, 'post');
+    if (!post.startsWith(ENTITY_IRI)) fail(`post must be a post's entity IRI (${ENTITY_IRI}<id>)`);
+    const unit = (v, what) => { if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1) fail(`${what}: a score is a number in [0, 1]`); return v; };
+    const offers = rList(i.offers, 'offers', (x, what) => {
+      const o = obj(x, ['iri', 'source', 'assertion', 'score', 'bar'], what);
+      const source = checkIri(o.source, `${what}.source`);
+      const iri = checkIri(o.iri, `${what}.iri`);
+      if (iri !== `https://scrumboard.local/recall/${createHash('sha256').update(`${post}\n${source}`).digest('hex')}`) fail(`${what}.iri must be recall/<sha256(post "\\n" source)>`);
+      const score = unit(o.score, `${what}.score`); const bar = unit(o.bar, `${what}.bar`);
+      if (score < bar) fail(`${what}.score is below its bar: an offer is made only above it`);
+      return { iri, source, assertion: checkIri(o.assertion, `${what}.assertion`), score: String(score), bar: String(bar) };
+    });
+    if (offers.length === 0) fail('a recall.offer carries at least one offer');
+    if (new Set(offers.map((o) => o.source)).size !== offers.length) fail('a recall.offer names each source once');
+    record = { post, offers, at: rStr(i.at, 'at') };
+  } else if (i.kind === 'recall.open') {
+    // #1689 — one node per (offer, opener), derived and checked. `via` says plainly whether a seat opened it or a browser with no
+    // seat did (the board's own identity stands for that browser).
+    const offer = checkIri(i.offer, 'offer');
+    if (!/^https:\/\/scrumboard\.local\/recall\/[0-9a-f]{64}$/.test(offer)) fail('offer must be a recall/<sha256> IRI');
+    const opening = checkIri(i.opening, 'opening');
+    if (opening !== `${offer}/opened/${createHash('sha256').update(actor).digest('hex')}`) fail('opening must be <offer>/opened/<sha256(actor)>');
+    if (!['seat', 'browser'].includes(i.via)) fail('via must be seat or browser');
+    record = { opening, offer, via: i.via, at: rStr(i.at, 'at') };
+  } else if (i.kind === 'recall.read') {
+    // #1689 — one node per (post, seat), derived and checked: a re-read names the same node and is refused.
+    const post = checkIri(i.post, 'post');
+    if (!post.startsWith(ENTITY_IRI)) fail(`post must be a post's entity IRI (${ENTITY_IRI}<id>)`);
+    const read = checkIri(i.read, 'read');
+    if (read !== `https://scrumboard.local/recall/read/${createHash('sha256').update(`${post}\n${actor}`).digest('hex')}`) fail('read must be recall/read/<sha256(post "\\n" actor)>');
+    record = { read, post, at: rStr(i.at, 'at') };
   } else if (i.kind === 'post.create') {
     // #1574 C3c — every field comes from the outbox entry's frozen payload plus the two values the server fixed once
     // at the first publish attempt (publicationAt, postSeq). All of it is in `record`, so all of it is digest-covered.
@@ -1250,6 +1293,32 @@ function planRecord(c) {
       add(x.iri, TM.shownOn, I(R.card)); add(x.iri, TM.shownVia, L(R.how));
       add(x.iri, TM.dateCreated, L(R.at)); add(x.iri, TM.recordedBy, ref(c.opId));
     }
+  } else if (c.kind === 'recall.offer') {
+    // #1689 — every offer is fresh; the post must be a live schema:Comment (a redacted post is offered nothing), each claim a
+    // scrum:Assertion and each source a scrum:SourceVersion. One failing offer refuses the whole update. The post is not touched.
+    target = null;
+    pre.push(`    ${I(R.post)} ${I(TM.type)} ${I(TM.Comment)} .`);
+    for (const o of R.offers) {
+      fresh.push(o.iri);
+      pre.push(`    ${I(o.assertion)} ${I(TM.type)} ${I(TM.Assertion)} .`, `    ${I(o.source)} ${I(TM.type)} ${I(TM.SourceVersion)} .`);
+      add(o.iri, TM.type, I(TM.RecallOffer)); add(o.iri, TM.offerOn, I(R.post)); add(o.iri, TM.offeredSource, I(o.source));
+      add(o.iri, TM.fromAssertion, I(o.assertion)); add(o.iri, TM.score, L(o.score)); add(o.iri, TM.minScore, L(o.bar));
+      add(o.iri, TM.dateCreated, L(R.at)); add(o.iri, TM.wasAssociatedWith, I(c.actor)); add(o.iri, TM.recordedBy, ref(c.opId));
+    }
+  } else if (c.kind === 'recall.open') {
+    target = null;
+    pre.push(`    ${I(R.offer)} ${I(TM.type)} ${I(TM.RecallOffer)} .`);
+    fresh.push(R.opening);
+    add(R.opening, TM.type, I(TM.RecallOpening)); add(R.opening, TM.ofOffer, I(R.offer)); add(R.opening, TM.openedBy, I(c.actor));
+    add(R.opening, TM.openedVia, L(R.via)); add(R.opening, TM.dateCreated, L(R.at)); add(R.opening, TM.recordedBy, ref(c.opId));
+  } else if (c.kind === 'recall.read') {
+    // a read is counted only for a post that carries at least one offer: "noticed" is measured against "carried"
+    target = null;
+    pre.push(`    ${I(R.post)} ${I(TM.type)} ${I(TM.Comment)} .`,
+      `    FILTER EXISTS { ?rr_o ${I(TM.type)} ${I(TM.RecallOffer)} . ?rr_o ${I(TM.offerOn)} ${I(R.post)} }`);
+    fresh.push(R.read);
+    add(R.read, TM.type, I(TM.RecallRead)); add(R.read, TM.readOf, I(R.post)); add(R.read, TM.readBy, I(c.actor));
+    add(R.read, TM.dateCreated, L(R.at)); add(R.read, TM.recordedBy, ref(c.opId));
   } else if (c.kind === 'post.create') {
     const P = R.post; target = null;   // a create: the post IRI must be fresh
     dispatchHold = `${P.mutationId}:${P.slot}`;   // #1749 A8: the announcement is a dispatch of this obligation

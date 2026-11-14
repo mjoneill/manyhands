@@ -2776,6 +2776,9 @@ export const EXECUTOR_ONLY_VOCABULARY = new Set([
   'scrum:LinkDecision', 'scrum:ofLink', 'scrum:linkVerdict', 'scrum:workingOn',
   // #1852 — the first time a link was delivered to a seat (core/knowledge-delivery.mjs, kind link.show)
   'scrum:LinkShowing', 'scrum:shownTo', 'scrum:shownOn', 'scrum:shownVia',
+  // #1689 — ambient recall's records (core/knowledge-recall.mjs, kinds recall.offer, recall.open, recall.read)
+  'scrum:RecallOffer', 'scrum:offerOn', 'scrum:offeredSource', 'scrum:RecallOpening', 'scrum:ofOffer', 'scrum:openedBy', 'scrum:openedVia',
+  'scrum:RecallRead', 'scrum:readOf', 'scrum:readBy',
 ]);
 // the executor gate's own set: graph_query on the executor is judged against it, and so is the vocabulary drift the
 // executor route reports (#1645), so the two can never disagree about which terms are known

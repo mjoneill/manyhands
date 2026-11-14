@@ -102,6 +102,9 @@ const NOT_HISTORY = ['person.import', 'post.import', 'delivery.import', 'origin.
   // #1852: link.show records that a seat was SHOWN a link, as its own scrum:LinkShowing node (seat, link, card, way, time); it
   // changes no card and no link, so there is nothing for a ChangeActivity to describe
   'link.show',
+  // #1689: recall.offer / recall.open / recall.read are each their own node (offer, opening, read) with actor and time; they change
+  // no card, column or collection, so there is nothing for a ChangeActivity to describe
+  'recall.offer', 'recall.open', 'recall.read',
   'extraction.publish', 'link.propose', 'link.decide'];   // #1851: link.propose is a MACHINE proposal carrying its own provenance (actor, op, model, query) like extraction.publish; link.decide appends its own scrum:LinkDecision node (seat, verdict, workingOn, time), which IS that link's history, so no ChangeActivity duplicates it. Then: migrations (the projected past), the two-phase prepare (the origin COMMIT's activity is its card.write's), and a refusal's audit record (S2: content-free, never a ChangeActivity; its rows are in refusal-record-s2-1762)
 
 const UNITS = { SCRUM_GRAPH_UNIT_CARDS: '1', SCRUM_GRAPH_UNIT_COLUMNS: '1', SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_GRAPH_UNIT_LOGBORN: '1', SCRUM_GRAPH_UNIT_SMALLKINDS: '1', SCRUM_GRAPH_UNIT_DELIVERIES: '1' };

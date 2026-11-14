@@ -74,6 +74,16 @@ export function claimsQuery(id) {
     + `OPTIONAL { ?a <${T.gist}> ?gist } OPTIONAL { ?a <${T.anchorText}> ?span } }`;
 }
 
+/**
+ * #1689 — every claim of every extraction run, with what ambient recall shows beside a post: the gist and quote it matched,
+ * the run (for the reading page), the source's title and url, and when the run finished. One row per claim and report.
+ */
+export function recallClaimsQuery() {
+  return `SELECT ?a ?gist ?span ?r ?src ?name ?url ?at WHERE { ?a a <${T.Assertion}> ; <${T.ofRun}> ?r . ?r <${T.op}> "extract" ; <${T.used}> ?src `
+    + `OPTIONAL { ?a <${T.gist}> ?gist } OPTIONAL { ?a <${T.anchorText}> ?span } OPTIONAL { ?src <${T.name}> ?name } OPTIONAL { ?src <${T.url}> ?url } `
+    + `OPTIONAL { ?rep a <${T.ExtractionReport}> ; <${T.ofRun}> ?r ; <${T.at}> ?at } }`;
+}
+
 /** Every link from one run's claims to a card. */
 export function claimLinksQuery(id) {
   return `SELECT ?l ?a ?c ?st ?sc WHERE { ?a <${T.ofRun}> <${runIri(id)}> ; a <${T.Assertion}> . `

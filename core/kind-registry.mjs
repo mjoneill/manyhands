@@ -207,6 +207,30 @@ export const KIND_DECLARATIONS = Object.freeze([
       + 'the IRI is derived from both, so a re-read names the same node and is refused, and the count of what a seat was shown '
       + '(#1850) is a count of links, never of reads. Being shown is not a verdict: the link\'s status is untouched.',
   },
+  // #1689 — ambient recall: three compiler kinds, each a small node of its own; never a rewrite of the post. Executor-only.
+  {
+    name: 'scrum:RecallOffer', eventKind: null, collection: null,
+    createdBy: 'implicitly, after a room post by a person or a seat is answered, when it touches a reading (compiler kind recall.offer)',
+    definition: 'A READING A ROOM POST WAS OFFERED, by meaning, without anyone asking: at recall/<sha256 of the post and the '
+      + 'source>, `scrum:offerOn` the post, `scrum:offeredSource` the scrum:SourceVersion, `scrum:fromAssertion` the claim whose '
+      + 'gist matched, `scrum:score` and the `scrum:minScore` bar it cleared, `schema:dateCreated`, and `prov:wasAssociatedWith` '
+      + 'the board itself (never the post\'s author). ONE per post and source, so a retry can never double it. The post carries '
+      + 'it as `recall` only once this node exists. Not a room endorsement: a pointer the reader may choose to follow.',
+  },
+  {
+    name: 'scrum:RecallOpening', eventKind: null, collection: null,
+    createdBy: 'POST /api/recall/opened, from the reading page opened from an offer (compiler kind recall.open)',
+    definition: 'AN OFFER WAS OPENED: at <offer>/opened/<sha256 of the opener>, `scrum:ofOffer`, `scrum:openedBy` and '
+      + '`scrum:openedVia`: "seat" when an authenticated seat opened it, "browser" when a page with no seat did (the board '
+      + 'stands for it, so all such openings of one offer are one node). A re-open adds nothing.',
+  },
+  {
+    name: 'scrum:RecallRead', eventKind: null, collection: null,
+    createdBy: 'implicitly, by a seat\'s read of one post (GET /api/conversations/:id) that carries an offer (compiler kind recall.read)',
+    definition: 'A SEAT READ A POST THAT CARRIED A READING: at recall/read/<sha256 of the post and the seat>, `scrum:readOf` the '
+      + 'post, `scrum:readBy` the seat, `schema:dateCreated`. ONE per post and seat. It tells "carried" (an offer) from '
+      + '"noticed" (a read) from "opened" (an opening). The list is not a read; a read with no credential is not attributed.',
+  },
   // ── decisions and their scaffolding ───────────────────────────────────────
   {
     name: 'scrum:Decision', eventKind: 'decision', collection: null,

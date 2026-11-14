@@ -1,0 +1,7 @@
+{
+  "minScore": 0.62,
+  "maxItems": 2,
+  "quietPosts": 20,
+  "minChars": 80,
+  "deadlineMs": 5000
+}
