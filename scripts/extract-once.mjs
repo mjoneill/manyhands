@@ -13,7 +13,10 @@
  * #1852: a run that published is then LINKED to our cards (the board's own meaning search, no paid call), and its finish
  * post shows the strongest proposed links. The threshold is read from the tracked knowledge-linking.json at the repo root,
  * never from this environment, and it has no default: a missing or refused file means the run is not linked and the post
- * says so. Linking never fails a run; scripts/link-run.mjs links one by hand afterwards.
+ * says so. Linking never fails a run. A run whose search or graph did not answer is tried again by the next ticks (three
+ * tries in all, at most two retries per tick): it waits in the state file as `pendingLinks`, and ends with one follow-up
+ * post, its links or one line saying they were not made. The JSON line carries `linkRetries` and `pendingLinks`.
+ * scripts/link-run.mjs links a run by hand.
  *
  * A link is extracted once. If its job FAILED, a sharer re-posts it with the word "re-run" in the same post, and the
  * next tick makes one fresh attempt (job id `.r1`, then `.r2`, at most 3) whose summary names the failed run (#1841).

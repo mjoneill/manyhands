@@ -17,6 +17,8 @@
  *
  * #1852: the run is then linked to our cards exactly as a link's run is (core/knowledge-linking-supply.mjs), at the threshold
  * in the tracked knowledge-linking.json. The summary's `links` says what was proposed, or why linking was not done.
+ * This script runs once and has no state file (the tick's SCRUM_EXTRACT_STATE_FILE is not read here, and two writers of that
+ * file would race), so a refused linking is NOT retried: the finish post gives the scripts/link-run.mjs command instead.
  */
 import fs from 'node:fs';
 import { createGraphClient } from '../core/graph-client.mjs';

@@ -5,7 +5,9 @@
  *
  *   createRunLinker({ graphClient, boardUrl, token, actor, configFile?, search?, model? }) → link(result)
  *     { made:true, minScore, perAssertion, k, assertions, proposed, skipped, links:[{ card, shortId, title, score, gist, assertion }] }
- *     { made:false, reason }       config refused, search refused, graph unreadable, write refused, or no claim was read
+ *     { made:false, reason, retryable, minScore? }   retryable:false is a refused config; true is a search or a graph that
+ *                                  did not answer, a refused write, or no claim read (a tick tries those again: see
+ *                                  knowledge-linking-retry-1852.test.mjs)
  *   linkPublished(link, result) → null when there is no linker or the run published nothing; else link's answer. NEVER throws.
  *   linkSummary(links) → the short form for the tick's JSON line
  *
@@ -160,7 +162,7 @@ test('W2 search refused: the run stays published and complete, nothing is writte
   assert.equal(await linksOfRun(s.started[0].runId), 0);
   assert.deepEqual(t.events.map((e) => e.kind), ['start', 'finish']);
   const line = finishBody(t.events[1]).split('\n').find((l) => l.startsWith('links:'));
-  assert.match(line, /^links: not made \(search unavailable for .*embedder unavailable\)$/);
+  assert.match(line, /^links: not made yet \(search unavailable for .*embedder unavailable\); the next ticks retry, up to 3 tries$/, 'a refused search is retried by later ticks (the retry rows are in knowledge-linking-retry-1852)');
   assert.match(finishBody(t.events[1]), /^✅ extraction finished \(complete\)/, 'the run is reported as the run it was');
 });
 
@@ -170,7 +172,7 @@ test('W2b the graph could not be read for the linker: not made, with that reason
   const t = await intakeWith({ link: linkerFor(w, { graphClient: blind }) });
   const s = await t.intake.tick();
   assert.equal(s.started[0].outcome, 'complete');
-  assert.deepEqual(s.started[0].links, { made: false, reason: 'the run\'s claims could not be read: executor not answering' });
+  assert.deepEqual(s.started[0].links, { made: false, reason: 'the run\'s claims could not be read: executor not answering', willRetry: true });
   assert.deepEqual(w.asked, [], 'nothing was searched');
 });
 
@@ -179,8 +181,8 @@ test('W2c a linker that throws cannot fail a published run', { skip: SKIP }, asy
   const s = await t.intake.tick();
   assert.equal(s.started.length, 1); assert.deepEqual(s.failed, []);
   assert.equal(s.started[0].outcome, 'complete');
-  assert.deepEqual(s.started[0].links, { made: false, reason: 'the linking step failed: boom' });
-  assert.match(finishBody(t.events[1]), /^links: not made \(the linking step failed: boom\)$/m);
+  assert.deepEqual(s.started[0].links, { made: false, reason: 'the linking step failed: boom', willRetry: true });
+  assert.match(finishBody(t.events[1]), /^links: not made yet \(the linking step failed: boom\); the next ticks retry, up to 3 tries$/m);
 });
 
 test('W3 a missing or invalid config: nothing is searched, the reason names the file, and no number stands in', { skip: SKIP }, async () => {
@@ -261,12 +263,12 @@ test('W8 a published run whose claims the graph does not return was not searched
   const w = await cardsAndSearch();
   const link = linkerFor(w);
   const r = await linkPublished(link, { runId: `https://scrumboard.local/activity/run-absent-${crypto.randomUUID()}`, outcome: 'complete', published: [{ iri: 'urn:x:1' }] });
-  assert.deepEqual(r, { made: false, reason: 'the graph returned no claims for this run, so nothing was searched' });
+  assert.deepEqual(r, { made: false, reason: 'the graph returned no claims for this run, so nothing was searched', retryable: true, minScore: 0.6 });
   assert.deepEqual(w.asked, []);
   // and the two cases where there is nothing to link at all
   assert.equal(await linkPublished(link, { runId: 'https://scrumboard.local/activity/run-x', outcome: 'failed', published: [] }), null);
   assert.equal(await linkPublished(null, { runId: 'https://scrumboard.local/activity/run-x', outcome: 'complete', published: [{ iri: 'urn:x:1' }] }), null);
-  assert.deepEqual(linkSummary({ made: false, reason: 'r' }), { made: false, reason: 'r' });
+  assert.deepEqual(linkSummary({ made: false, reason: 'r' }), { made: false, reason: 'r', willRetry: false });
 });
 
 // ── the named-file path (#1854): the same helper, so the rows are about the wiring, with a fake extractor as in its own tests ──
@@ -317,7 +319,7 @@ test('X1 a named file is linked through the same helper; a throwing linker does 
     const d2 = path.join(d, 'other'); fs.mkdirSync(d2);
     const out2 = await extractFile({ ...args, extractor: fakeExtractor(), sourcesDir: path.join(d2, 's'), link: async () => { throw new Error('boom'); } });
     assert.equal(out2.outcome, 'complete');
-    assert.deepEqual(out2.links, { made: false, reason: 'the linking step failed: boom' });
+    assert.deepEqual(out2.links, { made: false, reason: 'the linking step failed: boom', willRetry: false }, 'a named file has no tick to retry it');
 
     const out3 = await extractFile({ ...args, extractor: fakeExtractor(), sourcesDir: path.join(d2, 's3'), link: undefined });
     assert.equal('links' in out3, false, 'no linker: the summary is as before');

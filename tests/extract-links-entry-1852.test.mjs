@@ -12,7 +12,9 @@
  *       the run's proposed links at the shipped threshold (0.6), by the extractor; the finish post in the commons names
  *       each card with the claim's gist, the total, and the run's page. The claim no card matches gets no link.
  *   E2  the same entry against a board whose search cannot answer (no embedder): exit 0, the run is published and complete,
- *       the JSON line and the finish post both say the links were NOT made and why, and no link is written
+ *       the JSON line and the finish post both say the links are not made YET and why, and no link is written. The next two
+ *       launches retry it (the state file carries it between launches); the third try posts the one final line; a fourth
+ *       launch tries nothing
  *   E3  extract-file.mjs, one named PDF: the same linking, through the same helper, in its summary and its finish post
  */
 import { test, before, after } from 'node:test';
@@ -174,8 +176,27 @@ test('E2 a board whose search cannot answer: the run is published and complete, 
   const fin = (await posts(DEAF)).filter((p) => p.author === 'extractor').pop().body;
   assert.match(fin, /^✅ extraction finished \(complete\)/);
   const line = fin.split('\n').find((l) => l.startsWith('links:'));
-  assert.match(line, /^links: not made \(search unavailable for .*no embedder is configured/);
+  assert.match(line, /^links: not made yet \(search unavailable for .*no embedder is configured.*\); the next ticks retry, up to 3 tries$/);
   assert.doesNotMatch(fin, /🔗|proposed links/);
+  assert.equal(job.links.willRetry, true); assert.equal(summary.pendingLinks, 1);
+
+  // the retries, launch by launch: the state file is all that carries them
+  const again = async () => { const r = await run(ONCE, [], envFor(DEAF, 'e2')); assert.equal(r.status, 0, r.stderr.slice(0, 800)); return JSON.parse(r.stdout.trim().split('\n').pop()); };
+  const before = (await posts(DEAF)).filter((p) => p.author === 'extractor').length;
+  const s2 = await again();
+  assert.deepEqual(s2.linkRetries.map((x) => [x.runId, x.try, x.made, x.gaveUp]), [[job.runId, 2, false, false]]);
+  assert.equal(s2.pendingLinks, 1);
+  assert.equal((await posts(DEAF)).filter((p) => p.author === 'extractor').length, before, 'a refused retry that will be tried again posts nothing');
+  const s3 = await again();
+  assert.deepEqual(s3.linkRetries.map((x) => [x.runId, x.try, x.made, x.gaveUp]), [[job.runId, 3, false, true]]);
+  assert.equal(s3.pendingLinks, 0);
+  const mine = (await posts(DEAF)).filter((p) => p.author === 'extractor');
+  assert.equal(mine.length, before + 1, 'one final line');
+  assert.match(mine.pop().body, new RegExp(`^⚠️ links not made after 3 tries: .*shipping-again \\(search unavailable for .*\\); make them by hand: scripts/link-run\\.mjs --run ${job.runId} --min-score 0\\.6 \\(#1852\\)$`));
+  const s4 = await again();
+  assert.deepEqual(s4.linkRetries, []); assert.equal(s4.pendingLinks, 0);
+  assert.equal((await posts(DEAF)).filter((p) => p.author === 'extractor').length, before + 1, 'no fourth try, nothing more said');
+  assert.deepEqual(await linksOf(job.runId), []);
 });
 
 test('E3 extract-file links the run it publishes, through the same helper', { skip: SKIP || (!havePdftotext && 'pdftotext is not installed') }, async () => {

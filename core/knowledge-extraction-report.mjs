@@ -79,9 +79,16 @@ const cut = (s, max) => { const t = oneLine(s); return t.length > max ? `${t.sli
  * links". Zero is said with the threshold and the number of claims searched, and a run that could not be linked says "not
  * made" with its reason: "no link" must never be able to mean "never searched" (#1851).
  */
-function linkLines(links) {
+function linkLines(links, runId = null) {
   if (!links || typeof links !== 'object') return [];
-  if (links.made !== true) return [`links: not made (${cut(links.reason, REASON_MAX) || 'no reason given'})`];
+  if (links.made !== true) {
+    const why = cut(links.reason, REASON_MAX) || 'no reason given';
+    // A refusal the tick will try again says so: the links are not made YET. One nobody will retry (a named file has no
+    // tick) says how to make them by hand. A refused config stays as it was: it does not fix itself, and it names the file.
+    if (links.retry) return [`links: not made yet (${why}); the next ticks retry, up to ${links.retry.max} tries`];
+    if (links.retryable === true && runId) return [`links: not made (${why}); make them with ${byHand(runId, links.minScore)}`];
+    return [`links: not made (${why})`];
+  }
   const all = Array.isArray(links.links) ? links.links : [];
   if (all.length === 0) {
     const at = `at or above ${links.minScore}`;
@@ -107,6 +114,25 @@ function linkLines(links) {
  * the code knows the board's public address, so there is no form of this that would be a link there today.
  */
 const readingPath = (runId) => `/reading.html?run=${encodeURIComponent(String(runId).split('/').pop())}`;
+/** The command that links one run by hand. The threshold is named when the linker got far enough to read it. */
+const byHand = (runId, minScore) => `scripts/link-run.mjs --run ${runId}${typeof minScore === 'number' ? ` --min-score ${minScore}` : ''}`;
+
+/**
+ * #1852 — the follow-up for a run whose first linking attempt was refused and whose retry got an answer: what the finish
+ * post would have carried (the link lines, the total, the page), headed by the source so a reader knows which run it is.
+ */
+export function linksBody({ url, runId, links, tries, max }) {
+  return [`🔗 links, on try ${tries} of ${max}: ${url}`, ...linkLines(links, runId), ...(runId ? [`read it on the board: ${readingPath(runId)}`] : []), '(#1852)'].join('\n');
+}
+
+/**
+ * #1852 — the one line when the last try was refused too. `unfinished` is a tick that died INSIDE its last try: the links
+ * are written in one update, so they are either all there or not at all, and this line must not claim to know which.
+ */
+export function linksGaveUpBody({ url, runId, reason, tries, minScore, unfinished = false }) {
+  if (unfinished) return `⚠️ links not confirmed after ${tries} tries: ${url} (try ${tries} did not finish, so its links may already be written); make sure by hand: ${byHand(runId, minScore)} (it skips links that exist) (#1852)`;
+  return `⚠️ links not made after ${tries} tries: ${url} (${cut(reason, REASON_MAX) || 'no reason given'}); make them by hand: ${byHand(runId, minScore)} (#1852)`;
+}
 
 export function finishBody({ url, result, links = null }) {
   const published = Array.isArray(result?.published) ? result.published : [];
@@ -142,7 +168,7 @@ export function finishBody({ url, result, links = null }) {
     const why = typeof result?.stopReason === 'string' ? `"${result.stopReason}"` : 'no finish reason';
     lines.push(`⚠️ the model's answer did not finish (${why}), so none of it was used. This is not "the source had nothing more to say".`);
   }
-  lines.push(...linkLines(links));
+  lines.push(...linkLines(links, result?.runId ?? null));
   if (result?.runId) {
     lines.push(`run ${result.runId}`);
     lines.push(`open it with graph_query: ${ofRunQuery(result.runId)}`);
@@ -158,7 +184,7 @@ export function failBody({ url, reason, retry = false, retryHow = null }) {
   return `❌ extraction failed: ${url}\n${reason}\n${retry ? pending : 'not retried until someone shares it again.'} (#1862)`;
 }
 
-const BODIES = { start: startBody, finish: finishBody, fail: failBody };
+const BODIES = { start: startBody, finish: finishBody, fail: failBody, links: linksBody, 'links-gave-up': linksGaveUpBody };
 
 /** Wrap a `post(body)` so that reporting never fails a job: every outcome is RETURNED, nothing is thrown. */
 export function createAnnouncer({ post }) {
