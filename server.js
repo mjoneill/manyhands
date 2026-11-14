@@ -85,6 +85,7 @@ import { createGraphClient, setExecutorMeter } from './core/graph-client.mjs';  
 import { decideIntention as linkDecideIntention, linkCountsQuery, countLinkUse, linkDecisionsQuery, decisionsOfRows, retiringDecision, dismissalCount } from './core/knowledge-linking.mjs';   // #1851, #1850, #1852
 import { deliveryQuery, linksOfDeliveryRows, selectDeliveries, firstShowings, deliverySourcesQuery, sourcesOfRows, deliveryBlock, showIntention, DELIVERY_DEADLINE_MS } from './core/knowledge-delivery.mjs';   // #1852
 import * as READING from './core/knowledge-reading.mjs';   // #1894
+import { readRecallConfig, createRecallEngine, createRecallState, createRecallHook, publicItem as recallPublicItem, RECALL_COUNTS_MEANS } from './core/knowledge-recall.mjs';   // #1689
 import { createExecutorMeter, createKeepAlive, captureCpuProfile } from './core/executor-meter.mjs';   // #1570 — what REST asks the executor, and REST's own loop delay
 import { postFeed, DiscoveryError } from './core/post-discovery.mjs';   // #1574 R3
 import { createReadGate } from './core/read-admission.mjs';   // #1574 A1–A5
@@ -111,7 +112,7 @@ import { extractMentions as extractMentionsFromRoster } from './core/people.mjs'
 // in order to serve a board, so boot must not require one.
 import { domainToJsonLd } from './core/jsonld.mjs';
 import { probeModel, PROTOCOL_NAMES as MODEL_PROTOCOLS } from './core/model-adapter.mjs'; // #1197
-import { deriveGraph, personByKey } from './core/people.mjs';
+import { deriveGraph, personByKey, EXCLUDED_IDENTITIES } from './core/people.mjs';   // EXCLUDED_IDENTITIES: #1689
 import { queryCards, facetCards, excerptOf, EXCERPT_CEILING } from './core/cards-query.mjs';
 import { similarCards } from './core/similar-cards.mjs';
 import { queryChangesFromLog, parseSince, EPOCH_CHANGED, incarnationTag } from './core/changes-log-query.mjs';
@@ -1661,7 +1662,8 @@ async function loadSearchModule() {
   if (!_searchModule) _searchModule = await import('./core/semantic-search.mjs');
   return _searchModule;
 }
-async function embedTexts(texts) {
+// #1689: recall passes a shorter timeout for the one text it is answering, so a request that has given up also stops the fetch.
+async function embedTexts(texts, { timeoutMs = SEARCH_EMBED_TIMEOUT_MS } = {}) {
   let r;
   try {
     r = await fetch(SEARCH_EMBED_URL, {
@@ -1669,11 +1671,11 @@ async function embedTexts(texts) {
       // truncate:true is Ollama's default, said out loud: an over-context input
       // is embedded from its head, never refused.
       body: JSON.stringify({ model: SEARCH_EMBED_MODEL, input: texts, truncate: true }),
-      signal: AbortSignal.timeout(SEARCH_EMBED_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (e) {
     if (e?.name === 'TimeoutError' || e?.name === 'AbortError') {
-      throw new Error(`embedder timed out after ${SEARCH_EMBED_TIMEOUT_MS} ms on a batch of ${texts.length} text(s), ${texts.reduce((n, t) => n + t.length, 0)} chars`);
+      throw new Error(`embedder timed out after ${timeoutMs} ms on a batch of ${texts.length} text(s), ${texts.reduce((n, t) => n + t.length, 0)} chars`);
     }
     throw e;
   }
@@ -7152,6 +7154,143 @@ async function handleGetReading(req, res, rawId) {
   } catch (e) {
     if (executorRefused(res, e)) return;
     console.error('GET /api/readings/:runId:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+// ── #1689 — AMBIENT RECALL: a room post carries the readings it touches, with the sentence that matched ──────────────────
+// The rules and the index live in core/knowledge-recall.mjs; this is the I/O. The claims are read from the graph with the
+// log-born unit's reader, the embedder is the search's own, and both files sit in the data folder beside the search index.
+// Recall is OFF, and says why, when the config is invalid, the unit is off or no embedder is configured.
+const RECALL_INDEX_FILE = path.join(DATA_DIR, 'recall-index.jsonl');
+const RECALL_STATE_FILE = path.join(DATA_DIR, 'recall-state.json');
+const RECALL_POST_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+let _recall = null;
+function recallOffReason() {
+  if (!LOGBORN) return 'recall is off: the claims live in the graph executor, and this server does not run the log-born unit (SCRUM_GRAPH_UNIT_LOGBORN)';
+  if (!SEARCH_EMBED_URL || !SEARCH_EMBED_MODEL) return 'recall is off: no embedder is configured on this server (SEARCH_EMBED_URL, SEARCH_EMBED_MODEL)';
+  return null;
+}
+/** A post's text for a retry: the graph's copy when the conversations unit holds it, else the document's. null = gone. */
+async function recallPostText(id) {
+  if (ANNOUNCE_EXECUTOR) {
+    const g = await readGraphPost(id);
+    if (g.unavailable) throw new Error(`the graph could not be read: ${g.unavailable}`);
+    if (g.redacted) return null;
+    if (g.post) return g.post.body;
+  }
+  const data = readBoard();
+  const i = findConversationIndex(data, id);
+  return i < 0 ? null : data.conversations[i].body;
+}
+function recallUnit() {
+  if (_recall) return _recall;
+  const engine = createRecallEngine({
+    readConfig: () => readRecallConfig(), offReason: recallOffReason,
+    queryClaims: () => LOGBORN.query(READING.recallClaimsQuery()),
+    embed: (texts, o) => embedTexts(texts, o), model: SEARCH_EMBED_MODEL,
+    indexFile: RECALL_INDEX_FILE, maxEmbed: SEARCH_MAX_EMBED, maxEmbedChars: SEARCH_MAX_EMBED_CHARS,
+  });
+  const state = createRecallState({ file: RECALL_STATE_FILE });
+  const loaded = state.load();
+  if (!loaded.ok) console.error(`[#1689] ${loaded.error}`);
+  _recall = { engine, state, hook: createRecallHook({ engine, state, readConfig: () => readRecallConfig(), readPostText: recallPostText }) };
+  return _recall;
+}
+/**
+ * The `recall` field a post read carries, from the state alone: no executor query, no embedder call. A post with nothing
+ * decided, or nothing surfaced, is returned AS IT WAS (the same object), so its answer is unchanged byte for byte. A
+ * redacted post never carries one.
+ */
+function withRecall(post) {
+  if (!post || typeof post !== 'object' || post.redacted || typeof post.id !== 'string') return post;
+  let r;
+  try { r = recallUnit().state.publicOf(post.id); } catch { return post; }
+  return r ? { ...post, recall: r } : post;
+}
+/** The seat a request is from, or null; never a refusal (the #1852 delivery's rule, deliverySeat: no key, a read-scope key
+ *  or an unbound actor is simply no seat). Production runs auth in observe mode, so req.auth.enforced is not what decides. */
+function recallSeat(req) {
+  if (!LOGBORN) return null;
+  try { const a = deliverySeat(req); return a ? a.replace(/^urn:ex:seat\//, '') : null; } catch { return null; }
+}
+/** After a single-post read that SHOWED a reading: note (post, seat) once, in memory, to tell "noticed" from "carried". */
+function noteRecallRead(req, shown) {
+  if (!shown?.recall?.items) return;
+  const seat = recallSeat(req);
+  if (seat) { try { recallUnit().state.noteRead(shown.id, seat); } catch { /* a read that could not be noted is only not counted */ } }
+}
+/**
+ * Which posts recall is computed for: a ROOM post (no card, no talk) by a person or a seat, at least minChars long. A seat
+ * is a key of the roster in force (file seats and invited agents); the roster's own `kind: system` mark (the board, the
+ * wiki) and core/people.mjs's EXCLUDED_IDENTITIES rule out the board's own voices. A service that posts under a key that
+ * is not a seat (the extractor) is not in the roster, so it gets nothing either. No name is written here.
+ */
+function recallEligible(post, cfg) {
+  if (!post || post.attachedTo || post.conversation || !Number.isSafeInteger(post.postSeq)) return false;
+  if (typeof post.body !== 'string' || post.body.length < cfg.minChars) return false;
+  const key = String(post.author ?? '').trim().toLowerCase();
+  if (!key || EXCLUDED_IDENTITIES.includes(key)) return false;
+  const seat = currentRoster()?.[key];
+  return !!seat && seat.kind !== 'system';
+}
+/** Called AFTER a post's answer is sent. Never throws, never awaits: the post is already answered. */
+function recallAfterPost(post) {
+  setImmediate(() => {
+    try {
+      const cfg = readRecallConfig();
+      if (!cfg.ok || recallOffReason() || !recallEligible(post, cfg)) return;
+      recallUnit().hook.afterPost({ id: post.id, seq: post.postSeq, text: post.body });
+    } catch (e) { console.error(`[#1689] recall for post ${post?.id} not started: ${e?.message ?? e}`); }
+  });
+}
+async function handleRecall(req, res) {
+  try {
+    let body;
+    try { body = JSON.parse((await readBody(req)) || '{}'); } catch { return sendJSON(res, 400, { error: 'the body is JSON: { text, k? }', code: 'BAD_TEXT' }); }
+    if (typeof body?.text !== 'string' || !body.text.trim()) return sendJSON(res, 400, { error: 'text is required: the words to find readings for', code: 'BAD_TEXT' });
+    if (body.k !== undefined && body.k !== null && !(Number.isInteger(body.k) && body.k >= 1 && body.k <= 5)) return sendJSON(res, 400, { error: 'k is an integer from 1 to 5', code: 'BAD_K' });
+    const r = await recallUnit().engine.recall(body.text, { k: body.k ?? null });
+    // unavailable is a 200, as /api/search answers an unconfigured or failing embedder: "could not look" is an answer
+    if (!r.available) return sendJSON(res, 200, { available: false, reason: r.reason, items: [] });
+    sendJSON(res, 200, { available: true, bar: r.bar, partial: r.partial, items: r.items.map(recallPublicItem), searched: r.searched, means: r.means });
+  } catch (e) {
+    console.error('POST /api/recall:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+async function handleRecallOpened(req, res) {
+  try {
+    let body;
+    try { body = JSON.parse((await readBody(req)) || '{}'); } catch { body = {}; }
+    if (!READING.isRunId(body?.run)) return sendJSON(res, 400, { error: 'run is "run-" followed by a lowercase UUID', code: 'BAD_RUN_ID' });
+    if (typeof body.post !== 'string' || !RECALL_POST_ID_RE.test(body.post)) return sendJSON(res, 400, { error: 'post is a post id (a lowercase UUID)', code: 'BAD_POST_ID' });
+    const { state } = recallUnit();
+    if (!state.loaded()) return sendJSON(res, 503, { error: state.error(), code: 'RECALL_UNAVAILABLE' });
+    const r = state.opened({ run: body.run, post: body.post, seat: recallSeat(req) });   // the browser has no seat: counted, unattributed
+    if (!r.ok) {
+      return sendJSON(res, 404, r.code === 'RECALL_POST_NOT_FOUND'
+        ? { error: `post ${body.post} carries no recall`, code: 'RECALL_POST_NOT_FOUND' }
+        : { error: `run ${body.run} was not offered on post ${body.post}`, code: 'RECALL_OFFER_NOT_FOUND' });
+    }
+    sendJSON(res, 200, { recorded: true, run: body.run, post: body.post });
+  } catch (e) {
+    console.error('POST /api/recall/opened:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+async function handleRecallCounts(req, res) {
+  try {
+    const qs = parseQuery(req.url);
+    const raw = qs.since == null ? null : String(qs.since);
+    // the same reading of an instant as GET /api/links/counts
+    const ms = raw == null ? null : /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/.test(raw) ? Date.parse(raw) : NaN;
+    if (ms !== null && !Number.isFinite(ms)) return sendJSON(res, 400, { error: 'since is an ISO date-time, e.g. 2026-11-05T00:00:00Z', code: 'BAD_SINCE' });
+    const since = ms === null ? null : new Date(ms).toISOString();
+    const { state } = recallUnit();
+    if (!state.loaded()) return sendJSON(res, 503, { error: state.error(), code: 'RECALL_UNAVAILABLE' });
+    sendJSON(res, 200, { ...state.counts(since), since, means: RECALL_COUNTS_MEANS });
+  } catch (e) {
+    console.error('GET /api/recall/counts:', e.message);
     sendJSON(res, 500, { error: e.message });
   }
 }
@@ -12646,7 +12785,8 @@ async function listByCommit(q, res) {
     conversation: typeof q.conversation === 'string' && q.conversation ? q.conversation : null,
   };
   try {
-    return sendJSON(res, 200, await postFeed(POSTS_BULK_READER || ANNOUNCE_EXECUTOR, { after: q.afterCommit, limit, filters, snapshotClient: POSTS_SNAPSHOT_READER }));   // #1574 attempt 2 — through the gate
+    const feed = await postFeed(POSTS_BULK_READER || ANNOUNCE_EXECUTOR, { after: q.afterCommit, limit, filters, snapshotClient: POSTS_SNAPSHOT_READER });   // #1574 attempt 2 — through the gate
+    return sendJSON(res, 200, { ...feed, conversations: feed.conversations.map(withRecall) });   // #1689
   } catch (e) {
     if (e instanceof DiscoveryError) return sendJSON(res, e.status, e.body);
     throw e;
@@ -12692,7 +12832,7 @@ async function handleListConversations(req, res) {
           ...(typeof q.mentions_me === 'string' ? { mentions: q.mentions_me.toLowerCase() } : {}),
         });
       } catch (e) { if (e && e.unavailable) return sendJSON(res, 503, { error: `the graph could not be read: ${e.unavailable}`, code: 'GRAPH_UNAVAILABLE' }); throw e; }
-      if (t) { res.setHeader('X-Total-Count', String(t.total)); return sendJSON(res, 200, t.posts); }
+      if (t) { res.setHeader('X-Total-Count', String(t.total)); return sendJSON(res, 200, t.posts.map(withRecall)); }   // #1689
     }
     let convs = data.conversations;
     if (ANNOUNCE_EXECUTOR) {   // #1574 R1 — the graph's posts too, the graph winning by identity
@@ -12829,7 +12969,8 @@ async function handleListConversations(req, res) {
       if (postEpoch && postEpoch.migrationRequired) return sendJSON(res, 409, migrationRequiredBody());
       const page = checkSeqEpoch(seqReq, postEpoch);
       if (page.error) return sendJSON(res, page.error.status, page.error.body);
-      return sendJSON(res, 200, selectSeqPage(convs, page, postEpoch));
+      const seqPage = selectSeqPage(convs, page, postEpoch);
+      return sendJSON(res, 200, { ...seqPage, conversations: seqPage.conversations.map(withRecall) });   // #1689
     }
 
     if (typeof q.limit === 'string' && q.limit !== '') {
@@ -12839,7 +12980,7 @@ async function handleListConversations(req, res) {
         convs = capped <= 0 ? [] : convs.slice(-capped);   // the N most-recent
       }
     }
-    sendJSON(res, 200, convs);
+    sendJSON(res, 200, convs.map(withRecall));   // #1689
   } catch (e) {
     if (e instanceof PostSeqStateCorrupt) return sendJSON(res, 500, e.body);   // #1592
     console.error('GET /api/conversations:', e.message);
@@ -13069,12 +13210,14 @@ async function handleGetConversation(req, res, id) {
       const g = await readGraphPost(id);
       if (g.unavailable) return sendJSON(res, 503, { error: `the graph could not be read: ${g.unavailable}`, code: 'GRAPH_UNAVAILABLE' });
       if (g.redacted) return sendJSON(res, 200, g.redacted);
-      if (g.post) return sendJSON(res, 200, g.post);
+      if (g.post) { const shown = withRecall(g.post); sendJSON(res, 200, shown); return noteRecallRead(req, shown); }   // #1689
     }
     const data = readBoard();
     const idx = findConversationIndex(data, id);
     if (idx < 0) return sendJSON(res, 404, { error: 'Conversation not found' });
-    sendJSON(res, 200, data.conversations[idx]);
+    const shown = withRecall(data.conversations[idx]);   // #1689
+    sendJSON(res, 200, shown);
+    noteRecallRead(req, shown);
   } catch (e) {
     console.error('GET /api/conversations/:id:', e.message);
     sendJSON(res, 500, { error: 'Failed to read conversation' });
@@ -13141,6 +13284,7 @@ async function handleCreateConversation(req, res) {
     // diagnostic rides the response only.
     const ignoredFields = unconsumedConversationFields(body);
     sendJSON(res, 201, ignoredFields.length ? { ...created, ignoredFields } : created);
+    recallAfterPost(created);   // #1689 — after the answer; it never touches it
   } catch (e) {
     if (e instanceof PostSeqStateCorrupt) return sendJSON(res, 500, e.body);   // #1592
     console.error('POST /api/conversations:', e.message);
@@ -13335,7 +13479,9 @@ async function createPostThroughGraph(res, body) {
     if (!retry) notifyMcpOfPost({ id: post.id });
     const ignoredFields = unconsumedConversationFields(body).filter((k) => k !== 'requestId');
     const out = ignoredFields.length ? { ...post, ignoredFields } : post;
-    return sendJSON(res, replay ? 200 : 201, out);
+    sendJSON(res, replay ? 200 : 201, out);
+    if (!retry) recallAfterPost(post);   // #1689 — after the answer, once per post (a retry or replay was decided by its first request)
+    return;
   }
   if (r.outcome === 'REJECTED' && r.reason === 'intent-collision') {
     return sendJSON(res, 409, { error: 'this requestId already names a post with different content', code: 'REQUEST_ID_CONFLICT', requestId });
@@ -14220,6 +14366,9 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/links$/,                fn: (req, res) => handleListLinks(req, res) },   // #1851
   { method: 'GET',    re: /^\/api\/links\/counts$/,         fn: (req, res) => handleLinkCounts(req, res) },   // #1850
   { method: 'POST',   re: /^\/api\/links\/([^\/]+)\/decide$/, fn: (req, res, m) => handleDecideLink(req, res, m[1]) },   // #1851
+  { method: 'POST',   re: /^\/api\/recall$/,               fn: (req, res) => handleRecall(req, res) },   // #1689
+  { method: 'POST',   re: /^\/api\/recall\/opened$/,        fn: (req, res) => handleRecallOpened(req, res) },   // #1689
+  { method: 'GET',    re: /^\/api\/recall\/counts$/,        fn: (req, res) => handleRecallCounts(req, res) },   // #1689
   { method: 'GET',    re: /^\/api\/readings$/,             fn: (req, res) => handleListReadings(req, res) },   // #1894
   { method: 'GET',    re: /^\/api\/readings\/([^\/]+)$/,  fn: (req, res, m) => handleGetReading(req, res, m[1]) },   // #1894
   { method: 'GET',    re: /^\/api\/models$/,               fn: (req, res) => handleListModels(req, res) },                       // #1197

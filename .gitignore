@@ -96,6 +96,9 @@ tending-provenance.json
 # same commit that creates them — the #1085 lesson, applied before the incident.
 search-index.jsonl
 search-log.jsonl
+# #1689 — ambient recall's claim index and per-post state: board content, beside the search index
+recall-index.jsonl
+recall-state.json
 
 # #1197/#1199 — real agent files name a key REFERENCE only, but they also name a room's colleagues;
 # the shipped example is the only one that belongs in git. Env files never do.
