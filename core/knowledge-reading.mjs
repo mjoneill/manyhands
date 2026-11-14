@@ -17,8 +17,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { LOGBORN_TERMS as TM } from './graph-compiler.mjs';
-import { blocksOf } from './knowledge-extraction.mjs';
-import { pageOfBlock } from './knowledge-extraction-file.mjs';
+import { blocksOf, pageOfBlock } from './knowledge-blocks.mjs';   // #868: never the extractor's modules, which import npm packages
 
 // `op` and `prov:used` are the run activity's own terms (written by the research verbs, not by a log-born record kind), so
 // they are not in LOGBORN_TERMS. They are derived from namespaces that table does hold; the REST rows check them end to end.

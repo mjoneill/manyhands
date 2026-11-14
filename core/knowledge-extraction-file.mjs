@@ -21,6 +21,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { ingestSource } from './knowledge-extraction.mjs';
+import { pageOfBlock } from './knowledge-blocks.mjs';
 import { linkPublished, linkSummary } from './knowledge-linking-supply.mjs';
 
 const ENTITY = 'https://scrumboard.local/entity/';
@@ -67,17 +68,8 @@ export function convertFile(file, { exec = execFileSync } = {}) {
   return { text, from: c.from, converter: c.converter };
 }
 
-/** The 1-based page a block (a line) of converted text sits on: one more than the form feeds before its text. */
-export function pageOfBlock(blocks, i) {
-  let ff = 0;
-  for (let k = 0; k <= i && k < blocks.length; k += 1) {
-    const b = blocks[k];
-    // a form feed inside block i that comes AFTER some of its text would put that text on the earlier page; pdftotext
-    // writes the form feed at the start of the next page's first line, so counting every one up to and including block i is right
-    for (const ch of b) if (ch === '\f') ff += 1;
-  }
-  return ff + 1;
-}
+// #1894 — pageOfBlock is stated once, in core/knowledge-blocks.mjs (no imports), and re-exported here for its earlier callers
+export { pageOfBlock };
 
 /** The job id for a file: from its BYTES, never its path. */
 export function fileJobId(file, conversion = CONVERSION[path.extname(file).toLowerCase()] ?? LEGACY_CONVERSION) {

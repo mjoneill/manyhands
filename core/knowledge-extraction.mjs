@@ -31,6 +31,7 @@
  */
 import crypto from 'node:crypto';
 import { StateGraph, Annotation, START, END } from '@langchain/langgraph';
+import { blocksOf } from './knowledge-blocks.mjs';
 import { OxigraphSaver } from './langgraph-saver.mjs';
 
 export const ALLOWED_TYPES = Object.freeze(['definition', 'empirical', 'analogy', 'recommendation']);
@@ -67,8 +68,8 @@ export function expandTerm(term) {
   return PREFIXES[p] + local;
 }
 export const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
-/** Blocks are LINES: block index = line index, so a passage IRI is stable for a given byte content. */
-export function blocksOf(text) { return String(text).split(/\r?\n/); }
+// #1894 — blocksOf is stated once, in a module with no imports, so the board server can use it without the LangGraph packages
+export { blocksOf };
 export function conceptIri(name) {
   const slug = String(name).trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
   if (!slug) throw new Error(`a concept needs a name (${JSON.stringify(name)})`);

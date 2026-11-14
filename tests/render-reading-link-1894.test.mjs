@@ -30,7 +30,7 @@ const NEAR = {
   'extra query param first': `/reading.html?x=1&run=run-${U}`,
   'absolute url, another host': `https://evil.example${ADDR}`,
   'absolute url, protocol-relative': `//evil.example${ADDR}`,
-  'absolute url, with a port': `http://127.0.0.1:3141${ADDR}`,
+  'absolute url, with a port': `http://127.0.0.1:8080${ADDR}`,
   'uppercase uuid': `/reading.html?run=run-${U.toUpperCase()}`,
   'uppercase RUN': `/reading.html?run=RUN-${U}`,
   'one uppercase hex digit': `/reading.html?run=run-${U.replace('d706', 'D706')}`,
