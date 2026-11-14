@@ -21,6 +21,8 @@
  *       link in the commons (the renderer's own #NNN rule), and no added line turns into a bullet
  *   F6  no `links`: the post is byte-identical to the one #1862 wrote
  *   F7  the addition is bounded: forty links with very long titles and gists add at most five lines, none of them long
+ *
+ * Sabotage, 2026-11-14: showing a card once per link instead of once turns F1 and F2 red.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

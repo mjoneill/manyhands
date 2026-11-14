@@ -74,7 +74,8 @@ async function fakeSite() {
 }
 const CARDS = [{ id: crypto.randomUUID(), shortId: 1, title: 'The push gate reads pushed objects', description: 'gate gate gate' },
   { id: crypto.randomUUID(), shortId: 2, title: 'Deploy script', description: 'deploy deploy' }];
-const card = (c) => ({ ...c, type: 'task', assignees: [], labels: [], for: '', priority: null, column: 'backlog', createdAt: '2026-11-01T00:00:00.000Z', updatedAt: '2026-11-01T00:00:00.000Z' });
+// the cards' dates are the run's own clock: a fixed calendar date handed to a served board is a time bomb (#1696)
+const card = (c) => { const now = new Date().toISOString(); return { ...c, type: 'task', assignees: [], labels: [], for: '', priority: null, column: 'backlog', createdAt: now, updatedAt: now }; };
 
 const TOK = mintToken();
 let exec, client, SRV, DEAF, provider, site, emb, DIR, STORE;

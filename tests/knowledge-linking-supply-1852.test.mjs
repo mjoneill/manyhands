@@ -25,6 +25,9 @@
  *   X1  the named-file path links through the same helper: the summary and the finish event carry the links; a linker that
  *       throws does not fail the file's run; a file already extracted is not linked again
  *   S1  the live search keeps each card's title beside its hit, so the post can name the card
+ *
+ * Sabotage, 2026-11-14 (each run alone, then restored): the linker reading no existing links turns W4 and W5 red; linkPublished
+ * rethrowing turns W2c and X1 red; a number standing in for a refused config turns W3 red.
  */
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -89,7 +92,7 @@ const configFile = (doc) => { const f = path.join(DIR, `linking-${crypto.randomU
 const GOOD = { minScore: 0.6, perAssertion: 3, k: 8 };
 
 /** Two fresh cards on the graph, and a search that finds card 0 for the first claim's gist and card 1 for the second's span. */
-async function world() {
+async function cardsAndSearch() {
   const cards = [crypto.randomUUID(), crypto.randomUUID()];
   await raw(`INSERT DATA { ${cards.map((id) => `<${cardIriOf(id)}> <${RDF}type> <${RS}Card> .`).join(' ')} }`);
   const table = {
@@ -117,7 +120,7 @@ const linksOfRun = (runId) => count(`?l <${RDF}type> <${RS}BearsOn> ; <${RS}from
 const linksToCard = (id) => count(`?l <${RDF}type> <${RS}BearsOn> ; <${RS}bearsOnCard> <${cardIriOf(id)}>`);
 
 test('W1 a tick that publishes a run links it before the finish post: proposed links on the graph, counts in the summary, card and gist in the post', { skip: SKIP }, async () => {
-  const w = await world();
+  const w = await cardsAndSearch();
   const t = await intakeWith({ link: linkerFor(w) });
   const s = await t.intake.tick();
   assert.equal(s.started.length, 1, JSON.stringify(s));
@@ -136,7 +139,8 @@ test('W1 a tick that publishes a run links it before the finish post: proposed l
   assert.deepEqual(t.events.map((e) => e.kind), ['start', 'finish'], 'still two posts per run: linking adds none');
   const fin = t.events[1];
   assert.equal(fin.links.made, true);
-  assert.deepEqual(fin.links.links.map((l) => [l.shortId, l.title, l.score, l.gist]), [[41, 'Keep the harness layer thin', 0.8, GIST1], [42, 'Tools a seat can reach', 0.7, SPAN2]]);
+  // the linker reads claims in IRI order and an IRI is a fresh UUID, so the list's order is not the article's: compare by score
+  assert.deepEqual([...fin.links.links].sort((x, y) => y.score - x.score).map((l) => [l.shortId, l.title, l.score, l.gist]), [[41, 'Keep the harness layer thin', 0.8, GIST1], [42, 'Tools a seat can reach', 0.7, SPAN2]]);
   const body = finishBody(fin);
   assert.ok(body.includes(`🔗 may bear on #41 Keep the harness layer thin: "${GIST1}"`), body);
   assert.ok(body.includes(`🔗 may bear on #42 Tools a seat can reach: "${SPAN2}"`), 'a claim with no gist is shown by its verbatim span');
@@ -145,7 +149,7 @@ test('W1 a tick that publishes a run links it before the finish post: proposed l
 });
 
 test('W2 search refused: the run stays published and complete, nothing is written, and the summary and the post carry the reason', { skip: SKIP }, async () => {
-  const w = await world();
+  const w = await cardsAndSearch();
   const t = await intakeWith({ link: linkerFor(w, { search: async () => ({ ok: false, reason: 'embedder unavailable' }) }) });
   const s = await t.intake.tick();
   assert.equal(s.started.length, 1); assert.deepEqual(s.failed, [], 'a refused search is not a failed job');
@@ -161,7 +165,7 @@ test('W2 search refused: the run stays published and complete, nothing is writte
 });
 
 test('W2b the graph could not be read for the linker: not made, with that reason, and the run is unchanged', { skip: SKIP }, async () => {
-  const w = await world();
+  const w = await cardsAndSearch();
   const blind = { ...client, query: async () => ({ ok: false, reason: 'executor not answering' }) };
   const t = await intakeWith({ link: linkerFor(w, { graphClient: blind }) });
   const s = await t.intake.tick();
@@ -180,7 +184,7 @@ test('W2c a linker that throws cannot fail a published run', { skip: SKIP }, asy
 });
 
 test('W3 a missing or invalid config: nothing is searched, the reason names the file, and no number stands in', { skip: SKIP }, async () => {
-  const w = await world();
+  const w = await cardsAndSearch();
   const absent = path.join(DIR, 'no-such-linking.json');
   const t = await intakeWith({ link: linkerFor(w, { configFile: absent }) });
   const s = await t.intake.tick();
@@ -198,7 +202,7 @@ test('W3 a missing or invalid config: nothing is searched, the reason names the 
 });
 
 test('W4 a retried tick resumes the job, links again, and doubles nothing', { skip: SKIP }, async () => {
-  const w = await world();
+  const w = await cardsAndSearch();
   const t = await intakeWith({ link: linkerFor(w) });
   const s1 = await t.intake.tick();
   const job = s1.started[0];
@@ -217,7 +221,7 @@ test('W4 a retried tick resumes the job, links again, and doubles nothing', { sk
 });
 
 test('W5 a re-extraction of the same text (a new run, new assertion IRIs, the same spans) doubles nothing', { skip: SKIP }, async () => {
-  const w = await world();
+  const w = await cardsAndSearch();
   const link = linkerFor(w);
   const a = await intakeWith({ link });
   const first = (await a.intake.tick()).started[0];
@@ -232,7 +236,7 @@ test('W5 a re-extraction of the same text (a new run, new assertion IRIs, the sa
 });
 
 test('W6 a run that published nothing is not linked, and its post is the one #1862 wrote', { skip: SKIP }, async () => {
-  const w = await world();
+  const w = await cardsAndSearch();
   const t = await intakeWith({ link: linkerFor(w), model: fakeModel([]) });
   const s = await t.intake.tick();
   assert.equal(s.started[0].outcome, 'failed'); assert.equal(s.started[0].published, 0);
@@ -254,7 +258,7 @@ test('W7 no linker given: the tick is as before', { skip: SKIP }, async () => {
 });
 
 test('W8 a published run whose claims the graph does not return was not searched, and says so', { skip: SKIP }, async () => {
-  const w = await world();
+  const w = await cardsAndSearch();
   const link = linkerFor(w);
   const r = await linkPublished(link, { runId: `https://scrumboard.local/activity/run-absent-${crypto.randomUUID()}`, outcome: 'complete', published: [{ iri: 'urn:x:1' }] });
   assert.deepEqual(r, { made: false, reason: 'the graph returned no claims for this run, so nothing was searched' });
