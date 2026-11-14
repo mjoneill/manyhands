@@ -131,15 +131,21 @@ test('D2 a file\'s claims carry their page, computed from the kept text; a web a
   assert.equal(r.status, 200, r.text);
   assert.deepEqual(r.json.claims.map((c) => [c.block, c.page]), [[1, 1], [3, 2], [4, 3]]);
   assert.equal(r.json.source.hasPages, true);
+  assert.equal(r.json.source.pages, 'known');
   assert.equal(r.json.source.url, `urn:sha256:${sha('the original pdf')}`, 'a file source keeps its urn: name');
   // CONTROL: the same kept text under a web url is not paged (page 1 for every claim would be a false number)
   const web = await seedRun({ hex, url: 'https://example.com/pdf-as-web', claims: [{ block: 4, gist: 'g4', quote: 'epsilon line here' }] });
-  assert.equal((await call(`/api/readings/${web.id}`)).json.claims[0].page, null);
+  const webOne = (await call(`/api/readings/${web.id}`)).json;
+  assert.equal(webOne.claims[0].page, null);
+  assert.equal(webOne.source.pages, 'none', 'a web source: no pages, and nothing to warn about');
   // a file whose kept text is gone: still a page of claims, honestly without pages
   const gone = await seedRun({ url: `urn:sha256:${sha('another')}`, claims: [{ block: 1, gist: 'g', quote: 'q q q' }] });
   const g = await call(`/api/readings/${gone.id}`);
   assert.equal(g.status, 200, g.text);
   assert.equal(g.json.claims[0].page, null);
+  assert.equal(g.json.source.pages, 'unavailable', 'a file source whose kept text is gone SAYS pages are unavailable');
+  assert.equal(g.json.source.hasPages, false);
+  assert.match(g.json.means, /pages/, 'means documents the three values');
 });
 
 test('D3 a malformed run id is refused (400) before any query; an unknown one is 404; a run that is not an extraction is 404', T, async () => {

@@ -296,6 +296,7 @@
     if (src.firstChild) out.push(src);
     if (run.askedIn && Number.isInteger(run.askedIn.postSeq)) out.push(el('p', 'src', `Asked for in commons post ${run.askedIn.postSeq}.`));
 
+    if (source.pages === 'unavailable') out.push(el('p', 'src', 'Page numbers are unavailable for this source.'));
     if (OUTCOME_NOTE[run.outcome]) out.push(el('p', 'note', OUTCOME_NOTE[run.outcome]));
     if (source.synopsis) {
       const s = el('section', 'syn');

@@ -120,6 +120,15 @@ test('R5 a PDF claim\'s page comes from the kept text, and only when that text h
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('R5b source.pages says "known", "unavailable" or "none": a file whose kept text is missing is never silently page-less', () => {
+  const file = { ...header, source: { ...header.source, url: 'urn:sha256:' + 'b'.repeat(64) } };
+  const rows = [claimRow('c', 3)];
+  assert.equal(shapeReading({ header: file, claimRows: rows, linkRows: [], cardOf: () => null, pageOf: () => 2 }).source.pages, 'known');
+  assert.equal(shapeReading({ header: file, claimRows: rows, linkRows: [], cardOf: () => null, pageOf: null }).source.pages, 'unavailable');
+  assert.equal(shapeReading({ header, claimRows: rows, linkRows: [], cardOf: () => null, pageOf: null }).source.pages, 'none', 'a web source has no pages and says so without alarm');
+  assert.equal(shapeReading({ header, claimRows: rows, linkRows: [], cardOf: () => null }).source.pages, 'none');
+});
+
 test('R6 runs are newest first, an unreported run is "unfinished", and truncated says when the list was cut', () => {
   const row = (id, extra) => ({ r: iri(`https://scrumboard.local/activity/${id}`), src: iri(`https://scrumboard.local/source/${'a'.repeat(64)}`), ...extra });
   const runRows = [
@@ -190,6 +199,11 @@ test('R8c a source url becomes a link only for http: and https:, and a urn: sour
   assert.match(SCRIPTS, /\^https\?:/, 'the page checks the scheme before it makes a link');
   assert.match(SCRIPTS, /textContent/);
   assert.ok(/noopener/.test(SCRIPTS) && /noreferrer/.test(SCRIPTS), 'an outbound link carries rel noopener noreferrer');
+});
+
+test('R8e the page shows one quiet line when a file\'s page numbers are unavailable, and keys it on source.pages', () => {
+  assert.ok(PAGE.includes('Page numbers are unavailable for this source.'));
+  assert.match(SCRIPTS, /source\.pages === 'unavailable'/);
 });
 
 test('R8d the page says plainly what happened in each state: loading, empty, error, unavailable', () => {

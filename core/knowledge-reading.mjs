@@ -143,6 +143,11 @@ export function blockOfPassage(iri) {
 }
 
 /**
+ * ⚠️ TWO SETTINGS MUST AGREE, and nothing checks that they do. The extractor writes the kept text where ITS `SCRUM_EXTRACT_SOURCES_DIR`
+ * says; this server looks for it under ITS OWN data folder, `<SCRUM_DATA_DIR>/sources/`. They are the same folder in production today
+ * only because two separate launchd configs name it. If either moves, every file's page numbers vanish. That cannot be made to work
+ * silently, so a file source with no findable text reports `source.pages: "unavailable"` (see shapeReading) and the page says so.
+ *
  * Pages for a file's claims, or null when they cannot be told. Only a file source (a `urn:sha256:` url) has pages; a web
  * article read as page 1 for every claim would be a false number. The kept text is looked up by the SOURCE'S hash under
  * `<dataDir>/sources/`, and used only if it hashes back to that name (the text the claims were anchored in).
@@ -161,6 +166,15 @@ export function pagesOf({ sourceIri, url, dataDir }) {
 }
 
 /** The whole run: header, then every claim in SOURCE order, each with its links to cards. */
+/**
+ * "known": the claims carry page numbers. "unavailable": the source is an uploaded file, so it HAS pages, but the kept text could not
+ * be found (or did not match), so none can be given: that is a fault to see, not a source without pages. "none": a web source.
+ */
+export function pagesStateOf(url, pageOf) {
+  if (pageOf) return 'known';
+  return typeof url === 'string' && url.startsWith('urn:sha256:') ? 'unavailable' : 'none';
+}
+
 export function shapeReading({ header, claimRows, linkRows, cardOf, pageOf = null }) {
   const byClaim = new Map();
   for (const r of linkRows) {
@@ -179,7 +193,7 @@ export function shapeReading({ header, claimRows, linkRows, cardOf, pageOf = nul
   const { sourceIri, source, ...run } = header;
   return {
     run: { ...run, claims: claims.length, links: total },
-    source: { ...source, iri: sourceIri, hasPages: pageOf != null },
+    source: { ...source, iri: sourceIri, pages: pagesStateOf(source.url, pageOf), hasPages: pageOf != null },
     claims,
   };
 }

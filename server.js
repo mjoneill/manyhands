@@ -7109,7 +7109,7 @@ async function handleListLinks(req, res) {
 // The owner cannot query the graph, so until these routes a run's content reached him only when an agent pasted it into chat.
 // Read-only, behind the same door as GET /api/links, and reading.html is their one client. The reader is core/knowledge-reading.mjs.
 const READINGS_OFF = { error: 'readings live in the graph executor, and this server does not run the log-born unit (SCRUM_GRAPH_UNIT_LOGBORN)', code: 'READINGS_UNAVAILABLE' };
-const READINGS_MEANS = 'A reading is one run of the extractor over one source the room was asked to read. Each claim is the model\'s one-line gist and the verbatim quote it rests on, in the order they appear in the source; "bears on" links are machine proposals, not decisions.';
+const READINGS_MEANS = 'A reading is one run of the extractor over one source the room was asked to read. Each claim is the model\'s one-line gist and the verbatim quote it rests on, in the order they appear in the source; "bears on" links are machine proposals, not decisions. source.pages is "known" (claims carry page numbers), "unavailable" (an uploaded file whose kept text this server could not find, so no page numbers can be given) or "none" (a web source, which has no pages).';
 async function handleListReadings(req, res) {
   try {
     if (!LOGBORN) return sendJSON(res, 503, READINGS_OFF);
