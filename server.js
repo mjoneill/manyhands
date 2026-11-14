@@ -83,6 +83,7 @@ import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, auditOutbox, mode
 import * as U3 from './core/unit3-graph.mjs';   // #1582 — deliveries and model calls in the graph
 import { createGraphClient, setExecutorMeter } from './core/graph-client.mjs';   // #1574 C3b — the conversations unit's executor door
 import { decideIntention as linkDecideIntention, linkCountsQuery, countLinkUse } from './core/knowledge-linking.mjs';   // #1851, #1850
+import * as READING from './core/knowledge-reading.mjs';   // #1894
 import { createExecutorMeter, createKeepAlive, captureCpuProfile } from './core/executor-meter.mjs';   // #1570 — what REST asks the executor, and REST's own loop delay
 import { postFeed, DiscoveryError } from './core/post-discovery.mjs';   // #1574 R3
 import { createReadGate } from './core/read-admission.mjs';   // #1574 A1–A5
@@ -7104,6 +7105,51 @@ async function handleListLinks(req, res) {
     sendJSON(res, 500, { error: e.message });
   }
 }
+// ── #1894 — THE RUNS THE ROOM HAS READ, as something a person can open ─────────────────────────────────────────────────────
+// The owner cannot query the graph, so until these routes a run's content reached him only when an agent pasted it into chat.
+// Read-only, behind the same door as GET /api/links, and reading.html is their one client. The reader is core/knowledge-reading.mjs.
+const READINGS_OFF = { error: 'readings live in the graph executor, and this server does not run the log-born unit (SCRUM_GRAPH_UNIT_LOGBORN)', code: 'READINGS_UNAVAILABLE' };
+const READINGS_MEANS = 'A reading is one run of the extractor over one source the room was asked to read. Each claim is the model\'s one-line gist and the verbatim quote it rests on, in the order they appear in the source; "bears on" links are machine proposals, not decisions.';
+async function handleListReadings(req, res) {
+  try {
+    if (!LOGBORN) return sendJSON(res, 503, READINGS_OFF);
+    const qs = parseQuery(req.url);
+    const READINGS_MAX = 200;
+    const limit = qs.limit == null ? 50 : Number(qs.limit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > READINGS_MAX) return sendJSON(res, 400, { error: `limit is an integer from 1 to ${READINGS_MAX}`, code: 'BAD_LIMIT' });
+    // every run is one small row, so the page is cut AFTER sorting by when it finished; counts are asked only for the runs shown
+    const runRows = await LOGBORN.query(READING.runsQuery());
+    const shown = READING.shapeRuns({ runRows, claimRows: [], linkRows: [], limit });
+    const ids = shown.readings.map((r) => r.id);
+    const claimRows = ids.length ? await LOGBORN.query(READING.claimCountsQuery(ids)) : [];
+    const linkRows = ids.length ? await LOGBORN.query(READING.linkCountsQuery(ids)) : [];
+    sendJSON(res, 200, { ...READING.shapeRuns({ runRows, claimRows, linkRows, limit }), means: READINGS_MEANS });
+  } catch (e) {
+    if (executorRefused(res, e)) return;
+    console.error('GET /api/readings:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+async function handleGetReading(req, res, rawId) {
+  try {
+    if (!LOGBORN) return sendJSON(res, 503, READINGS_OFF);
+    let id; try { id = decodeURIComponent(rawId); } catch { id = ''; }   // a bad %-escape is a bad id, not a 500
+    // the id goes into SPARQL: only `run-` + a UUID is ever interpolated
+    if (!READING.isRunId(id)) return sendJSON(res, 400, { error: 'a run id is "run-" followed by a UUID', code: 'BAD_RUN_ID' });
+    const head = await LOGBORN.query(READING.runsQuery(id));
+    if (!head.length) return sendJSON(res, 404, { error: `no reading ${id}`, code: 'READING_NOT_FOUND' });
+    const header = READING.headersOf(head)[0];
+    const [claimRows, linkRows] = [await LOGBORN.query(READING.claimsQuery(id)), await LOGBORN.query(READING.claimLinksQuery(id))];
+    const byId = new Map(readBoard().cards.filter((c) => c && c.id).map((c) => [`https://scrumboard.local/entity/${c.id}`, c]));
+    // a claim's page is not in the graph (#1854): it is computed from the kept text under the data folder, for a file
+    const pageOf = READING.pagesOf({ sourceIri: header.sourceIri, url: header.source.url, dataDir: DATA_DIR });
+    sendJSON(res, 200, { ...READING.shapeReading({ header, claimRows, linkRows, cardOf: (iri) => byId.get(iri) ?? null, pageOf }), means: READINGS_MEANS });
+  } catch (e) {
+    if (executorRefused(res, e)) return;
+    console.error('GET /api/readings/:runId:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
 /** #1850 — per seat, how many links it was SHOWN (decided) and how many it USED (confirmed, naming its working card). */
 async function handleLinkCounts(req, res) {
   try {
@@ -14092,6 +14138,8 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/links$/,                fn: (req, res) => handleListLinks(req, res) },   // #1851
   { method: 'GET',    re: /^\/api\/links\/counts$/,         fn: (req, res) => handleLinkCounts(req, res) },   // #1850
   { method: 'POST',   re: /^\/api\/links\/([^\/]+)\/decide$/, fn: (req, res, m) => handleDecideLink(req, res, m[1]) },   // #1851
+  { method: 'GET',    re: /^\/api\/readings$/,             fn: (req, res) => handleListReadings(req, res) },   // #1894
+  { method: 'GET',    re: /^\/api\/readings\/([^\/]+)$/,  fn: (req, res, m) => handleGetReading(req, res, m[1]) },   // #1894
   { method: 'GET',    re: /^\/api\/models$/,               fn: (req, res) => handleListModels(req, res) },                       // #1197
   { method: 'POST',   re: /^\/api\/models$/,               fn: (req, res) => handleCreateModel(req, res) },                      // #1197
   { method: 'PATCH',  re: /^\/api\/models\/([^\/]+)$/,      fn: (req, res, m) => handlePatchModel(req, res, decodeURIComponent(m[1])) },          // #1197
