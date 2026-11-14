@@ -49,7 +49,8 @@ export async function proposeLinks({ assertions, search, existing = [], minScore
       if (taken >= perAssertion) break;
       const sk = spanKey(a.span, h.id);
       if (have.has(linkKey(a.iri, h.id)) || have.has(sk)) { skipped += 1; continue; }
-      proposals.push({ assertion: a.iri, card: h.id, shortId: h.shortId ?? null, score: h.score, query, spanKey: sk });
+      // #1852: the card's title rides along when the search gave one, so the finish post can name the card. It is never written.
+      proposals.push({ assertion: a.iri, card: h.id, shortId: h.shortId ?? null, score: h.score, query, spanKey: sk, ...(typeof h.title === 'string' ? { title: h.title } : {}) });
       have.add(linkKey(a.iri, h.id)); have.add(sk);
       taken += 1;
     }
@@ -125,7 +126,7 @@ export function createRestSearch({ base, token, by, k = 8, fetchImpl = fetch, ti
     if (j?.available !== true) return { ok: false, reason: `search unavailable: ${j?.reason ?? 'no reason given'}` };
     if (j.partial === true) return { ok: false, reason: `search was partial (${JSON.stringify(j.coverage ?? {})}): it could not search everything` };
     if (typeof j.model === 'string' && j.model) model = j.model;
-    const hits = (j.results ?? []).map((r) => ({ id: r.id, shortId: r.shortId ?? null, score: r.score, kind: r.kind === 'source' ? 'source' : 'card' }));
+    const hits = (j.results ?? []).map((r) => ({ id: r.id, shortId: r.shortId ?? null, title: typeof r.title === 'string' ? r.title : null, score: r.score, kind: r.kind === 'source' ? 'source' : 'card' }));   // #1852: the title, for the finish post
     return { ok: true, hits };
   };
   /** The embed model the board answered with: read from its answer, never assumed (null until a search succeeded). */

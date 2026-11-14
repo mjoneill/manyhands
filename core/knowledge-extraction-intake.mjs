@@ -29,6 +29,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ingestSource } from './knowledge-extraction.mjs';
+import { linkPublished, linkSummary } from './knowledge-linking-supply.mjs';
 
 export const NON_SOURCE_AUTHORS = Object.freeze(['board', 'system']);
 export const MAX_RESUME_ATTEMPTS = 3;
@@ -50,7 +51,7 @@ export const jobIdFor = (url) => `job-${sha256(url)}`;
 export const RERUN_RE = /\bre-?run\b/i;
 export const MAX_RERUNS = 3;
 
-export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fetchSource, extractor, modelKey, prompt, sharers, limit = 200, allowHttp = false, fetchImpl = fetch, now = () => new Date().toISOString(), actor = 'extractor', log = (line) => process.stderr.write(`${line}\n`), report = null } = {}) {
+export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fetchSource, extractor, modelKey, prompt, sharers, limit = 200, allowHttp = false, fetchImpl = fetch, now = () => new Date().toISOString(), actor = 'extractor', log = (line) => process.stderr.write(`${line}\n`), report = null, link = null } = {}) {
   for (const [k, v] of Object.entries({ boardUrl, stateFile, sourcesDir, fetchSource, extractor, modelKey })) if (!v) throw new Error(`createIntake needs ${k}`);
   if (typeof prompt !== 'string') throw new Error('createIntake needs the prompt text');
   if (!(sharers instanceof Set) || sharers.size === 0) throw new Error('createIntake needs sharers: the configured set of authors whose links become jobs (the PO\'s ruling, 51192). Empty means nobody, so nothing would ever run; refusing to construct.');
@@ -64,6 +65,14 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
     try { const r = await report(event); if (r && r.ok === false) reportErrors += 1; } catch { reportErrors += 1; }
   }
   const withReports = (o) => (typeof report === 'function' ? { ...o, reportErrors } : o);
+  // #1852 — an optional linker (core/knowledge-linking-supply.mjs createRunLinker). Absent: no run is linked, as before.
+  // Present: a run that published is linked to our cards BEFORE its finish report, so the report can show the links. A run
+  // is never failed by its linking: linkPublished returns the reason instead, and the job's entry in the summary carries it.
+  async function finished(url, r) {
+    const links = await linkPublished(link, r);
+    await tell({ kind: 'finish', url, result: r, ...(links ? { links } : {}) });
+    return links ? { links: linkSummary(links) } : {};
+  }
   const headers = () => ({ ...(token ? { Authorization: `Bearer ${token}` } : {}) });
 
   /**
@@ -190,8 +199,8 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
       try {
         await tell({ kind: 'start', url: p.url, modelKey, jobId: p.jobId, resumed: true });
         const r = await extractor.resume({ jobId: p.jobId });
-        await tell({ kind: 'finish', url: p.url, result: r });
-        resumed.push({ url: p.url, jobId: p.jobId, runId: r.runId, outcome: r.outcome, published: r.published.length, rejected: r.rejected.length });
+        const linked = await finished(p.url, r);
+        resumed.push({ url: p.url, jobId: p.jobId, runId: r.runId, outcome: r.outcome, published: r.published.length, rejected: r.rejected.length, ...linked });
         pending = pending.filter((x) => x.jobId !== p.jobId);
       } catch (e) {
         const attempts = (p.attempts ?? 1) + 1;
@@ -254,9 +263,10 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
         await tell({ kind: 'start', url, modelKey, jobId });
         try {
           const r = await extractor.run({ source, modelKey, prompt, jobId });
-          started.push({ url, jobId, runId: r.runId, ...(rerunOf ? { rerunOf } : {}), outcome: r.outcome, published: r.published.length, rejected: r.rejected.length });
+          const entry = { url, jobId, runId: r.runId, ...(rerunOf ? { rerunOf } : {}), outcome: r.outcome, published: r.published.length, rejected: r.rejected.length };
+          started.push(entry);
           pending = pending.filter((x) => x.jobId !== jobId);
-          await tell({ kind: 'finish', url, result: r });
+          Object.assign(entry, await finished(url, r));
         } catch (e) { failed.push({ url, jobId, reason: `run: ${e?.message ?? e} (pending: the next tick resumes it)` }); await tell({ kind: 'fail', url, reason: failed.at(-1).reason, retry: true }); }
       }
     }

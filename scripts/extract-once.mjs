@@ -10,6 +10,11 @@
  * in the ledger. Then print one JSON summary on stdout and exit 0. Any failure to START prints one line on stderr
  * naming what is missing (a variable's NAME, never a value) and exits 2, before any network call.
  *
+ * #1852: a run that published is then LINKED to our cards (the board's own meaning search, no paid call), and its finish
+ * post shows the strongest proposed links. The threshold is read from the tracked knowledge-linking.json at the repo root,
+ * never from this environment, and it has no default: a missing or refused file means the run is not linked and the post
+ * says so. Linking never fails a run; scripts/link-run.mjs links one by hand afterwards.
+ *
  * A link is extracted once. If its job FAILED, a sharer re-posts it with the word "re-run" in the same post, and the
  * next tick makes one fresh attempt (job id `.r1`, then `.r2`, at most 3) whose summary names the failed run (#1841).
  * A link that once succeeded is never re-run.
@@ -39,6 +44,7 @@ import { createRestBoard, createOpenRouterModel } from '../core/knowledge-extrac
 import { createIntake } from '../core/knowledge-extraction-intake.mjs';
 import { createFetcher } from '../core/knowledge-extraction-fetch.mjs';
 import { createAnnouncer } from '../core/knowledge-extraction-report.mjs';
+import { createRunLinker } from '../core/knowledge-linking-supply.mjs';
 
 const ACTOR = 'extractor';
 const DEFAULT_PROMPT = 'Extract what this source says: its concepts, the claims it makes about them, and a short synopsis.';
@@ -101,7 +107,10 @@ async function main() {
     if (r.status !== 201) throw new Error(`POST /api/conversations → ${r.status}`);
     return r.json();
   } });
-  const intake = createIntake({ boardUrl: BOARD, token, stateFile: STATE_FILE, sourcesDir: SOURCES_DIR, fetchSource, extractor, modelKey: MODEL_KEY, prompt: PROMPT, sharers: SHARERS, allowHttp: ALLOW_HTTP, ...(report ? { report } : {}) });
+  // #1852 — link each run that publishes, with the same graph client, token and actor it was published with. What it
+  // proposed (or why it could not) is on the job's entry in the JSON line below and in the run's finish post.
+  const link = createRunLinker({ graphClient, boardUrl: BOARD, token, actor: ACTOR });
+  const intake = createIntake({ boardUrl: BOARD, token, stateFile: STATE_FILE, sourcesDir: SOURCES_DIR, fetchSource, extractor, modelKey: MODEL_KEY, prompt: PROMPT, sharers: SHARERS, allowHttp: ALLOW_HTTP, link, ...(report ? { report } : {}) });
   const summary = await intake.tick();
   console.log(JSON.stringify({ at: new Date().toISOString(), modelKey: MODEL_KEY, model: entry.model, ...summary }));
 }
