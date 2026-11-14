@@ -33,6 +33,8 @@ const ARGS = {
   // BOARD_TOOLS puts them that way round.
   seat_declare: { mode: 'available', acceptsRoutineWork: true, expiresAt: new Date(Date.now() + 3600_000).toISOString() },
   seat_clear: {},
+  // #1895 — a well-formed link id no board holds: with no graph unit the route answers 503 (it EXISTS), which is all this test asks
+  link_decide: { link: 'b'.repeat(64), verdict: 'dismissed' },
 };
 
 test('#1196B SEAM: every declared tool reaches a real route — no tool 404s', async () => {

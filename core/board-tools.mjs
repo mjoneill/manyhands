@@ -17,6 +17,11 @@
  * seat may already do over MCP, with the same 168 h cap and the same graph
  * visibility. Writes to CARDS remain a different card.
  *
+ * ONE MORE SELF-SCOPED WRITE (#1895): `link_decide`, a seat's own verdict on a "bears on" link (#1851). Same reasoning as the two
+ * above: the verdict is counted per seat (#1850), so there is no seat parameter and the executor files it under the seat the
+ * runner binds. #1852 puts links in front of guests; until this existed a guest handed one could not answer it. Like every
+ * tool here it is granted per agent, by name, on the agent settings page; nothing implies it.
+ *
  * ⭐ A GRANT IS NOW REAL. `toolGrants` used to change one sentence of an agent's
  * prompt and nothing else, so an agent granted everything and an agent granted
  * nothing differed by a line of English. Here the grant decides what is put in
@@ -192,6 +197,29 @@ export const BOARD_TOOLS = Object.freeze([
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      // #1895 - a guest's door to #1851's link_decide. The words are for a SMALL model: what a link is, what each verdict does,
+      // and that a confirm is counted as USED, so "it looks related" is never a reason to confirm. No seat parameter: the
+      // verdict is the wake's own seat's (#1850 counts per seat), exactly as seat_declare's declaration is.
+      name: 'link_decide',
+      description: 'Answer a "bears on" link you were shown: the board proposed that a claim someone shared (a sentence from a source) bears on one of our cards. '
+        + 'confirmed means "this claim mattered to the card I was working on". It is counted as USED, so never confirm just because it looks related: confirm only if it changed what you did or said. '
+        + 'workingOn is REQUIRED with confirmed: the number of the card you were working on, e.g. 1852. '
+        + 'dismissed means the claim does not bear on that card; that same sentence will never be proposed for that card again. '
+        + 'The verdict is recorded under YOUR own seat; you cannot answer for another seat.',
+      parameters: {
+        type: 'object',
+        properties: {
+          link: { type: 'string', description: 'the link id you were shown: 64 characters, 0-9 and a-f, exactly as given' },
+          verdict: { type: 'string', enum: ['confirmed', 'dismissed'], description: 'confirmed = it mattered to the card you were working on; dismissed = it does not bear on it' },
+          workingOn: { type: 'integer', description: 'REQUIRED when confirmed: the number of the card you were working on' },
+        },
+        required: ['link', 'verdict'],
+      },
+    },
+  },
 ]);
 
 /** The opening sentence of a definition — orientation, not the whole register. */
@@ -251,6 +279,20 @@ export function makeExecutor({ get, post, put = null, del = null, patch = null, 
           throw new Error(`memory ${id} is not yours (its owner is ${JSON.stringify(current?.owner ?? null)}); you may only revise your own memories`);
         }
         return patch(`/api/memories/${encodeURIComponent(id)}`, { ...body, by });
+      }
+      // #1895 - the seat's OWN verdict on a "bears on" link (#1851). The body is built here from the three allowed fields and
+      // `by`, the seat the runner binds: a smuggled seat, by, onBehalfOf or actor never reaches the wire (the route also takes
+      // the actor from the credential and refuses a foreign onBehalfOf). Every refusal below happens BEFORE a request, in a
+      // sentence the model can act on; the server's own refusals come back through `post`'s error text.
+      case 'link_decide': {
+        const link = typeof args?.link === 'string' ? args.link.trim() : '';
+        if (!/^[0-9a-f]{64}$/.test(link)) throw new Error('link_decide needs the link id exactly as you were shown it: 64 characters, 0-9 and a-f');
+        const verdict = args?.verdict;
+        if (verdict !== 'confirmed' && verdict !== 'dismissed') throw new Error('link_decide verdict is "confirmed" or "dismissed"');
+        const given = args?.workingOn !== undefined && args?.workingOn !== null && args?.workingOn !== '';
+        if (verdict === 'confirmed' && !given) throw new Error('link_decide: a confirm needs workingOn, the number of the card you were working on (e.g. 1852). A confirm counts the claim as used, so it must say what it was used for. If you were not working on a card, dismiss it or leave it.');
+        if (given && !Number.isInteger(args.workingOn)) throw new Error('link_decide workingOn is a card number, a whole number such as 1852');
+        return post(`/api/links/${link}/decide`, { verdict, ...(given ? { workingOn: args.workingOn } : {}), by });
       }
       // #1600 D1 - a READ of one post. The id is the model's, so it is trimmed, refused when empty, and refused when it is a
       // bare dot segment (`.`/`..` survive encodeURIComponent and a URL layer may normalise them into another route);

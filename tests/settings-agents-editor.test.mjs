@@ -211,3 +211,44 @@ test('#1256 the nav marks the section ON SCREEN — scrolled to Models, it says 
     assert.notEqual(focused, '#whispers-panel', 'the clicked link does not keep focus to masquerade as current');
   });
 });
+
+// #1895 — link_decide is an ordinary grant, ticked here like any other; and an agent that can read cards but cannot answer the
+// claims shown inside them gets a HINT (never a block) beside the grants.
+test('#1895 the editor offers link_decide as a grant, hints when card_get is granted without it, and the hint never blocks saving', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const r = await post(server.baseUrl, '/api/agents', SEED_AGENT); assert.equal(r.status, 201, await r.text());
+    const page = await browser.newPage();
+    await page.goto(`${server.baseUrl}/settings.html`, { waitUntil: 'networkidle0' });
+    const row = '.agent-row[data-agent-seat="probe"]';
+    await page.waitForSelector(`${row} [data-agent-editor]`, { timeout: 5000 });
+    await page.$eval(`${row} [data-agent-editor]`, (d) => { d.open = true; });
+    const link = `${row} [data-agent-grants] input[value="link_decide"]`;
+    assert.ok(await page.$(link), 'link_decide has a checkbox, built from /api/tools');
+    // a save re-renders the row (the editor closes), so each step re-opens it and clicks in the page, not at a pixel
+    const tick = async (sel) => { await page.waitForSelector(sel); await page.$eval(`${row} [data-agent-editor]`, (d) => { d.open = true; }); await page.$eval(sel, (el) => el.click()); };
+    const hint = () => page.$eval(`${row} [data-agent-link-hint]`, (e) => ({ hidden: e.hidden, text: e.textContent }));
+    // seeded with card_get and without link_decide: the hint is up, in words
+    let h = await hint();
+    assert.equal(h.hidden, false);
+    assert.match(h.text, /shown claims on cards but cannot answer them \(grant link_decide\)/);
+    // saving with the hint showing is NOT blocked
+    await page.$eval(`${row} [data-agent-editor]`, (d) => { d.open = true; }); await page.click(`${row} [data-agent-save]`);
+    await page.waitForFunction((sel) => document.querySelector(sel)?.classList.contains('ok'), { timeout: 5000 }, `${row} [data-agent-msg]`);
+    await page.waitForNetworkIdle({ idleTime: 400 });   // the re-render after a save has landed
+    // tick link_decide: the hint goes; save; the API holds the grant
+    await tick(link);
+    h = await hint(); assert.equal(h.hidden, true); assert.equal(h.text, '');
+    await page.$eval(`${row} [data-agent-editor]`, (d) => { d.open = true; }); await page.click(`${row} [data-agent-save]`);
+    await page.waitForFunction((sel) => document.querySelector(sel)?.classList.contains('ok'), { timeout: 5000 }, `${row} [data-agent-msg]`);
+    await page.waitForNetworkIdle({ idleTime: 400 });   // the re-render after a save has landed
+    let a = (await j(await fetch(`${server.baseUrl}/api/agents`))).find((x) => x.seatKey === 'probe');
+    assert.ok(a.toolGrants.includes('link_decide') && a.toolGrants.includes('card_get'), JSON.stringify(a.toolGrants));
+    // untick card_get as well: nothing to hint about either
+    await tick(`${row} [data-agent-grants] input[value="card_get"]`);
+    h = await hint(); assert.equal(h.hidden, true);
+    // untick link_decide with card_get back on: the hint returns
+    await tick(`${row} [data-agent-grants] input[value="card_get"]`);
+    await tick(link);
+    h = await hint(); assert.equal(h.hidden, false);
+  }, { server: {}, launch: { headless: 'new' } });
+});

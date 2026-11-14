@@ -18,13 +18,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { BOARD_TOOLS, toolsFor, makeExecutor } from '../core/board-tools.mjs';
 
-test('#1196B/#1383/#1470/#1558/#1574 the surface is seven reads plus the seat\'s OWN three writes (its declaration, and its own memories), every tool named and described', () => {
+test('#1196B/#1383/#1470/#1558/#1574 the surface is seven reads plus the seat\'s OWN four writes (its declaration, its own memories, its verdict on a link), every tool named and described', () => {
   const names = BOARD_TOOLS.map((t) => t.function.name).sort();
   // #1558 — graph_authority joins as a READ (the shared authority resolver), added on
   // purpose: this pinned list is how a new tool announces itself to review.
   // #1574 D1 — conversation_get joins as a READ (one post by id, through the board's own route). Granted to no agent by this change: a grant is a
   // separate, permission-changing act. Pinned in this list on purpose, as every new tool is.
-  assert.deepEqual(names, ['board_search', 'card_get', 'conversation_get', 'graph_authority', 'graph_query', 'kind_list', 'memory_update', 'predicate_list', 'seat_clear', 'seat_declare']);
+  assert.deepEqual(names, ['board_search', 'card_get', 'conversation_get', 'graph_authority', 'graph_query', 'kind_list', 'link_decide', 'memory_update', 'predicate_list', 'seat_clear', 'seat_declare']);
   for (const t of BOARD_TOOLS) {
     assert.equal(t.type, 'function');
     assert.ok(t.function.description && t.function.description.length > 20, `${t.function.name} needs a description a model can act on`);
@@ -39,6 +39,8 @@ test('#1196B/#1383/#1470/#1558/#1574 the surface is seven reads plus the seat\'s
     // resident-memory-update-1470.test.mjs (sabotaged: removing the check turns
     // them red). The exception is a list of one on purpose: a second write tool
     // must argue its own way in, not inherit this.
+    // #1895 — `link_decide` is the same class (the seat's own verdict on a link; no seat parameter, `by` bound by the executor). Its name
+    // trips none of the words below, so it needs no entry here; its fence is pinned in resident-link-decide-1895.test.mjs.
     const SELF_SCOPED_WRITES = ['memory_update'];
     if (!SELF_SCOPED_WRITES.includes(t.function.name)) {
       assert.doesNotMatch(t.function.name, /create|update|delete|post|claim|assert|write|move/);
