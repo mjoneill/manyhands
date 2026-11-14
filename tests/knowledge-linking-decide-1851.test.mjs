@@ -32,6 +32,7 @@
  *   D11  naming a dismissal its seat has since replaced with a confirm retires nothing
  *   D12  the shape: only a dismiss may retire, and never by naming itself
  *   D13  two first dismissals that did not see each other both leave the status alone; the next one retires the link
+ *   D14  a decision WITHOUT retiresWith canonicalizes and digests exactly as it did before #1852 (so RECORD_V is not bumped)
  */
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -223,4 +224,23 @@ test('D13 two first dismissals that did not see each other both leave the status
   const next = await client.update(dismiss(s.link, SEAT, T1, b.decision));
   assert.equal(next.outcome, 'APPLIED', JSON.stringify(next));
   assert.deepEqual(await statuses(s.link), ['dismissed'], 'the next dismiss sees the other seat\'s and retires it');
+});
+
+test('D14 a decision without retiresWith canonicalizes and digests exactly as it did before #1852', () => {
+  // WHY: #1852 added `retiresWith` to link.decide without bumping RECORD_V, on the claim that a write which does not carry it
+  // is byte-for-byte the record it always was. A bump would move the digest of EVERY record kind, and an op replayed by its
+  // opId across the deploy would then read as an intent collision. This row holds the claim.
+  // HOW THE EXPECTED VALUES WERE OBTAINED (2026-11-14): these two intentions were compiled by origin/main's own
+  // core/graph-compiler.mjs at c3e6904, from a detached worktree, and `digest` and JSON.stringify(canonical.record) copied here.
+  const link = `https://scrumboard.local/link/${'ab'.repeat(32)}`;
+  const base = { kind: 'link.decide', actor: 'urn:ex:seat/seat-a', link, at: '2026-11-14T16:00:00.000Z' };
+  const confirm = compile({ ...base, opId: 'urn:ex:op/pin-1852-confirm', verdict: 'confirmed', decision: `${link}/decision/pin-confirm`, workingOn: 'https://scrumboard.local/entity/pin-card' });
+  const plain = compile({ ...base, opId: 'urn:ex:op/pin-1852-dismiss', verdict: 'dismissed', decision: `${link}/decision/pin-dismiss`, workingOn: null });
+  assert.equal(JSON.stringify(confirm.canonical.record), `{"link":"${link}","verdict":"confirmed","decision":"${link}/decision/pin-confirm","workingOn":"https://scrumboard.local/entity/pin-card","at":"2026-11-14T16:00:00.000Z"}`);
+  assert.equal(confirm.digest, '4c7b3c01761b7d8cc097d9dc7484ff24c47b845c95e9385f113d69fd1c85300e');
+  assert.equal(JSON.stringify(plain.canonical.record), `{"link":"${link}","verdict":"dismissed","decision":"${link}/decision/pin-dismiss","workingOn":null,"at":"2026-11-14T16:00:00.000Z"}`);
+  assert.equal(plain.digest, 'e6ca2fcc76a347e5d0758cd3fad917d221edfbaa71e2f115a1f6dcb73b28be87');
+  // CONTROL: the field IS digest-covered when present, so a retiring write can never be replayed as a plain one
+  const retiring = compile({ ...base, opId: 'urn:ex:op/pin-1852-dismiss', verdict: 'dismissed', decision: `${link}/decision/pin-dismiss`, workingOn: null, retiresWith: `${link}/decision/pin-other` });
+  assert.notEqual(retiring.digest, plain.digest);
 });
