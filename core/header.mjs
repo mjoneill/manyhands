@@ -14,6 +14,7 @@ export const NAV_ITEMS = [
   { id: 'board', href: '/', label: '▦ Board' },
   { id: 'wiki', href: '/wiki.html', label: '📖 Wiki' },
   { id: 'commons', href: '/commons.html', label: '💬 Commons' },
+  { id: 'reading', href: '/reading.html', label: '📜 Reading' },   // #1894 — what the board has read for its owner, claim by claim
   { id: 'insights', href: '/insights.html', label: '📈 Insights' },   // #1290 shadow — recommends, changes nothing
   { id: 'retreat', href: '/retreat.html', label: '🕯 Retreat' },   // #1255 — long-form room; shipped 09-08, unlinked until 09-14 (its owner never saw it)
   { id: 'settings', href: '/settings.html', label: '⚙️ Settings' },
