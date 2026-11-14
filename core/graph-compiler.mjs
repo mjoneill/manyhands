@@ -614,7 +614,7 @@ const RECORD_FIELDS = {
   'refusal.record': ['refusal'],            // #1762 S2 — one content-free refusal, fresh at the IRI its opId derives; never history
   'extraction.publish': ['run', 'source', 'assertions', 'rejected', 'report'],   // #1810 — one run's whole output (source, reifiers, rejected, report) in ONE guarded update
   'link.propose': ['links', 'at'],          // #1851 — one linking run's proposed BearsOn links, every claim and card checked, in ONE update
-  'link.decide': ['link', 'verdict', 'decision', 'workingOn', 'at'],   // #1851 — a seat's verdict on one link: its status replaced, one LinkDecision appended
+  'link.decide': ['link', 'verdict', 'decision', 'workingOn', 'retiresWith', 'at'],   // #1851 — a seat's verdict on one link: one LinkDecision appended; #1852 — the status replaced by a confirm, or by a dismiss that names another seat's
   'link.show': ['showings', 'card', 'how', 'at'],   // #1852 — the links one answer showed a seat for the first time, one LinkShowing each, in ONE update
 };
 
@@ -854,7 +854,16 @@ function canonicalizeRecord(i) {
     if (!decision.startsWith(`${link}/decision/`)) fail('decision must live under its link: <link>/decision/<id>');
     const workingOn = rOptIri(i.workingOn, 'workingOn');
     if (i.verdict === 'confirmed' && workingOn == null) fail('a confirm names workingOn, the card the seat was working on: an unattributed confirm cannot be counted as used');
-    record = { link, verdict: i.verdict, decision, workingOn, at: rStr(i.at, 'at') };
+    // #1852 — a dismiss is ONE SEAT'S and leaves the link's status alone. It retires the link for everyone only when it names
+    // another seat's standing dismissal (`retiresWith`); the plan guards that the graph agrees. The field is in the record
+    // only when present, as #1744's added fields are, so a write without it canonicalizes exactly as it did.
+    const retiresWith = rOptIri(i.retiresWith, 'retiresWith');
+    if (retiresWith != null) {
+      if (i.verdict !== 'dismissed') fail('only a dismiss retires a link: retiresWith rides a dismissed verdict');
+      if (!retiresWith.startsWith(`${link}/decision/`)) fail('retiresWith must be a decision of this link: <link>/decision/<id>');
+      if (retiresWith === decision) fail('a dismiss cannot retire with itself: retiresWith names ANOTHER seat\'s dismissal');
+    }
+    record = { link, verdict: i.verdict, decision, workingOn, ...(retiresWith != null ? { retiresWith } : {}), at: rStr(i.at, 'at') };
   } else if (i.kind === 'link.show') {
     // #1852 — one node per (seat, link): the IRI is derived from the link and the ACTOR (core/knowledge-delivery.mjs showIri),
     // and the compiler checks that derivation, so a second showing names the same node and the freshness guard refuses it.
@@ -1204,13 +1213,29 @@ function planRecord(c) {
       add(l.iri, TM.dateCreated, L(R.at)); add(l.iri, TM.wasAssociatedWith, I(c.actor)); add(l.iri, TM.recordedBy, ref(c.opId));
     }
   } else if (c.kind === 'link.decide') {
-    // #1851 — the link must be a BearsOn and a named card a Card; the status is REPLACED (one value), the decision APPENDED
+    // #1851 — the link must be a BearsOn and a named card a Card; the decision is APPENDED
     target = null;
     pre.push(`    ${I(R.link)} ${I(TM.type)} ${I(TM.BearsOn)} .`);
     if (R.workingOn) pre.push(`    ${I(R.workingOn)} ${I(TM.type)} ${I(TM.Card)} .`);
     fresh.push(R.decision);
-    delAll.push({ s: R.link, p: TM.status });
-    add(R.link, TM.status, L(R.verdict));
+    // #1852 — the status is REPLACED (one value) by a confirm, and by a dismiss only when it retires the link. A plain
+    // dismiss plans no status triple at all, so it cannot move the status whatever the caller sends. A retiring one binds
+    // ?ok only if the decision it names is a dismissal OF THIS LINK by ANOTHER actor that she has not replaced since:
+    // one seat can never retire a link alone, nor on the strength of a verdict its seat took back.
+    // Two first dismissals that each read before the other landed both arrive plain, and the status stays; that is
+    // accepted, because the next dismiss sees both and retires it.
+    // Deliberately NOT here: "a human's single dismiss retires it". Nothing can tell a human seat from an agent seat
+    // without naming seats, and no human can reach this write today (#1852).
+    if (R.retiresWith) {
+      const O = I(R.retiresWith);
+      pre.push(`    ${O} ${I(TM.type)} ${I(TM.LinkDecision)} .`, `    ${O} ${I(TM.ofLink)} ${I(R.link)} .`, `    ${O} ${I(TM.linkVerdict)} ${L('dismissed')} .`,
+        `    ${O} ${I(TM.decidedBy)} ?rw_by .`, `    ${O} ${I(TM.dateCreated)} ?rw_at .`, `    FILTER(?rw_by != ${I(c.actor)})`,
+        `    FILTER NOT EXISTS { ?rw_n ${I(TM.ofLink)} ${I(R.link)} . ?rw_n ${I(TM.decidedBy)} ?rw_by . ?rw_n ${I(TM.dateCreated)} ?rw_nat FILTER(?rw_nat > ?rw_at) }`);
+    }
+    if (R.verdict === 'confirmed' || R.retiresWith) {
+      delAll.push({ s: R.link, p: TM.status });
+      add(R.link, TM.status, L(R.verdict));
+    }
     add(R.decision, TM.type, I(TM.LinkDecision)); add(R.decision, TM.ofLink, I(R.link)); add(R.decision, TM.linkVerdict, L(R.verdict));
     add(R.decision, TM.decidedBy, I(c.actor)); add(R.decision, TM.workingOn, R.workingOn && I(R.workingOn));
     add(R.decision, TM.dateCreated, L(R.at)); add(R.decision, TM.recordedBy, ref(c.opId));

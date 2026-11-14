@@ -82,7 +82,7 @@ import { labelAliasRows, labelAliasEntity, labelAliasIri } from './core/label-al
 import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, auditOutbox, modeProblem, legacyProof, postMatchesEntry, opIdFor, announcePostId, postCreateIntention, obligationIdOf } from './core/announce-outbox.mjs';   // #1574 C3a/C3b/C3c
 import * as U3 from './core/unit3-graph.mjs';   // #1582 — deliveries and model calls in the graph
 import { createGraphClient, setExecutorMeter } from './core/graph-client.mjs';   // #1574 C3b — the conversations unit's executor door
-import { decideIntention as linkDecideIntention, linkCountsQuery, countLinkUse } from './core/knowledge-linking.mjs';   // #1851, #1850
+import { decideIntention as linkDecideIntention, linkCountsQuery, countLinkUse, linkDecisionsQuery, decisionsOfRows, retiringDecision, dismissalCount } from './core/knowledge-linking.mjs';   // #1851, #1850, #1852
 import { deliveryQuery, linksOfDeliveryRows, selectDeliveries, firstShowings, deliverySourcesQuery, sourcesOfRows, deliveryBlock, showIntention, DELIVERY_DEADLINE_MS } from './core/knowledge-delivery.mjs';   // #1852
 import { createExecutorMeter, createKeepAlive, captureCpuProfile } from './core/executor-meter.mjs';   // #1570 — what REST asks the executor, and REST's own loop delay
 import { postFeed, DiscoveryError } from './core/post-discovery.mjs';   // #1574 R3
@@ -7092,13 +7092,17 @@ async function handleListLinks(req, res) {
     const truncated = got.length > limit;
     const rows = got.slice(0, limit);
     const byId = new Map(readBoard().cards.filter((c) => c && c.id).map((c) => [`https://scrumboard.local/entity/${c.id}`, c]));
+    // #1852 — a dismiss is one seat's, so a link can be half-dismissed while its status still reads proposed: say how many seats have
+    const decided = new Map();
+    for (const d of rows.length ? decisionsOfRows(await LOGBORN.query(linkDecisionsQuery())) : []) decided.set(d.link, [...(decided.get(d.link) ?? []), d]);
     const links = rows.map((r) => {
       const card = byId.get(r.c.value);
-      return { id: r.l.value.split('/').pop(), status: r.st.value, score: r.sc ? Number(r.sc.value) : null,
+      return { id: r.l.value.split('/').pop(), status: r.st.value, dismissals: dismissalCount(decided.get(r.l.value)), score: r.sc ? Number(r.sc.value) : null,
         card: { shortId: card?.shortId ?? null, title: card?.title ?? null },
         claim: { iri: r.a.value, span: r.span?.value ?? null, gist: r.gist?.value ?? null } };
     });
-    sendJSON(res, 200, { links, truncated, means: 'A link is a MACHINE PROPOSAL that a claim the room read bears on a card, found by meaning search. Answer it with POST /api/links/:id/decide (MCP link_decide): confirm names the card you were working on; dismiss keeps it from ever being proposed again.' });
+    sendJSON(res, 200, { links, truncated, means: 'A link is a MACHINE PROPOSAL that a claim the room read bears on a card, found by meaning search. Answer it with POST /api/links/:id/decide (MCP link_decide): confirm names the card you were working on; '
+      + 'dismiss hides it from you, and a link two different seats have dismissed is retired for everyone (status dismissed; `dismissals` counts the seats so far). Either way that claim is never proposed for that card again.' });
   } catch (e) {
     if (executorRefused(res, e)) return;
     console.error('GET /api/links:', e.message);
@@ -7149,14 +7153,22 @@ async function handleDecideLink(req, res, id) {
     }
     // a confirm without workingOn is refused by the compiler (link.decide), the one place that rule lives; it reaches here as a 400
     if (!LINK_ID_RE.test(id)) return sendJSON(res, 404, { error: `no link ${id}`, code: 'LINK_NOT_FOUND' });
-    const known = await LOGBORN.query(`SELECT ?t WHERE { <${LINK_IRI(id)}> a ?t FILTER(?t = <https://scrumboard.local/ns#BearsOn>) }`);
+    const known = await LOGBORN.query(`SELECT ?st WHERE { <${LINK_IRI(id)}> a <https://scrumboard.local/ns#BearsOn> OPTIONAL { <${LINK_IRI(id)}> <https://scrumboard.local/ns#status> ?st } }`);
     if (!known.length) return sendJSON(res, 404, { error: `no link ${id}`, code: 'LINK_NOT_FOUND' });
     const actor = logbornActor(req, res, 'link.decide');
     if (!actor) return;
-    const r = await LOGBORN.write(linkDecideIntention({ link: LINK_IRI(id), verdict: body.verdict, workingOn: workingOn ? workingOn.id : null, actor }));
+    // #1852 — a dismiss is this seat's alone. It retires the link for everyone only when ANOTHER seat's standing verdict is
+    // already a dismiss: that decision is read here and named in the write, and the compiler refuses the write if the graph
+    // no longer agrees (409: re-read and retry). Two first dismissals that cross both land plain; the next one retires it.
+    const retiresWith = body.verdict === 'dismissed'
+      ? retiringDecision(decisionsOfRows(await LOGBORN.query(linkDecisionsQuery(LINK_IRI(id)))), actor) : null;
+    const r = await LOGBORN.write(linkDecideIntention({ link: LINK_IRI(id), verdict: body.verdict, workingOn: workingOn ? workingOn.id : null, retiresWith, actor }));
     if (r.outcome !== 'APPLIED') return logbornWriteFailed(res, r);
+    // `hidden` says what is true of the link now, so a seat is never told a link is gone when it is only gone for her. A link
+    // dismissed under the old one-seat rule is stored as dismissed and stays so: it is already hidden for everyone.
+    const hidden = body.verdict !== 'dismissed' ? {} : { hidden: retiresWith || known.some((k) => k.st?.value === 'dismissed') ? 'for everyone' : 'for you' };
     // the answer names the seat the graph recorded (the authenticated actor), never the body's `by` (review 52723 point 1)
-    sendJSON(res, 200, { id, verdict: body.verdict, workingOn: workingOn ? workingOn.shortId : null, by: String(actor).replace(/^urn:ex:seat\//, '') });
+    sendJSON(res, 200, { id, verdict: body.verdict, workingOn: workingOn ? workingOn.shortId : null, by: String(actor).replace(/^urn:ex:seat\//, ''), ...hidden });
   } catch (e) {
     if (executorRefused(res, e)) return;
     console.error('POST /api/links/:id/decide:', e.message);

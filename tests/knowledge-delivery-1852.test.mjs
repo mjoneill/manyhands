@@ -21,6 +21,7 @@
  *   S4  the order: confirmed before proposed, then the higher score, then the link id
  *   S5  links whose source is not known share ONE slot: two of them are never assumed to be two sources
  *   S6  a link with neither a quote nor a gist is not deliverable
+ *   S7  a link the seat herself dismissed is never delivered to her, whatever its status; one she confirmed may be
  *   F1  card_get shows only what the seat has not been shown, and the cap is applied BEFORE that: a re-read does not walk
  *       down the list two at a time
  *   Q1  a long quote is cut at 300 characters with an ellipsis and flagged; a short one is untouched and carries no flag
@@ -81,6 +82,12 @@ test('S5 links whose source is not known share one slot', () => {
 test('S6 a link with neither a quote nor a gist is not deliverable', () => {
   const got = selectDeliveries([link(1, { score: 0.9, span: null, gist: null }), link(2, { score: 0.5 })]);
   assert.deepEqual(ids(got), [hex(2)]);
+});
+
+test('S7 a link the seat herself dismissed is never delivered to her; one she confirmed may be', () => {
+  // `mine` is the seat's own standing verdict: since #1852 a dismiss hides a link from the seat that gave it, not from the room
+  const got = selectDeliveries([link(1, { score: 0.9, mine: 'dismissed' }), link(2, { score: 0.8, status: 'confirmed', mine: 'dismissed' }), link(3, { score: 0.7, mine: 'confirmed' }), link(4, { score: 0.6, mine: null })]);
+  assert.deepEqual(ids(got), [hex(3), hex(4)]);
 });
 
 test('F1 card_get shows only what the seat has not been shown, and the cap comes first', () => {

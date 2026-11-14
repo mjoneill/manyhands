@@ -192,7 +192,10 @@ export const KIND_DECLARATIONS = Object.freeze([
       + '(confirmed or dismissed), `scrum:decidedBy` the authenticated seat, `schema:dateCreated`, and for a confirm '
       + '`scrum:workingOn`: the card the seat was working on when the claim mattered. A confirm without it is refused, because '
       + 'a confirm is what counts a claim as USED (#1850) and an unattributed one cannot be told from habit. Appended, never '
-      + 'rewritten: the link\'s own `scrum:status` is replaced by the latest verdict, and these nodes are its history.',
+      + 'rewritten: these nodes are the link\'s history. A confirm replaces the link\'s `scrum:status`. A DISMISS IS ONE SEAT\'S '
+      + '(#1852): it hides the link from the seat that gave it and leaves the status alone, and the status becomes dismissed, '
+      + 'for everyone, only when a second, different seat\'s standing verdict is also a dismiss. A seat\'s standing verdict is '
+      + 'her latest decision. Links dismissed by one seat before #1852 are stored as dismissed and stay so.',
   },
   // #1852 — written by ONE compiler kind, `link.show`, all of one answer's first showings per update. Executor-only.
   {

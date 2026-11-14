@@ -8,7 +8,8 @@ import { LOGBORN_TERMS as TM } from './graph-compiler.mjs';   // every term from
  * they are tested without a graph; server.js does the two reads and the one write around them.
  *
  * A delivery is small on purpose: it rides on card_get, the most-called read on the board, and a seat that is shown ten
- * machine proposals reads none of them. So a card has at most DELIVERY_MAX, never two from one source, never a dismissed one.
+ * machine proposals reads none of them. So a card has at most DELIVERY_MAX, never two from one source, never a link the
+ * room retired (status dismissed) and never one this seat dismissed herself: a dismiss is one seat's, and hides it from her.
  *
  * Each first showing is recorded as its own node (kind `link.show`), one per seat and link, so #1850 can count what a seat
  * was SHOWN beside what she USED, and so a re-read does not show the same block again.
@@ -19,7 +20,7 @@ export const QUOTE_MAX_CHARS = 300;
 export const DELIVERY_DEADLINE_MS = 1500;
 export const DELIVERY_MEANS = 'Claims from documents the room has read that a meaning search proposed as bearing on this card: MACHINE PROPOSALS, '
   + 'not endorsements, so read the quote before trusting the gist; a confirm means "this claim mattered to the work on this card", and a dismiss '
-  + 'keeps it from being proposed for this card again.';
+  + 'hides it from you alone (a second seat\'s dismiss retires it for everyone).';
 
 const sha = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
 /** A passage is `<source>/block/<n>` (core/knowledge-extraction.mjs); the graph holds no other edge from a claim to its source. */
@@ -46,7 +47,7 @@ export function selectDeliveries(links, { max = DELIVERY_MAX } = {}) {
   const rank = (l) => (l.status === 'confirmed' ? 0 : 1);
   const score = (l) => (Number.isFinite(l.score) ? l.score : -Infinity);
   const ordered = (links ?? [])
-    .filter((l) => l && l.status !== 'dismissed' && (l.span || l.gist))
+    .filter((l) => l && l.status !== 'dismissed' && l.mine !== 'dismissed' && (l.span || l.gist))
     .sort((a, b) => rank(a) - rank(b) || score(b) - score(a) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const taken = new Set();
   const out = [];
@@ -101,24 +102,31 @@ export function showIntention({ links, card, how, actor, at = new Date().toISOSt
 
 /**
  * The delivery read for one card: ONE query that starts from the card, so a card with no links costs one indexed miss.
- * With a seat it also says which links that seat has been shown.
+ * With a seat it also says which links that seat has been shown, and every verdict she gave on them.
  */
 export function deliveryQuery({ card, actor = null } = {}) {
-  return `SELECT ?l ?st ?sc ?span ?gist ?pass ?sh WHERE { ?l <${TM.bearsOnCard}> <${card}> ; a <${TM.BearsOn}> ; <${TM.status}> ?st ; <${TM.fromAssertion}> ?a `
+  return `SELECT ?l ?st ?sc ?span ?gist ?pass ?sh ?md ?mv ?mat WHERE { ?l <${TM.bearsOnCard}> <${card}> ; a <${TM.BearsOn}> ; <${TM.status}> ?st ; <${TM.fromAssertion}> ?a `
     + `FILTER(?st != "dismissed") OPTIONAL { ?l <${TM.score}> ?sc } OPTIONAL { ?a <${TM.anchorText}> ?span } OPTIONAL { ?a <${TM.gist}> ?gist } `
-    + `OPTIONAL { ?a <${TM.expressedIn}> ?pass } ${actor ? `OPTIONAL { ?sh a <${TM.LinkShowing}> ; <${TM.ofLink}> ?l ; <${TM.shownTo}> <${actor}> } ` : ''}}`;
+    + `OPTIONAL { ?a <${TM.expressedIn}> ?pass } ${actor ? `OPTIONAL { ?sh a <${TM.LinkShowing}> ; <${TM.ofLink}> ?l ; <${TM.shownTo}> <${actor}> } `
+    + `OPTIONAL { ?md a <${TM.LinkDecision}> ; <${TM.ofLink}> ?l ; <${TM.decidedBy}> <${actor}> ; <${TM.linkVerdict}> ?mv ; <${TM.dateCreated}> ?mat } ` : ''}}`;
 }
-/** The delivery query's bindings as the links selectDeliveries reads, one per link. */
+/** The delivery query's bindings as the links selectDeliveries reads, one per link. `mine` is the seat's own standing verdict. */
 export function linksOfDeliveryRows(rows) {
   const byId = new Map();
   for (const r of rows ?? []) {
     const iri = r.l.value;
-    if (byId.has(iri)) continue;
-    const sc = r.sc ? Number(r.sc.value) : null;
-    byId.set(iri, { iri, id: iri.split('/').pop(), status: r.st.value, score: Number.isFinite(sc) ? sc : null,
-      span: r.span?.value ?? null, gist: r.gist?.value ?? null, source: sourceOfPassage(r.pass?.value), shown: !!r.sh });
+    if (!byId.has(iri)) {
+      const sc = r.sc ? Number(r.sc.value) : null;
+      byId.set(iri, { iri, id: iri.split('/').pop(), status: r.st.value, score: Number.isFinite(sc) ? sc : null,
+        span: r.span?.value ?? null, gist: r.gist?.value ?? null, source: sourceOfPassage(r.pass?.value), shown: !!r.sh, mine: null, mineAt: null });
+    }
+    // a seat that decided a link more than once gives one row per verdict: the latest is the one that stands
+    const l = byId.get(iri);
+    if (r.md && (l.mineAt === null || r.mat.value > l.mineAt.at || (r.mat.value === l.mineAt.at && r.md.value > l.mineAt.d))) {
+      l.mine = r.mv.value; l.mineAt = { at: r.mat.value, d: r.md.value };
+    }
   }
-  return [...byId.values()];
+  return [...byId.values()].map(({ mineAt, ...l }) => l);
 }
 const IRI_SAFE = /^[^\s<>"{}|\\^`]+$/;
 /** The title and address of the delivered items' sources: a second read, made only when something is delivered. */

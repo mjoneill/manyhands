@@ -97,13 +97,44 @@ export async function linkRun({ graphClient, search, run, minScore, perAssertion
   return { ok: true, assertions: assertions.length, proposed: p.proposals.length, skipped: p.skipped, outcome: w.outcome, links: p.proposals };
 }
 
-/** A seat's verdict on one proposed link: ONE `link.decide`, appending a LinkDecision under the link. */
-export function decideIntention({ link, verdict, workingOn = null, actor, at = new Date().toISOString(), opId = `urn:ex:op/${crypto.randomUUID()}` } = {}) {
+/**
+ * A seat's verdict on one proposed link: ONE `link.decide`, appending a LinkDecision under the link. A dismiss is that
+ * seat's alone; `retiresWith` (#1852) names ANOTHER seat's standing dismissal, and only then is the link retired for everyone.
+ */
+export function decideIntention({ link, verdict, workingOn = null, retiresWith = null, actor, at = new Date().toISOString(), opId = `urn:ex:op/${crypto.randomUUID()}` } = {}) {
   return {
     kind: 'link.decide', opId, actor, link, verdict, decision: `${link}/decision/${crypto.randomUUID()}`,
-    workingOn: workingOn == null ? null : `${ENTITY}entity/${workingOn}`, at,
+    workingOn: workingOn == null ? null : `${ENTITY}entity/${workingOn}`, ...(retiresWith ? { retiresWith } : {}), at,
   };
 }
+
+/**
+ * #1852 — a dismiss is ONE SEAT'S: it hides the link from her, and the link is retired for everyone only when two distinct
+ * seats' STANDING verdicts are both dismissals. A seat's standing verdict is her latest decision (by time, then by the
+ * decision IRI, so one instant has one order). These three read the decisions; the compiler guards what they conclude.
+ */
+export function standingVerdicts(decisions) {
+  const per = new Map();
+  for (const d of decisions ?? []) {
+    const cur = per.get(d.by);
+    if (!cur || d.at > cur.at || (d.at === cur.at && d.decision > cur.decision)) per.set(d.by, d);
+  }
+  return per;
+}
+/** ANOTHER seat's standing dismissal for a dismiss by `actor` to retire the link with, or null: the first, so the answer is fixed. */
+export function retiringDecision(decisions, actor) {
+  const others = [...standingVerdicts(decisions).values()].filter((d) => d.by !== actor && d.verdict === 'dismissed')
+    .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.decision < b.decision ? -1 : 1));
+  return others.length ? others[0].decision : null;
+}
+/** How many seats' standing verdict is a dismissal: seats, never decisions. */
+export const dismissalCount = (decisions) => [...standingVerdicts(decisions).values()].filter((d) => d.verdict === 'dismissed').length;
+/** Every decision on one link, or on every link: the rows the three rules above read. */
+export function linkDecisionsQuery(link = null) {
+  return `SELECT ?l ?d ?by ?v ?at WHERE { ?d a <${TM.LinkDecision}> ; <${TM.ofLink}> ?l ; <${TM.linkVerdict}> ?v ; <${TM.decidedBy}> ?by ; <${TM.dateCreated}> ?at `
+    + `${link ? `FILTER(?l = <${link}>) ` : ''}}`;
+}
+export const decisionsOfRows = (rows) => (rows ?? []).map((r) => ({ link: r.l.value, decision: r.d.value, by: r.by.value, verdict: r.v.value, at: r.at.value }));
 
 /**
  * The live `search(q)`: the board's own POST /api/search (the dense index search_all uses). Every answer that did not search
