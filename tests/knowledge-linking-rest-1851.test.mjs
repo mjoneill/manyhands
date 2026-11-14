@@ -4,9 +4,10 @@
  * /api/links (MCP link_list); she answers at POST /api/links/:id/decide (MCP link_decide, bound to her session's seat).
  *
  * INTERFACE PINNED HERE:
- *   GET  /api/links?status=proposed|confirmed|dismissed&card=<shortId>  → { links: [{ id, status, score, card: { shortId, title },
+ *   GET  /api/links?status=proposed|confirmed|dismissed&card=<shortId>  → { links: [{ id, status, dismissals, score, card: { shortId, title },
  *        claim: { iri, span, gist } }] }   id = the 64-hex tail of the link IRI
- *   POST /api/links/:id/decide { verdict: confirmed|dismissed, workingOn?: <shortId>, by } → 200 { id, verdict, workingOn, by }
+ *   POST /api/links/:id/decide { verdict: confirmed|dismissed, workingOn?: <shortId>, by } → 200 { id, verdict, workingOn, by, hidden? }
+ *        (#1852: a dismiss is one seat's; `dismissals` and `hidden` are pinned in knowledge-linking-dismiss-1852)
  *        400 a confirm with no workingOn · 400 workingOn names no card · 404 no such link · 401 no bearer
  *
  *   H1  GET lists a proposed link with its card (short id + title) and its claim's span and gist

@@ -526,7 +526,9 @@ const r = await guestOnce({
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body), signal: AbortSignal.timeout(90_000),
       });
-      if (!r.ok) throw new Error(`POST ${p} → ${r.status}`);
+      // #1895 - the route's own sentence goes back to the model, as put/del/patch already do: link_decide's refusals (a confirm
+      // naming no card, an unknown link, links unavailable) are useless to a model as a bare status.
+      if (!r.ok) { const j = await r.json().catch(() => null); throw new Error(`POST ${p} → ${r.status}${j && j.error ? `: ${j.error}` : ''}`); }
       return r.json();
     },
     // #1383 - the seat's own declaration; the route's refusal text is worth

@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="color-scheme" content="dark light">
+<title>Reading · manyhands</title>
+<link rel="stylesheet" href="./core/theme.css">
+<link rel="stylesheet" href="./core/header.css">
+<style>
+  /* #1894 — what the board has read, for a person. One job: let the owner decide in a minute whether he needs the original.
+     Tokens come from core/theme.css (dark). The shared sheet has no light scheme, so this page carries its own light values
+     for the same token names; nothing here introduces a new colour name.
+     ⚠️ The reset is required: theme.css does not set box-sizing, and without it the shell's gutter makes the page wider than
+     the viewport (see insights.html). */
+  *, *::before, *::after { box-sizing: border-box; }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f8f6f1; --panel: #ffffff; --panel-2: #efece4; --line: #d9d4c8;
+      --ink: #1c1e29; --muted: #5a6074; --violet: #5846d6; --accent: #5846d6; --link: #4332bd;
+      --ember: #a84b14; --ember-soft: rgba(168, 75, 20, .10);
+    }
+  }
+  body { margin: 0; background: var(--bg); color: var(--ink); }
+  [hidden] { display: none !important; }
+  a { color: var(--link); text-underline-offset: .18em; }
+  a:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+
+  .wrap { max-width: 46rem; margin: 0 auto; padding: 6px 0 80px; min-width: 0; overflow-wrap: anywhere; }
+  .crumb { margin: 18px 0 0; font-size: .875rem; }
+  h1 { font-family: var(--serif); font-weight: 600; font-size: clamp(1.55rem, 1.1rem + 2vw, 2.1rem); line-height: 1.2; margin: 10px 0 8px; letter-spacing: -.01em; }
+  h1 a { color: inherit; text-decoration-color: var(--line); text-decoration-thickness: 2px; }
+  h1 a:hover { text-decoration-color: var(--link); }
+  .lede { color: var(--muted); font-size: .9375rem; margin: 0 0 6px; max-width: var(--measure); }
+
+  /* header facts: one quiet line, then the source */
+  .facts { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; color: var(--muted); font-size: .875rem; margin: 0; }
+  .facts .n { color: var(--ink); font-variant-numeric: tabular-nums; }
+  .src { color: var(--muted); font-size: .875rem; margin: 6px 0 0; }
+  .src .u { font-family: var(--mono); font-size: .8125rem; }
+  .outcome { font-family: var(--mono); font-size: .75rem; border: 1px solid var(--line); border-radius: 99px; padding: 1px 8px; }
+  .outcome.partial, .outcome.failed, .outcome.unfinished { color: var(--ember); border-color: var(--ember); }
+  .note { background: var(--ember-soft); border: 1px solid var(--ember); border-radius: var(--r); padding: 10px 14px; margin: 14px 0 0; font-size: .9375rem; max-width: var(--measure); }
+
+  /* the model's own summary of the source: set as reading text, because it is what he reads first */
+  .syn { margin: 26px 0 8px; padding: 14px 0 0; border-top: 1px solid var(--line); }
+  .syn h2 { font: 600 .75rem/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 10px; }
+  .syn p { font-family: var(--serif); font-size: 1.0625rem; line-height: 1.65; margin: 0; max-width: var(--measure); }
+
+  /* filters */
+  .tools { margin: 26px 0 0; padding-top: 14px; border-top: 1px solid var(--line); display: grid; gap: 10px; }
+  .tools input[type=search] { width: 100%; max-width: 26rem; font: inherit; font-size: 1rem; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 9px 12px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { font: inherit; font-size: .8125rem; color: var(--muted); background: transparent; border: 1px solid var(--line); border-radius: 99px; padding: 6px 12px; min-height: 34px; cursor: pointer; }
+  .chip:hover { color: var(--ink); }
+  .chip[aria-pressed="true"] { color: var(--ink); background: var(--panel-2); border-color: var(--violet); }
+  .chip .c { font-variant-numeric: tabular-nums; opacity: .75; margin-left: 4px; }
+  .shown { color: var(--muted); font-size: .8125rem; margin: 0; }
+
+  /* claims */
+  .pg { margin: 30px 0 0; }
+  .pg > h3 { font: 600 .75rem/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 4px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+  .claims { margin: 0; padding: 0; list-style: none; }
+  .claim { padding: 18px 0 20px; border-bottom: 1px solid var(--line); max-width: var(--measure); }
+  .claims > .claim:last-child { border-bottom: 0; }
+  .cmeta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 0 0 7px; font-family: var(--mono); font-size: .75rem; color: var(--muted); }
+  .tag { border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; text-transform: lowercase; }
+  .tag[data-type="definition"] { color: var(--link); border-color: var(--link); }
+  .tag[data-type="empirical"] { color: var(--ember); border-color: var(--ember); }
+  .tag[data-type="recommendation"] { color: var(--ink); border-color: var(--ink); }
+  .tag[data-type="analogy"] { color: var(--muted); border-style: dashed; }
+  .verb { opacity: .8; }
+  .gist { font-family: var(--serif); font-size: 1.1875rem; line-height: 1.45; font-weight: 600; margin: 0 0 9px; }
+  /* the quote is the source's own words: set apart by a rule and typographic marks drawn by CSS, so the text itself stays verbatim */
+  .quote { margin: 0; padding: 1px 0 1px 14px; border-left: 3px solid var(--violet); color: var(--muted); font-family: var(--serif); font-style: italic; font-size: 1rem; line-height: 1.6; }
+  .quote::before { content: "\201C"; }
+  .quote::after { content: "\201D"; }
+  .bears { margin: 10px 0 0; padding: 0; list-style: none; font-size: .875rem; }
+  .bears li { margin: 4px 0; line-height: 1.5; }
+  .bears li > * { margin-right: 8px; }
+  .bears .lead { color: var(--muted); }
+  .bears .ref { font-family: var(--mono); font-size: .8125rem; color: var(--link); }
+  .st { font-family: var(--mono); font-size: .6875rem; border: 1px solid var(--line); border-radius: 99px; padding: 0 7px; color: var(--muted); }
+  .st.confirmed { color: var(--ink); border-color: var(--violet); }
+  .bears li.dismissed { opacity: .6; }
+  .bears li.dismissed .ctitle { text-decoration: line-through; }
+
+  /* the list of readings */
+  .rows { list-style: none; margin: 14px 0 0; padding: 0; }
+  .row { padding: 16px 0; border-bottom: 1px solid var(--line); max-width: var(--measure); }
+  .row .t { font-family: var(--serif); font-size: 1.25rem; line-height: 1.3; font-weight: 600; }
+  .row .t a { color: var(--ink); text-decoration-color: var(--line); text-decoration-thickness: 2px; }
+  .row .t a:hover { text-decoration-color: var(--link); }
+  .row.dim .t a { color: var(--muted); }
+  .row .meta { margin: 5px 0 0; color: var(--muted); font-size: .875rem; display: flex; flex-wrap: wrap; gap: 2px 14px; align-items: baseline; }
+  .row .meta .n { color: var(--ink); font-variant-numeric: tabular-nums; }
+  .row.dim .meta .n { color: var(--muted); }
+  .row .from { margin: 3px 0 0; font-size: .8125rem; color: var(--muted); font-family: var(--mono); }
+
+  .state { margin: 34px 0; max-width: var(--measure); color: var(--muted); }
+  .state strong { color: var(--ink); display: block; font-family: var(--serif); font-size: 1.125rem; margin-bottom: 4px; }
+  .state.bad strong { color: var(--ember); }
+  .more { color: var(--muted); font-size: .875rem; margin: 18px 0 0; }
+  @media (prefers-reduced-motion: no-preference) { .chip { transition: border-color .12s, color .12s; } }
+  @media print { .tools, .shell-head { display: none; } }
+</style>
+</head>
+<body>
+<div data-page-shell>
+  <div class="shell-head"><a href="/" data-product-mark title="manyhands — the board"><span class="mark-glyph">◆</span>manyhands</a><div id="app-nav"></div></div>
+  <main class="wrap" id="main" aria-live="polite" aria-busy="true">
+    <p class="state" id="loading" role="status">Loading what the board has read…</p>
+  </main>
+</div>
+
+<script type="module">
+  import { mountTopNav } from './core/header.mjs';
+  mountTopNav(document, 'reading');
+</script>
+<script>
+// #1894 — EVERYTHING that came from the graph is text from a web page, passed through a model: it is untrusted. So it is only
+// ever set with textContent. There is no innerHTML anywhere on this page, and a source url becomes a link only when it is
+// http: or https: (a urn: source is an uploaded file and is shown as text).
+(function () {
+  'use strict';
+  const main = document.getElementById('main');
+
+  const el = (tag, cls, text) => {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  };
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : (many || one + 's')}`;
+  const safeUrl = (u) => {
+    if (typeof u !== 'string' || !/^https?:/i.test(u)) return null;
+    try { const x = new URL(u); return x.protocol === 'http:' || x.protocol === 'https:' ? x : null; } catch (e) { return null; }
+  };
+  const hostOf = (u) => { const x = safeUrl(u); return x ? x.host.replace(/^www\./, '') : null; };
+  const when = (iso) => {
+    const t = Date.parse(iso || '');
+    if (!Number.isFinite(t)) return null;
+    return new Date(t).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  };
+  const timeEl = (iso) => {
+    const label = when(iso);
+    if (!label) return null;
+    const t = el('time', null, label);
+    t.setAttribute('datetime', new Date(Date.parse(iso)).toISOString());
+    t.title = new Date(Date.parse(iso)).toLocaleString();
+    return t;
+  };
+  const outLink = (url, label) => {
+    const a = el('a', null, label);
+    a.href = url.href;
+    a.rel = 'noopener noreferrer';
+    a.target = '_blank';
+    return a;
+  };
+  const titleOf = (title, url) => (typeof title === 'string' && title.trim()) ? title.trim() : (hostOf(url) || 'A source with no title');
+
+  const OUTCOME_NOTE = {
+    partial: 'Partial: some claims the model proposed were dropped because their quote could not be found in the source. What is shown below passed that check.',
+    failed: 'Failed: no claim could be used from this source, so nothing was kept.',
+    unfinished: 'Unfinished: this run started but never wrote a result.',
+  };
+
+  function show(...nodes) {
+    main.replaceChildren(...nodes);
+    main.removeAttribute('aria-busy');
+  }
+  function stateBox(heading, body, bad, extra) {
+    const box = el('div', 'state' + (bad ? ' bad' : ''));
+    box.setAttribute('role', bad ? 'alert' : 'status');
+    box.append(el('strong', null, heading));
+    box.append(document.createTextNode(body));
+    if (extra) box.append(extra);
+    return box;
+  }
+  const backLink = () => { const p = el('p', 'crumb'); const a = el('a', null, '← All readings'); a.href = 'reading.html'; p.append(a); return p; };
+
+  // one place that says what each failure means, so no state is a blank page
+  async function getJson(path) {
+    let res;
+    try { res = await fetch(path, { headers: { accept: 'application/json' } }); }
+    catch (e) { return { problem: stateBox('The board could not be reached.', `The page could not load readings (${e.message}). Check that the board is running, then reload.`, true) }; }
+    let body = null;
+    try { body = await res.json(); } catch (e) { /* not json */ }
+    if (res.ok && body) return { body };
+    const why = body && body.error ? body.error : `the board answered ${res.status}`;
+    if (res.status === 503) return { problem: stateBox('Readings are not available on this board right now.', `${why} (503). Nothing is wrong with the readings themselves: this board is not serving them.`, true) };
+    if (res.status === 401 || res.status === 403) return { problem: stateBox('The board asked for a sign-in this page cannot give.', `The page could not load readings (${res.status}: ${why}).`, true) };
+    if (res.status === 404) { return { notFound: true, problem: stateBox('There is no reading with that id.', 'It may have been mistyped, or it was never written. ', false, (() => { const a = el('a', null, 'See every reading'); a.href = 'reading.html'; return a; })()) }; }
+    return { problem: stateBox('The page could not load this.', `${why} (${res.status}).`, true) };
+  }
+
+  // ── the list ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+  async function showList() {
+    const r = await getJson('/api/readings');
+    if (r.problem) return show(r.problem);
+    const list = r.body.readings || [];
+    const head = [el('h1', null, 'Reading'), el('p', 'lede', 'What the board has read for you, newest first. Open one to see its claims in the order they appear in the source.')];
+    if (!list.length) return show(...head, stateBox('The board has not read anything yet.', 'A document you share with it will show up here once it has been read.'));
+    const ul = el('ul', 'rows');
+    for (const x of list) {
+      const dead = !x.claims;
+      const li = el('li', 'row' + (dead ? ' dim' : ''));
+      const t = el('div', 't');
+      const a = el('a', null, titleOf(x.title, x.url));
+      a.href = 'reading.html?run=' + encodeURIComponent(x.id);
+      t.append(a);
+      const meta = el('div', 'meta');
+      const when_ = timeEl(x.finishedAt || x.startedAt);
+      if (when_) meta.append(when_);
+      if (dead) {
+        meta.append(el('span', 'outcome ' + x.outcome, x.outcome === 'failed' ? 'failed: nothing was kept' : x.outcome === 'unfinished' ? 'unfinished' : x.outcome));
+      } else {
+        const c = el('span'); c.append(el('span', 'n', String(x.claims)), document.createTextNode(x.claims === 1 ? ' claim' : ' claims')); meta.append(c);
+        if (x.links) { const l = el('span'); l.append(el('span', 'n', String(x.links)), document.createTextNode(x.links === 1 ? ' possible link to a card' : ' possible links to cards')); meta.append(l); }
+        if (x.outcome && x.outcome !== 'complete') meta.append(el('span', 'outcome ' + x.outcome, x.outcome));
+      }
+      li.append(t, meta);
+      const u = safeUrl(x.url);
+      const from = el('div', 'from');
+      if (u) from.append(document.createTextNode('from '), outLink(u, u.host.replace(/^www\./, '') + (u.pathname.length > 1 ? u.pathname : '')));
+      else if (typeof x.url === 'string' && x.url.startsWith('urn:')) from.textContent = 'an uploaded file';
+      else if (x.url) from.textContent = x.url;
+      if (from.firstChild) li.append(from);
+      ul.append(li);
+    }
+    const out = [...head, ul];
+    if (r.body.truncated) out.push(el('p', 'more', `Showing the newest ${list.length}. Older readings are not listed.`));
+    show(...out);
+  }
+
+  // ── one run ────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  function claimEl(c, grouped) {
+    const li = el('li', 'claim');
+    const meta = el('div', 'cmeta');
+    if (c.type) { const t = el('span', 'tag', c.type); t.dataset.type = c.type; meta.append(t); }
+    const where = [!grouped && Number.isInteger(c.page) ? 'page ' + c.page : null, Number.isInteger(c.block) ? 'block ' + c.block : null].filter(Boolean).join(' · ');
+    if (where) meta.append(el('span', null, where));
+    if (c.verb) meta.append(el('span', 'verb', 'verb: ' + c.verb));
+    if (meta.childNodes.length) li.append(meta);
+    if (c.gist) li.append(el('p', 'gist', c.gist));
+    if (c.quote) li.append(el('blockquote', 'quote', c.quote));
+    else if (!c.gist) li.append(el('p', 'gist', '(this claim has no text)'));
+    if (c.links && c.links.length) {
+      const ul = el('ul', 'bears');
+      for (const l of c.links) {
+        const b = el('li', l.status === 'dismissed' ? 'dismissed' : '');
+        b.append(el('span', 'lead', 'may bear on'));
+        b.append(el('span', 'ref', l.card && l.card.shortId != null ? '#' + l.card.shortId : 'a card'));
+        if (l.card && l.card.title) b.append(el('span', 'ctitle', l.card.title));
+        b.append(el('span', 'st ' + l.status, l.status));
+        ul.append(b);
+      }
+      li.append(ul);
+    }
+    return li;
+  }
+
+  async function showRun(id) {
+    const r = await getJson('/api/readings/' + encodeURIComponent(id));
+    if (r.problem) return show(backLink(), r.problem);
+    const { run, source, claims } = r.body;
+    const name = titleOf(source.title, source.url);
+    document.title = `${name} · Reading · manyhands`;
+    const out = [backLink()];
+
+    const h1 = el('h1');
+    const u = safeUrl(source.url);
+    if (u) h1.append(outLink(u, name)); else h1.textContent = name;
+    out.push(h1);
+
+    const facts = el('p', 'facts');
+    const t = timeEl(run.finishedAt || run.startedAt);
+    if (t) facts.append(t);
+    const nc = el('span'); nc.append(el('span', 'n', String(claims.length)), document.createTextNode(claims.length === 1 ? ' claim' : ' claims')); facts.append(nc);
+    if (run.links) { const nl = el('span'); nl.append(el('span', 'n', String(run.links)), document.createTextNode(run.links === 1 ? ' possible link to a card' : ' possible links to cards')); facts.append(nl); }
+    facts.append(el('span', 'outcome ' + run.outcome, run.outcome));
+    out.push(facts);
+
+    const src = el('p', 'src');
+    if (u) src.append(document.createTextNode('Original: '), el('span', 'u', u.href));
+    else if (typeof source.url === 'string' && source.url.startsWith('urn:')) src.append(document.createTextNode('Original: an uploaded file '), el('span', 'u', source.url));
+    else if (source.url) src.append(document.createTextNode('Original: '), el('span', 'u', source.url));
+    if (src.firstChild) out.push(src);
+    if (run.askedIn && Number.isInteger(run.askedIn.postSeq)) out.push(el('p', 'src', `Asked for in commons post ${run.askedIn.postSeq}.`));
+
+    if (source.pages === 'unavailable') out.push(el('p', 'src', 'Page numbers are unavailable for this source.'));
+    if (OUTCOME_NOTE[run.outcome]) out.push(el('p', 'note', OUTCOME_NOTE[run.outcome]));
+    if (source.synopsis) {
+      const s = el('section', 'syn');
+      s.append(el('h2', null, 'What it is about (the model’s summary)'), el('p', null, source.synopsis));
+      out.push(s);
+    }
+    if (!claims.length) {
+      out.push(stateBox('This run wrote no claims.', 'There is nothing to read here; the note above says why.'));
+      return show(...out);
+    }
+
+    // filters: by type, and by text over the gist and the quote
+    const items = claims.map((c) => ({ c, li: claimEl(c, !!source.hasPages), hay: ((c.gist || '') + ' ' + (c.quote || '')).toLowerCase() }));
+    const types = [...new Set(claims.map((c) => c.type).filter(Boolean))].sort();
+    const state = { type: null, q: '' };
+    const tools = el('div', 'tools');
+    const search = el('input'); search.type = 'search'; search.placeholder = 'Filter claims by a word…'; search.setAttribute('aria-label', 'Filter claims by a word');
+    const chips = el('div', 'chips'); chips.setAttribute('role', 'group'); chips.setAttribute('aria-label', 'Filter by kind of claim');
+    const shown = el('p', 'shown');
+    const mk = (label, type, n) => {
+      const b = el('button', 'chip'); b.type = 'button';
+      b.append(document.createTextNode(label), el('span', 'c', String(n)));
+      b.addEventListener('click', () => { state.type = type; apply(); });
+      b.dataset.type = type || '';
+      return b;
+    };
+    chips.append(mk('all', null, claims.length));
+    for (const ty of types) chips.append(mk(ty, ty, claims.filter((c) => c.type === ty).length));
+    if (types.length) tools.append(chips);
+    tools.append(search, shown);
+    out.push(tools);
+
+    // PDFs: claims grouped by page, in page order (the claims arrive in source order, so a page's claims are already contiguous)
+    const groups = [];
+    if (source.hasPages) {
+      let last = null;
+      for (const it of items) {
+        const p = Number.isInteger(it.c.page) ? it.c.page : null;
+        if (!groups.length || p !== last) { groups.push({ page: p, items: [] }); last = p; }
+        groups[groups.length - 1].items.push(it);
+      }
+      for (const g of groups) {
+        const sec = el('section', 'pg');
+        sec.append(el('h3', null, g.page == null ? 'Page unknown' : 'Page ' + g.page));
+        const ul = el('ul', 'claims');
+        for (const it of g.items) ul.append(it.li);
+        sec.append(ul);
+        g.sec = sec;
+        out.push(sec);
+      }
+    } else {
+      const ul = el('ul', 'claims');
+      for (const it of items) ul.append(it.li);
+      ul.style.marginTop = '8px';
+      out.push(ul);
+    }
+
+    function apply() {
+      let n = 0;
+      for (const it of items) {
+        const ok = (!state.type || it.c.type === state.type) && (!state.q || it.hay.includes(state.q));
+        it.li.hidden = !ok;
+        if (ok) n += 1;
+      }
+      for (const g of groups) g.sec.hidden = !g.items.some((it) => !it.li.hidden);
+      for (const b of chips.children) b.setAttribute('aria-pressed', String((b.dataset.type || null) === state.type));
+      shown.textContent = (state.type || state.q) ? `Showing ${n} of ${plural(claims.length, 'claim')}.` : '';
+      if ((state.type || state.q) && n === 0) shown.textContent = `No claim matches. ${plural(claims.length, 'claim')} in all.`;
+    }
+    search.addEventListener('input', () => { state.q = search.value.trim().toLowerCase(); apply(); });
+    show(...out);
+    apply();
+  }
+
+  const run = new URLSearchParams(location.search).get('run');
+  (run ? showRun(run) : showList()).catch((e) => show(stateBox('The page could not show this.', String(e && e.message ? e.message : e), true)));
+})();
+</script>
+</body>
+</html>

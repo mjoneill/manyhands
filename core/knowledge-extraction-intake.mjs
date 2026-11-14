@@ -29,6 +29,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ingestSource } from './knowledge-extraction.mjs';
+import { linkPublished, linkAgain, linkSummary } from './knowledge-linking-supply.mjs';
 
 export const NON_SOURCE_AUTHORS = Object.freeze(['board', 'system']);
 export const MAX_RESUME_ATTEMPTS = 3;
@@ -49,8 +50,16 @@ export const jobIdFor = (url) => `job-${sha256(url)}`;
 /** #1841: a sharer's post saying "re-run" asks for ONE fresh attempt at a link whose job FAILED. Attempts are `.r1`, `.r2`, … */
 export const RERUN_RE = /\bre-?run\b/i;
 export const MAX_RERUNS = 3;
+/**
+ * #1852 — a published run whose linking was REFUSED (the search or the graph did not answer) is tried again by later ticks.
+ * The embedding model is evicted whenever another local model loads (#1530), so that refusal recurs, and it recurs when the
+ * room is busy. Three tries in all, the first attempt included; at most two retries per tick, so a backlog of refused runs
+ * cannot hold up the links shared in the room.
+ */
+export const MAX_LINK_TRIES = 3;
+export const MAX_LINK_RETRIES_PER_TICK = 2;
 
-export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fetchSource, extractor, modelKey, prompt, sharers, limit = 200, allowHttp = false, fetchImpl = fetch, now = () => new Date().toISOString(), actor = 'extractor', log = (line) => process.stderr.write(`${line}\n`), report = null } = {}) {
+export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fetchSource, extractor, modelKey, prompt, sharers, limit = 200, allowHttp = false, fetchImpl = fetch, now = () => new Date().toISOString(), actor = 'extractor', log = (line) => process.stderr.write(`${line}\n`), report = null, link = null } = {}) {
   for (const [k, v] of Object.entries({ boardUrl, stateFile, sourcesDir, fetchSource, extractor, modelKey })) if (!v) throw new Error(`createIntake needs ${k}`);
   if (typeof prompt !== 'string') throw new Error('createIntake needs the prompt text');
   if (!(sharers instanceof Set) || sharers.size === 0) throw new Error('createIntake needs sharers: the configured set of authors whose links become jobs (the PO\'s ruling, 51192). Empty means nobody, so nothing would ever run; refusing to construct.');
@@ -64,6 +73,68 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
     try { const r = await report(event); if (r && r.ok === false) reportErrors += 1; } catch { reportErrors += 1; }
   }
   const withReports = (o) => (typeof report === 'function' ? { ...o, reportErrors } : o);
+  // #1852 — an optional linker (core/knowledge-linking-supply.mjs createRunLinker). Absent: no run is linked, as before.
+  // Present: a run that published is linked to our cards BEFORE its finish report, so the report can show the links. A run
+  // is never failed by its linking: linkPublished returns the reason instead, and the job's entry in the summary carries it.
+  async function finished(url, r) {
+    let links = await linkPublished(link, r);
+    if (links) {
+      // #1852: a refusal that trying again could cure is OWED. It goes on the queue before the finish report, and the report
+      // says "not made yet". A run already queued (its tick died after queuing it, and the job was resumed) is one more try
+      // of the same entry, never a second entry. Anything else (made, or a refused config) owes nothing.
+      const had = linkQueue.find((e) => e.runId === r.runId);
+      const tries = (had?.tries ?? 0) + 1;
+      const owed = links.made !== true && links.retryable === true && tries < MAX_LINK_TRIES;
+      const entry = owed ? { runId: r.runId, url, tries, lastReason: links.reason, firstRefusedAt: had?.firstRefusedAt ?? now() } : null;
+      if (had || entry) saveLinkQueue(had ? linkQueue.flatMap((e) => (e.runId === r.runId ? (entry ? [entry] : []) : [e])) : [...linkQueue, entry]);
+      if (entry) links = { ...links, retry: { max: MAX_LINK_TRIES } };
+    }
+    await tell({ kind: 'finish', url, result: r, ...(links ? { links } : {}) });
+    return links ? { links: linkSummary(links) } : {};
+  }
+
+  /**
+   * #1852 — retry the runs whose links are owed, before anything else this tick does: oldest first, at most
+   * MAX_LINK_RETRIES_PER_TICK. Every entry ends with exactly ONE post: its links, or one line saying they were not made.
+   *   - A try is COUNTED IN THE FILE BEFORE IT IS MADE. A tick killed inside a try has spent it, so a linker that kills the
+   *     tick cannot be retried forever (the retries run first: a loop here would stop the whole service).
+   *   - The entry LEAVES THE FILE BEFORE ITS POST IS SENT. A tick that dies between the two posts nothing twice; the price is
+   *     that a follow-up the board refuses is lost (counted in reportErrors), as a refused finish report is.
+   *   - Links written by a try whose tick died before saving are not written twice: the next try finds their span keys,
+   *     proposes nothing new, and its one post says "no new ones".
+   */
+  async function retryLinks() {
+    const out = [];
+    if (typeof link !== 'function') return out;
+    const without = (runId) => linkQueue.filter((e) => e.runId !== runId);
+    for (const e of linkQueue.slice(0, MAX_LINK_RETRIES_PER_TICK)) {
+      if (e.tries >= MAX_LINK_TRIES) {
+        // only a tick that died inside the last try leaves this: that try may have written the links, so nothing is claimed
+        saveLinkQueue(without(e.runId));
+        await tell({ kind: 'links-gave-up', url: e.url, runId: e.runId, reason: e.lastReason, tries: e.tries, unfinished: true });
+        out.push({ runId: e.runId, url: e.url, try: e.tries, made: false, reason: `try ${e.tries} did not finish`, gaveUp: true });
+        continue;
+      }
+      const tries = e.tries + 1;
+      saveLinkQueue(linkQueue.map((x) => (x.runId === e.runId ? { ...x, tries, trying: true } : x)));
+      const r = await linkAgain(link, e.runId);
+      if (r.made === true) {
+        saveLinkQueue(without(e.runId));
+        await tell({ kind: 'links', url: e.url, runId: e.runId, links: r, tries, max: MAX_LINK_TRIES });
+        out.push({ runId: e.runId, url: e.url, try: tries, ...linkSummary(r) });
+      } else if (tries >= MAX_LINK_TRIES) {
+        saveLinkQueue(without(e.runId));
+        await tell({ kind: 'links-gave-up', url: e.url, runId: e.runId, reason: r.reason, tries, ...(typeof r.minScore === 'number' ? { minScore: r.minScore } : {}) });
+        out.push({ runId: e.runId, url: e.url, try: tries, made: false, reason: r.reason, gaveUp: true });
+      } else {
+        saveLinkQueue(linkQueue.map((x) => (x.runId === e.runId ? { runId: x.runId, url: x.url, tries, lastReason: r.reason, firstRefusedAt: x.firstRefusedAt } : x)));
+        out.push({ runId: e.runId, url: e.url, try: tries, made: false, reason: r.reason, gaveUp: false });
+      }
+    }
+    return out;
+  }
+  // the tick's JSON line says what it retried and what is still owed, so the log alone shows it
+  const withLinks = (o, linkRetries) => (typeof link === 'function' ? { ...o, linkRetries, pendingLinks: linkQueue.length } : o);
   const headers = () => ({ ...(token ? { Authorization: `Bearer ${token}` } : {}) });
 
   /**
@@ -77,16 +148,30 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
       const s = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
       const cursor = typeof s.cursor === 'string' && s.cursor && s.cursor !== 'start' ? s.cursor : null;
       const mode = s.mode === 'commit' || s.mode === 'seq' ? s.mode : (cursor && cursor.startsWith('ps1.') ? 'seq' : cursor && /^g[bc]1\./.test(cursor) ? 'commit' : null);
-      return { cursor: mode ? cursor : null, mode, pending: Array.isArray(s.pending) ? s.pending : [], resyncs: Array.isArray(s.resyncs) ? s.resyncs : [], updatedAt: typeof s.updatedAt === 'string' ? s.updatedAt : null, lastReadAt: typeof s.lastReadAt === 'string' ? s.lastReadAt : null };
-    } catch { return { cursor: null, mode: null, pending: [], resyncs: [], updatedAt: null, lastReadAt: null }; }
+      // #1852: pendingLinks is absent in a file written before it existed, and reads as none. An entry that is not one is dropped.
+      const pendingLinks = (Array.isArray(s.pendingLinks) ? s.pendingLinks : []).filter((e) => e && typeof e.runId === 'string' && e.runId && typeof e.url === 'string' && Number.isInteger(e.tries) && e.tries >= 1);
+      return { cursor: mode ? cursor : null, mode, pending: Array.isArray(s.pending) ? s.pending : [], resyncs: Array.isArray(s.resyncs) ? s.resyncs : [], updatedAt: typeof s.updatedAt === 'string' ? s.updatedAt : null, lastReadAt: typeof s.lastReadAt === 'string' ? s.lastReadAt : null, pendingLinks };
+    } catch { return { cursor: null, mode: null, pending: [], resyncs: [], updatedAt: null, lastReadAt: null, pendingLinks: [] }; }
   }
+  /**
+   * #1852 — the runs whose links are still owed, oldest first: { runId, url, tries, lastReason, firstRefusedAt } and, while a
+   * try is being made, trying:true. It lives in this state file, beside the cursor: loaded when a tick begins, and written by
+   * EVERY writeState, so no caller can drop it. The key is written only while the list is not empty, so a tick with nothing
+   * owed writes the file it always wrote. The reader before this change ignores the key; its WRITER drops it, so going back
+   * to that code forgets the owed retries (the runs stay published; scripts/link-run.mjs links them by hand).
+   */
+  let linkQueue = [];
+  let lastWritten = null;
   function writeState(st) {
     fs.mkdirSync(path.dirname(stateFile), { recursive: true });
     const tmp = `${stateFile}.tmp`;
-    const { updatedAt: _dropped, ...rest } = st;
-    fs.writeFileSync(tmp, JSON.stringify({ ...rest, updatedAt: now() }, null, 2));
+    const { updatedAt: _dropped, pendingLinks: _own, ...rest } = st;
+    lastWritten = rest;
+    fs.writeFileSync(tmp, JSON.stringify({ ...rest, ...(linkQueue.length ? { pendingLinks: linkQueue } : {}), updatedAt: now() }, null, 2));
     fs.renameSync(tmp, stateFile);
   }
+  /** Save the queue alone: the file's other fields exactly as this tick last wrote (or read) them. */
+  const saveLinkQueue = (next) => { linkQueue = next; writeState(lastWritten); };
 
   async function get(qs) {
     const res = await fetchImpl(`${base}/api/conversations?${qs}`, { headers: headers() });
@@ -167,6 +252,8 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
   async function tick() {
     let st = readState();
     reportErrors = 0;
+    linkQueue = st.pendingLinks;
+    lastWritten = { cursor: st.cursor, mode: st.mode, pending: st.pending, resyncs: st.resyncs, lastReadAt: st.lastReadAt };
     const started = [], skipped = [], failed = [], resumed = [];
     let pending = [...st.pending];
 
@@ -185,13 +272,16 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
       writeState({ cursor: st.cursor, mode: st.mode, pending, resyncs: st.resyncs, lastReadAt: st.lastReadAt });
     }
 
+    // 0c. #1852 — LINKS OWED from earlier ticks: free and idempotent, so they go first, capped so they cannot hold up the rest
+    const linkRetries = await retryLinks();
+
     // 1. RESUME what died mid-run, before anything new: the checkpoint has the model's answer, so this costs no model call
     for (const p of st.pending) {
       try {
         await tell({ kind: 'start', url: p.url, modelKey, jobId: p.jobId, resumed: true });
         const r = await extractor.resume({ jobId: p.jobId });
-        await tell({ kind: 'finish', url: p.url, result: r });
-        resumed.push({ url: p.url, jobId: p.jobId, runId: r.runId, outcome: r.outcome, published: r.published.length, rejected: r.rejected.length });
+        const linked = await finished(p.url, r);
+        resumed.push({ url: p.url, jobId: p.jobId, runId: r.runId, outcome: r.outcome, published: r.published.length, rejected: r.rejected.length, ...linked });
         pending = pending.filter((x) => x.jobId !== p.jobId);
       } catch (e) {
         const attempts = (p.attempts ?? 1) + 1;
@@ -208,7 +298,7 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
       const resyncs = [...st.resyncs, r.record];
       writeState({ cursor: r.cursor, mode: r.mode, pending, resyncs, lastReadAt: r.record.at });   // the re-seed read the head
       if (r.record.announced) announced.push(r.record.at);
-      return withReports({ started, resumed, skipped, failed, pending: pending.length, cursor: r.cursor, mode: r.mode, read: 0, resync: r.record, announced });
+      return withReports(withLinks({ started, resumed, skipped, failed, pending: pending.length, cursor: r.cursor, mode: r.mode, read: 0, resync: r.record, announced }, linkRetries));
     }
     const { conversations, next } = got;
     const readAt = now();   // the READ happened now; the runs below can take minutes, and the window must open here, not after them
@@ -254,14 +344,15 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
         await tell({ kind: 'start', url, modelKey, jobId });
         try {
           const r = await extractor.run({ source, modelKey, prompt, jobId });
-          started.push({ url, jobId, runId: r.runId, ...(rerunOf ? { rerunOf } : {}), outcome: r.outcome, published: r.published.length, rejected: r.rejected.length });
+          const entry = { url, jobId, runId: r.runId, ...(rerunOf ? { rerunOf } : {}), outcome: r.outcome, published: r.published.length, rejected: r.rejected.length };
+          started.push(entry);
           pending = pending.filter((x) => x.jobId !== jobId);
-          await tell({ kind: 'finish', url, result: r });
+          Object.assign(entry, await finished(url, r));
         } catch (e) { failed.push({ url, jobId, reason: `run: ${e?.message ?? e} (pending: the next tick resumes it)` }); await tell({ kind: 'fail', url, reason: failed.at(-1).reason, retry: true }); }
       }
     }
     writeState({ cursor: next, mode: st.mode, pending, resyncs: st.resyncs, lastReadAt: readAt });   // a successful read, stamped when it happened
-    return withReports({ started, resumed, skipped, failed, pending: pending.length, cursor: next, mode: st.mode, read: conversations.length, announced });
+    return withReports(withLinks({ started, resumed, skipped, failed, pending: pending.length, cursor: next, mode: st.mode, read: conversations.length, announced }, linkRetries));
   }
 
   return { tick, readState };

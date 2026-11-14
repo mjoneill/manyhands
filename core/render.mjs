@@ -57,12 +57,30 @@ function buildNestedList(items) {
 // "Alex&<link>#39</link>;s"). `\w` keeps "word#3" from matching, as before.
 const CHAT_CARD_REF_RE = /(?<![\w&;])#(\d+)/g;
 
-// Inline marks on already-escaped text: bold, italic, THEN #NNN links. Order
-// matters — the <a> insertion runs last so its attributes aren't re-processed.
+// #1894 — the ONE address the commons links besides #NNN: `/reading.html?run=run-<lowercase uuid>`, the page that shows what the
+// board read (extractor posts carry it as text). It is deliberately narrow, and runs on ALREADY-ESCAPED text like the card ref:
+//   - it must START the line or follow whitespace, so it is never the tail of a URL (`https://host/reading.html?...`), a path
+//     (`/x/reading.html?...`), a word, or `javascript:`/`data:` glued to it;
+//   - the uuid is lowercase 8-4-4-4-12 hex and must END the token: end of line, whitespace, or one sentence mark (. , ! ? ) ) that is
+//     itself followed by whitespace or the end. So `&x=1`, `/../x`, `ZZ`, `#frag` and an escaped `&lt;script&gt;` all stay plain text.
+// The href is BUILT from the matched uuid, never copied from the text, and is a same-origin path.
+const READING_ADDRESS = '(?<=^|\\s)\\/reading\\.html\\?run=run-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?=$|\\s|[.,!?)](?:$|\\s))';
+// ONE pass for both patterns, so neither one's output is ever re-scanned by the other (an <a> inserted by one cannot be
+// matched, or its attributes rewritten, by the other).
+const CHAT_LINK_RE = new RegExp(`${CHAT_CARD_REF_RE.source}|${READING_ADDRESS}`, 'g');
+
+// Inline marks on already-escaped text: bold, italic, THEN links. Order matters — the <a> insertion runs last so its
+// attributes aren't re-processed.
 function inlineChat(s) {
   return inline(s).replace(
-    CHAT_CARD_REF_RE,
-    (_, n) => `<a class="cardref" data-shortid="${n}" href="index.html?card=${n}">#${n}</a>`,
+    CHAT_LINK_RE,
+    (_, n, uuid) => {
+      if (uuid) {
+        const href = '/reading.html?run=run-' + uuid;
+        return `<a class="readinglink" href="${href}">${href}</a>`;
+      }
+      return `<a class="cardref" data-shortid="${n}" href="index.html?card=${n}">#${n}</a>`;
+    },
   );
 }
 

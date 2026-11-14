@@ -66,3 +66,43 @@ for (const s of SURFACES) {
     }, { server: { board }, launch: { headless: 'new' } });
   });
 }
+
+// #1894 — the shared nav is seven no-wrap buttons: at 390px it was 447px wide, and the seventh item (Reading) made it 506px, so
+// index, wiki, commons, insights and settings scrolled sideways on a phone. Under 560px the nav wraps onto a second row; wide
+// layouts keep their one row. Measured on the SERVED page, as the product is used.
+// wiki.html is not in this list on purpose: at 390px its own two-pane layout (#main, 60px padding) is 436px wide with the nav hidden, a
+// wiki fault the nav's 506px used to mask. It is a separate card, not the nav's.
+const PHONE_SURFACES = SURFACES.filter((s) => ['/', '/commons.html', '/settings.html'].includes(s.path));
+for (const width of [390, 480]) {
+  test(`#1894 at ${width}px no surface scrolls sideways because of the nav`, async () => {
+    await withBrowserServer(async ({ server, browser }) => {
+      for (const s of PHONE_SURFACES) {
+        const page = await browser.newPage();
+        await page.setViewport({ width, height: 800 });
+        await page.goto(`${server.baseUrl}${s.path}`, { waitUntil: 'networkidle0' });
+        await page.waitForSelector('.topnav .navlink', { timeout: 5000 });
+        const m = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, iw: window.innerWidth,
+          right: Math.max(...[...document.querySelectorAll('.topnav .navlink')].map((e) => e.getBoundingClientRect().right)) }));
+        assert.ok(m.sw <= m.iw, `${s.path} @${width}px: scrollWidth ${m.sw} > innerWidth ${m.iw}`);
+        assert.ok(m.right <= m.iw, `${s.path} @${width}px: a nav link ends at ${m.right}, past the ${m.iw}px viewport`);
+        await page.close();
+      }
+    }, { server: { board }, launch: { headless: 'new' } });
+  });
+}
+
+test('#1894 at 1024px the header is still ONE row of nav links, and a phone gets more than one (the wrap is real)', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const rows = async (width, path) => {
+      const page = await browser.newPage();
+      await page.setViewport({ width, height: 800 });
+      await page.goto(`${server.baseUrl}${path}`, { waitUntil: 'networkidle0' });
+      await page.waitForSelector('.topnav .navlink', { timeout: 5000 });
+      const n = await page.$$eval('.topnav .navlink', (els) => new Set(els.map((e) => e.getBoundingClientRect().top)).size);
+      await page.close();
+      return n;
+    };
+    for (const s of SURFACES) assert.equal(await rows(1024, s.path), 1, `${s.path} @1024px: the nav is one row, as before`);
+    assert.ok(await rows(390, '/') > 1, 'at 390px the nav wraps onto more than one row (so the test above is not passing by accident)');
+  }, { server: { board }, launch: { headless: 'new' } });
+});

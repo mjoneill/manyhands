@@ -46,8 +46,8 @@ const SHELL = '[data-page-shell]';
 const PROSE = '.prose';
 
 const VIEWPORTS = [480, 768, 1024, 1442]; // the #499 set
-const SURFACES = ['/', '/wiki.html', '/commons.html', '/insights.html', '/settings.html'];
-const EXPECTED_NAV = ['▦ Board', '📖 Wiki', '💬 Commons', '📈 Insights', '🕯 Retreat', '⚙️ Settings'];   // #1255 — retreat joins the shared nav 09-14; the room itself keeps no nav (a door, not a tab)
+const SURFACES = ['/', '/wiki.html', '/commons.html', '/insights.html', '/settings.html'];   // #1894: /reading.html is NOT here — on this fixture its API is 503 (no log-born unit), which Chrome logs as a console error, and this lane refuses every page error
+const EXPECTED_NAV = ['▦ Board', '📖 Wiki', '💬 Commons', '📜 Reading', '📈 Insights', '🕯 Retreat', '⚙️ Settings'];   // #1255 — retreat joins the shared nav 09-14; the room itself keeps no nav (a door, not a tab)
 
 const ts = '2026-05-01T00:00:00.000Z';
 

@@ -39,7 +39,7 @@ import path from 'node:path';
 import { startRestServer, makeBoardFixture, PROJECT_DIR, withBrowserServer } from './helpers/harness.mjs';
 
 const FILES = [
-  'index.html', 'wiki.html', 'commons.html', 'settings.html',
+  'index.html', 'wiki.html', 'commons.html', 'settings.html', 'reading.html',
   'core/theme.css', 'core/header.css', 'core/conversation-view.css',
 ];
 
