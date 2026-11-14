@@ -27,6 +27,10 @@
  *   P8  a tick that died INSIDE a try: the try is already counted. Two begun: one more is made. Three begun: none is made,
  *       and the one post says the links are not CONFIRMED, because that try may have written them
  *   P9  the named-file path has no state file and no tick, so it does not retry: its finish line says how to make them by hand
+ *
+ * Sabotage, 2026-11-14 (each alone, then restored): no retry step turns P2 P3 P6 P7 P7b P8 red; no per-tick cap, P6; four
+ * tries, P1 P2 P3 P7 P8; counting a try after it is made, P8; posting before the entry is removed, P7b; always writing the
+ * key, P2 P3 P4 P7b P8; a retryable config refusal, P4; never queuing, P1 P2 P3 P5 P6 P7 P7b.
  */
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
