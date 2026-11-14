@@ -52,6 +52,16 @@ const PREFIXES = Object.freeze({
 const TERM_RE = /^(scrum|schema|prov|rdf):[A-Za-z][A-Za-z0-9_-]*$/;
 /** One plain word (#1839): the model's own name for a relation, kept as a proposed predicate (decision 4cfd9497). */
 const WORD_RE = /^[A-Za-z][A-Za-z0-9_-]*$/;
+/** #1900: a short phrase of plain words ("finds jailbreaks in") is the same proposal, joined into one word with "_". */
+export const PHRASE_MAX_WORDS = 8;
+/** The model's predicate as the term the graph keeps: a prefixed term or one plain word as given, a short phrase of plain
+ *  words joined with "_", anything else null (bad-shape). Only the LABEL is joined: the span, subject and object are untouched. */
+export function predicateTerm(p) {
+  if (typeof p !== 'string') return null;
+  if (TERM_RE.test(p) || WORD_RE.test(p)) return p;
+  const words = p.trim().split(' ');
+  return words.length <= PHRASE_MAX_WORDS && words.every((w) => WORD_RE.test(w)) ? words.join('_') : null;
+}
 
 export class PredicateRefused extends Error {
   constructor(term, registry) {
@@ -86,7 +96,7 @@ export function validateItem(item, blocks) {
   // the floor (PO, 51171 finding 3): a one-word span anchors anything, so a span is at least three words, or the whole block
   if (item.span.trim().split(/\s+/).length < SPAN_MIN_WORDS && item.span.trim() !== blocks[item.block].trim()) return { ok: false, reason: 'span-mismatch', detail: `the span is shorter than three words and is not the whole block: a degenerate span anchors nothing` };
   for (const f of ['subject', 'object']) if (typeof item[f] !== 'string' || !item[f].trim()) return { ok: false, reason: 'bad-shape', detail: `${f} is required` };
-  if (typeof item.predicate !== 'string' || !(TERM_RE.test(item.predicate) || WORD_RE.test(item.predicate))) return { ok: false, reason: 'bad-shape', detail: `predicate must be a prefixed term or one plain word, got ${JSON.stringify(item.predicate)}` };
+  if (predicateTerm(item.predicate) === null) return { ok: false, reason: 'bad-shape', detail: `predicate must be a prefixed term, one plain word, or a phrase of 2–${PHRASE_MAX_WORDS} plain words, got ${JSON.stringify(item.predicate)}` };
   return { ok: true };
 }
 
@@ -140,7 +150,7 @@ export function createExtractor({ graphClient, runs, model, registry, actor = 'e
     const registered = registry.has(item.predicate);
     const predicate = registered ? item.predicate : GENERIC_RELATION;
     if (!registry.has(predicate)) throw new PredicateRefused(predicate, registry);   // the generic relation itself must be registered
-    return { predicate, ...(registered ? {} : { proposedPredicate: item.predicate }) };
+    return { predicate, ...(registered ? {} : { proposedPredicate: predicateTerm(item.predicate) }) };   // #1900: a phrase is kept joined
   }
 
   /**

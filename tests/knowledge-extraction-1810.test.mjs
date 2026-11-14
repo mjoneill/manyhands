@@ -514,11 +514,32 @@ test('#1839 R12 — a predicate in plain words ("enables", "is_defined_as") is a
 
 test('#1839 R12b — what is neither a known prefixed term nor one plain word is still bad-shape: unknown prefix, extra colon, spaces, empty, leading digit', { skip: SKIP }, async () => {
   const src = ingestSource({ text: FIXTURE, url: FIXTURE_URL });
-  const junk = ['foo:bar', 'scrum:a:b', 'is part of', '', '9lives'];
+  // #1900: 'is part of' left this list: a short phrase is now a proposed predicate (R12e). A phrase past the word cap, or
+  // with a word that is not a plain word, is still junk.
+  const junk = ['foo:bar', 'scrum:a:b', '', '9lives', 'one two three four five six seven eight nine', 'is part of 9lives', 'is  part:of'];
   const { extractor } = extractorWith({ model: fakeModel([reply(...junk.map((p) => item(1, 'definition', 'A harness is the layer between a model and the world.', 'harness', p, 'layer')))]) });
   const r = await extractor.run({ source: src, modelKey: 'fake-a', prompt: 'p' });
   assert.equal(r.published.length, 0, `nothing published (${JSON.stringify(r.published)})`);
   assert.deepEqual(r.rejected.map((x) => x.reason), junk.map(() => 'bad-shape'));
+});
+
+// ── #1900: a results-heavy article lost 11 of 22 claims because the model named comparative relations in short phrases ──
+test('#1900 R12e — a short phrase predicate ("finds jailbreaks in") is a PROPOSED predicate joined into one word, never a rejection: the claim publishes with its span unchanged', { skip: SKIP }, async () => {
+  const src = ingestSource({ text: FIXTURE, url: FIXTURE_URL });
+  // the eleven phrases run-87e9707c rejected on 2026-11-14 (read from its scrum:RejectedProposal notes)
+  const phrases = ['finds jailbreaks in', 'found legitimate breaks for', 'reached first substantial reasoning leak after',
+    'finds universal jailbreaks more severe and reliable than', 'finds better jailbreak than', 'similar to', 'leaks hidden reasoning after',
+    'finds stronger jailbreaks than', 'scales with', 'improved robustness as measured by', 'breaks more tasks than'];
+  const span = 'A harness is the layer between a model and the world.';
+  const { extractor } = extractorWith({ model: fakeModel([reply(...phrases.map((p) => item(1, 'empirical', span, 'harness', p, 'layer')))]) });
+  const r = await extractor.run({ source: src, modelKey: 'fake-a', prompt: 'p' });
+  assert.equal(r.rejected.length, 0, `nothing rejected (${JSON.stringify(r.rejected.map((x) => x.detail))})`);
+  assert.equal(r.outcome, 'complete');
+  assert.deepEqual(r.published.map((x) => x.predicate), phrases.map(() => 'scrum:relatedTo'));
+  assert.deepEqual(r.published.map((x) => x.proposedPredicate), phrases.map((p) => p.split(' ').join('_')));
+  const row = await q(`SELECT ?pp ?span WHERE { <${r.published[0].iri}> <${RS}proposedPredicate> ?pp ; <${RS}anchorText> ?span }`);
+  assert.equal(row[0]?.pp?.value, 'finds_jailbreaks_in', 'the graph keeps the joined phrase as the literal');
+  assert.equal(row[0]?.span?.value, span, 'the span is the verbatim one: only the label was joined');
 });
 
 test('#1839 R12c — the model is told the registered predicates it was handed, and to use one plain word when none fits', { skip: SKIP }, async () => {
