@@ -1839,6 +1839,7 @@ body::before {
   import { renderLineDiff } from './core/line-diff.mjs';   // #1365 — the conflict view's diff
   import { mountConversationView } from './core/conversation-view.mjs';   // #758 — the card's thread, in the pop-out
   import { resolveRoleHolder } from './core/roles.mjs';
+  import { recallBlock } from './core/recall-line.mjs';   // #1689 — the reading a post touches, under it
   // #1350 slice 3 — a name on the board is a door to what governs it. One
   // delegated listener: assignee chips are re-rendered by innerHTML all over
   // this file, so per-chip wiring would be lost on every redraw. Read-only —
@@ -1861,6 +1862,8 @@ body::before {
     openConstraintsPopover(chip, seat);
   }, true);
   window.renderChatMarkdown = renderChatMarkdown;
+  // #1689 — the panel draws the same aside the commons page does, through the same bridge as the markdown.
+  window.recallBlock = (c) => recallBlock(document, c);
   // #1367 — the editor reaches the classic script through the same bridge.
   // The two textareas that exist at load are mounted HERE (the classic script
   // ran before this module resolved); the column edit form is built per edit
@@ -6629,6 +6632,10 @@ function createConvMessageNode(c) {
   if (Array.isArray(c.attachments) && c.attachments.length) {
     msg.appendChild(renderAttachmentList(c.attachments));
   }
+  // #1689 — what the room has read that this post touches, as an aside after the author's words. Built by the shared
+  // module (text only, one checked link); a post without recall gets nothing, so its node is unchanged.
+  const recall = typeof window.recallBlock === 'function' ? window.recallBlock(c) : null;
+  if (recall) msg.appendChild(recall);
   return msg;
 }
 

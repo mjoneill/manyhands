@@ -24,6 +24,7 @@ import { identityOf, roster } from './identity.mjs';
 import { mountEditor } from './editor.mjs';   // #1367 — one editor for every composer
 import { mountComposerWatch } from './composer-watch.mjs';   // #1366 — a draft per thread
 import { installLeavingGuard, registerComposer } from './leaving-guard.mjs';
+import { recallBlock } from './recall-line.mjs';   // #1689 — what the room has read, under a post that touches it
 
 // ── pure helpers (node-testable) ───────────────────────────────────────────
 
@@ -409,6 +410,10 @@ export function mountConversationView(opts = {}) {
       c.attachments.forEach((a) => { if (a && typeof a.id === 'string') wrap.appendChild(attachmentNode(a)); });
       msg.appendChild(wrap);
     }
+    // #1689 — the reading a post touches, as an aside after everything the author sent (attachments included), so it
+    // never splits their words. A post without recall, or with recall unavailable, gets no node and keeps its old shape.
+    const recall = recallBlock(doc, c);
+    if (recall) msg.appendChild(recall);
     return msg;
   }
 

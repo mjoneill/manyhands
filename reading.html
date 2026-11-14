@@ -102,8 +102,27 @@
   .state strong { color: var(--ink); display: block; font-family: var(--serif); font-size: 1.125rem; margin-bottom: 4px; }
   .state.bad strong { color: var(--ember); }
   .more { color: var(--muted); font-size: .875rem; margin: 18px 0 0; }
+
+  /* #1689 — "what have we read about…": one box above the list. Its answers are set like the claims on a run page, so
+     a result reads as the same kind of thing, with where it came from on top. */
+  .recall { margin: 22px 0 0; padding: 14px 0 4px; border-top: 1px solid var(--line); max-width: var(--measure); }
+  .recall-form { display: grid; gap: 8px; }
+  .recall-form label { font: 600 .75rem/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .recall-row { display: flex; gap: 8px; min-width: 0; }
+  .recall-row input[type=search] { flex: 1; min-width: 0; font: inherit; font-size: 1rem; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 9px 12px; }
+  .recall-go { flex: none; font: inherit; font-size: .9375rem; color: var(--ink); background: var(--panel-2); border: 1px solid var(--violet); border-radius: var(--r); padding: 8px 16px; min-height: 40px; cursor: pointer; }
+  .recall-go:hover { background: var(--panel); }
+  .recall-out:empty { display: none; }
+  .recall-out .state { margin: 18px 0 6px; }
+  .recall-out .note { margin-top: 12px; }
+  .recall-out .claims { margin-top: 6px; }
+  .recall-out .rtitle { font-family: var(--serif); font-size: 1.0625rem; font-weight: 600; line-height: 1.35; margin: 0 0 6px; }
+  .recall-out .rtitle a { color: var(--ink); text-decoration-color: var(--line); text-decoration-thickness: 2px; }
+  .recall-out .rtitle a:hover { text-decoration-color: var(--link); }
+  .recall-out .gist { font-size: 1.0625rem; }
+  .recall-out .score { font-variant-numeric: tabular-nums; opacity: .8; }
   @media (prefers-reduced-motion: no-preference) { .chip { transition: border-color .12s, color .12s; } }
-  @media print { .tools, .shell-head { display: none; } }
+  @media print { .tools, .recall, .shell-head { display: none; } }
 </style>
 </head>
 <body>
@@ -118,7 +137,9 @@
   import { mountTopNav } from './core/header.mjs';
   mountTopNav(document, 'reading');
 </script>
-<script>
+<script type="module">
+// #1689 — a module now, so the run-id and reading-link rules are the ones the room line uses (core/recall-line.mjs).
+import { RUN_ID_RE, runOfReadingPage } from './core/recall-line.mjs';
 // #1894 — EVERYTHING that came from the graph is text from a web page, passed through a model: it is untrusted. So it is only
 // ever set with textContent. There is no innerHTML anywhere on this page, and a source url becomes a link only when it is
 // http: or https: (a urn: source is an uploaded file and is shown as text).
@@ -197,10 +218,11 @@
 
   // ── the list ───────────────────────────────────────────────────────────────────────────────────────────────────────────
   async function showList() {
+    const search = recallSearch();   // #1689 — built (and, with ?q=, already asking) before the list arrives
     const r = await getJson('/api/readings');
-    if (r.problem) return show(r.problem);
+    if (r.problem) return show(search, r.problem);
     const list = r.body.readings || [];
-    const head = [el('h1', null, 'Reading'), el('p', 'lede', 'What the board has read for you, newest first. Open one to see its claims in the order they appear in the source.')];
+    const head = [el('h1', null, 'Reading'), el('p', 'lede', 'What the board has read for you, newest first. Open one to see its claims in the order they appear in the source.'), search];
     if (!list.length) return show(...head, stateBox('The board has not read anything yet.', 'A document you share with it will show up here once it has been read.'));
     const ul = el('ul', 'rows');
     for (const x of list) {
@@ -232,6 +254,102 @@
     const out = [...head, ul];
     if (r.body.truncated) out.push(el('p', 'more', `Showing the newest ${list.length}. Older readings are not listed.`));
     show(...out);
+  }
+
+  // ── #1689: what have we read about… ──────────────────────────────────────────────────────────────────────────────────
+  // One box, one POST /api/recall { text, k: 5 }. The question lives in the address (?q=), so an answer can be
+  // bookmarked and the back button walks through earlier questions. Every string in an answer is untrusted, like the
+  // rest of this page: textContent only, and a title links only to a readingPage of the one allowed shape.
+  function recallResult(it) {
+    const li = el('li', 'claim');
+    const meta = el('div', 'cmeta');
+    const read = timeEl(it && it.readAt);
+    if (read) { const s = el('span', null, 'read '); s.append(read); meta.append(s); }
+    if (it && Number.isFinite(it.score)) {
+      const sc = el('span', 'score', 'score ' + it.score.toFixed(2));
+      sc.title = 'How closely this claim matches what you asked (higher is closer)';
+      meta.append(sc);
+    }
+    if (meta.childNodes.length) li.append(meta);
+    const source = it && it.source && typeof it.source === 'object' ? it.source : {};
+    const why = it && it.why && typeof it.why === 'object' ? it.why : {};
+    const t = el('div', 'rtitle');
+    const name = typeof source.title === 'string' && source.title.trim() ? source.title.trim() : 'A source with no title';
+    const run = runOfReadingPage(it && it.readingPage);
+    if (run) { const a = el('a', null, name); a.href = '/reading.html?run=' + run; t.append(a); } else t.textContent = name;
+    li.append(t);
+    if (typeof why.gist === 'string' && why.gist.trim()) li.append(el('p', 'gist', why.gist));
+    if (typeof why.quote === 'string' && why.quote.trim()) li.append(el('blockquote', 'quote', why.quote));
+    return li;
+  }
+
+  function recallSearch() {
+    const sec = el('section', 'recall');
+    const form = el('form', 'recall-form');
+    form.setAttribute('role', 'search');
+    const label = el('label', null, 'What have we read about…');
+    label.htmlFor = 'recall-q';
+    const row = el('div', 'recall-row');
+    const input = el('input');
+    input.type = 'search'; input.id = 'recall-q'; input.name = 'q'; input.autocomplete = 'off';
+    input.placeholder = 'a topic, a question, a phrase';
+    const go = el('button', 'recall-go', 'Look');
+    go.type = 'submit';
+    row.append(input, go);
+    form.append(label, row);
+    const out = el('div', 'recall-out');
+    sec.append(form, out);
+
+    let asked = 0;   // a slow answer to an older question must not replace a newer one
+    async function look(text) {
+      const mine = ++asked;
+      if (!text) { out.replaceChildren(); return; }
+      out.replaceChildren(stateBox('Looking through what we’ve read…', ''));
+      let res; let body = null;
+      try {
+        res = await fetch('/api/recall', { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify({ text, k: 5 }) });
+      } catch (e) {
+        if (mine === asked) out.replaceChildren(stateBox('The board could not be reached.', `Couldn’t look (${e.message}). Check that the board is running, then try again.`, true));
+        return;
+      }
+      try { body = await res.json(); } catch (e) { /* not json */ }
+      if (mine !== asked) return;
+      if (!res.ok || !body || typeof body !== 'object') {
+        const why = body && typeof body.error === 'string' ? body.error : `the board answered ${res.status}`;
+        return out.replaceChildren(stateBox(`Couldn’t look: ${why}.`, '', true));
+      }
+      if (body.available === false) {
+        const why = typeof body.reason === 'string' && body.reason.trim() ? body.reason.trim() : 'the board did not say why';
+        return out.replaceChildren(stateBox(`Couldn’t look: ${why}`, '', true));
+      }
+      const items = Array.isArray(body.items) ? body.items.filter((x) => x && typeof x === 'object') : [];
+      const parts = [];
+      if (body.partial === true) parts.push(el('p', 'note', 'Some claims are not indexed yet; this answer may be incomplete.'));
+      if (!items.length) {
+        const bar = Number.isFinite(body.bar) ? body.bar.toFixed(2) : 'not stated';
+        parts.push(stateBox(`Nothing we’ve read clears the bar for that. The bar is ${bar}.`, ''));
+      } else {
+        const ul = el('ul', 'claims');
+        for (const it of items) ul.append(recallResult(it));
+        parts.push(ul);
+      }
+      const n = body.searched && typeof body.searched === 'object' ? body.searched : null;
+      if (n && Number.isInteger(n.claims) && Number.isInteger(n.sources)) parts.push(el('p', 'shown', `Looked through ${plural(n.claims, 'claim')} from ${plural(n.sources, 'source')}.`));
+      out.replaceChildren(...parts);
+    }
+
+    const qOf = () => (new URLSearchParams(location.search).get('q') || '').trim();
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const text = input.value.trim();
+      if (!text) return;   // an empty box does nothing
+      if (text !== qOf()) history.pushState(null, '', '?q=' + encodeURIComponent(text));
+      look(text);
+    });
+    window.addEventListener('popstate', () => { const q = qOf(); input.value = q; look(q); });
+    const q0 = qOf();
+    if (q0) { input.value = q0; look(q0); }
+    return sec;
   }
 
   // ── one run ────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -364,7 +482,16 @@
     apply();
   }
 
-  const run = new URLSearchParams(location.search).get('run');
+  const params = new URLSearchParams(location.search);
+  const run = params.get('run');
+  // #1689 — opened from a recall under a room post: say so once, so the board can learn which recalls get read. Fire
+  // and forget: a failure is never shown, and the address bar is left as it is.
+  const post = params.get('post');
+  if (run && RUN_ID_RE.test(run) && params.get('from') === 'recall' && post) {
+    try {
+      fetch('/api/recall/opened', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ run, post }), keepalive: true }).catch(() => {});
+    } catch (e) { /* never shown */ }
+  }
   (run ? showRun(run) : showList()).catch((e) => show(stateBox('The page could not show this.', String(e && e.message ? e.message : e), true)));
 })();
 </script>
