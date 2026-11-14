@@ -24,3 +24,13 @@
   border-color: var(--accent, #6366f1);
   cursor: default;
 }
+
+/* #1894 — the nav is seven no-wrap buttons (≈506px) and the shell head is a no-wrap row, so on a phone every page scrolled sideways.
+   Under 560px (the nav's own width is what sets it) the head and the nav wrap onto a second row; the nav links share it evenly.
+   Wider than that none of this applies, so wide layouts are unchanged. Wrap, nothing else: no new colours, sizes or spacing above. */
+@media (max-width: 560px) {
+  [data-page-shell] > .shell-head { flex-wrap: wrap; row-gap: 8px; }
+  [data-page-shell] > .shell-head > #app-nav { flex: 1 1 15rem; }
+  .topnav { flex-wrap: wrap; gap: 5px; }
+  .topnav .navlink { flex: 1 1 auto; padding: 6px 8px; font-size: 12px; }
+}

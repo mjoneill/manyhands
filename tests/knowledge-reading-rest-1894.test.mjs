@@ -5,7 +5,7 @@
  * INTERFACE PINNED HERE:
  *   GET /api/readings[?limit=N]  → { readings: [{ id, outcome, startedAt, finishedAt, title, url, claims, links, linksByStatus, askedIn }], truncated, means }
  *        newest first; a run that failed or never finished is listed too (claims 0), because "it was tried and did not read" is news
- *   GET /api/readings/:runId     → { run, source: { title, url, synopsis, iri, hasPages }, claims: [{ id, gist, quote, type, verb, block, page, links }], means }
+ *   GET /api/readings/:runId     → { run, source: { title, url, synopsis, iri, pages: known|unavailable|none, hasPages }, claims: [{ id, gist, quote, type, verb, block, page, links }], means }
  *        claims in SOURCE order; 400 a malformed run id · 404 no such run · 503 the log-born unit is off · 401 no bearer
  *
  *   L1  the list: newest first, with each run's claim count and its live link count, failed and unfinished runs included

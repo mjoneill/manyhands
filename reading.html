@@ -23,13 +23,6 @@
     }
   }
   body { margin: 0; background: var(--bg); color: var(--ink); }
-  /* The shared nav is six no-wrap buttons: on a 390px phone it is 447px wide and the whole page scrolls sideways. This page
-     lets the shell head and the nav wrap instead (the shared sheet is left alone: other pages are not this card's to change). */
-  [data-page-shell] > .shell-head { flex-wrap: wrap; row-gap: 8px; }
-  [data-page-shell] > .shell-head > #app-nav { flex: 1 1 18rem; }
-  .topnav { flex-wrap: wrap; margin-bottom: 0; }
-  .topnav .navlink { flex: 1 1 auto; padding: 8px 12px; }
-  @media (max-width: 30rem) { .topnav { gap: 5px; } .topnav .navlink { padding: 6px 8px; font-size: 12px; } }
   [hidden] { display: none !important; }
   a { color: var(--link); text-underline-offset: .18em; }
   a:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
