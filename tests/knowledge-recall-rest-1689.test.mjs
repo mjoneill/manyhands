@@ -34,9 +34,9 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { HAVE_PY } from './helpers/graph-executor-proc.mjs';
-import { wholeBoardWorld } from './helpers/whole-board-1645.mjs';
+import { wholeBoardWorld, WB_DATASET } from './helpers/whole-board-1645.mjs';
 import { startRestServer } from './helpers/harness.mjs';
-import { WRITE_PROTOCOL, WRITE_PROTOCOL_HEADER } from '../core/graph-client.mjs';
+import { createGraphClient, WRITE_PROTOCOL, WRITE_PROTOCOL_HEADER } from '../core/graph-client.mjs';
 import { mintToken, hashToken } from '../core/credentials.mjs';
 import { readRecallConfig } from '../core/knowledge-recall.mjs';
 
@@ -80,8 +80,11 @@ function fakeEmbedder() {
 }
 // ── the executor proxy: counts queries, and the recall claims query on its own ────────────────────────────────────────────
 const isClaimsRead = (b) => b.includes(`${RS}Assertion`) && b.includes(`${RS}op`) && b.includes(`${PROV}used`) && b.includes(`${RS}gist`) && !b.includes('VALUES');
+const isOfferWrite = (b) => b.includes(`${RS}offeredSource`);
+/** `commitThenFail`: the next offer write is APPLIED by the executor but REST is told 502, and the receipt read after it fails
+ *  too: the "503 but it committed" case of #1898, so the write reports UNKNOWN although its nodes are in the graph. */
 function executorProxy() {
-  const st = { queries: 0, claimsReads: 0, server: null };
+  const st = { queries: 0, updates: 0, claimsReads: 0, server: null, commitThenFail: false, failReceipt: false };
   const start = (execUrl) => new Promise((resolve) => {
     st.server = http.createServer((req, res) => {
       const chunks = []; req.on('data', (c) => chunks.push(c));
@@ -90,6 +93,13 @@ function executorProxy() {
         const headers = Object.fromEntries(Object.entries(req.headers).filter(([k]) => !['host', 'connection', 'content-length'].includes(k)));
         try {
           if (req.method === 'POST' && req.url.startsWith('/query')) { st.queries += 1; if (isClaimsRead(body.toString())) st.claimsReads += 1; }
+          if (req.method === 'POST' && req.url.startsWith('/update')) st.updates += 1;
+          if (st.failReceipt && req.url.startsWith('/receipt/')) { st.failReceipt = false; res.writeHead(502); return res.end('injected'); }
+          if (st.commitThenFail && req.url.startsWith('/update') && isOfferWrite(body.toString())) {
+            st.commitThenFail = false; st.failReceipt = true;
+            await fetch(`${execUrl}${req.url}`, { method: req.method, headers, body });   // it commits…
+            res.writeHead(502); return res.end('injected after commit');                   // …and REST is told it did not
+          }
           const f = await fetch(`${execUrl}${req.url}`, { method: req.method, headers, body: req.method === 'GET' ? undefined : body });
           const t = await f.text();
           res.writeHead(f.status, { 'content-type': f.headers.get('content-type') || 'application/json' }); res.end(t);
@@ -108,9 +118,16 @@ before(async () => {
   const url = await emb.start();
   proxy = executorProxy();
   // SEARCH_MAX_EMBED 2: an existing setting, set small so the batching and `partial` are visible with a handful of claims
-  w = await wholeBoardWorld({ logborn: true, front: proxy.start, env: { SCRUM_ROSTER_FILE: ROSTER, SCRUM_SEAT_TOKENS: TOKENS, SCRUM_AUTH: '', SEARCH_EMBED_URL: url, SEARCH_EMBED_MODEL: 'fake-embed', SEARCH_MAX_EMBED: '2' } });
+  ENV = { SCRUM_ROSTER_FILE: ROSTER, SCRUM_SEAT_TOKENS: TOKENS, SCRUM_AUTH: '', SEARCH_EMBED_URL: url, SEARCH_EMBED_MODEL: 'fake-embed', SEARCH_MAX_EMBED: '2' };
+  w = await wholeBoardWorld({ logborn: true, front: proxy.start, env: ENV });
 });
-after(async () => { if (w) await w.stop(); if (proxy) await proxy.stop(); if (emb) await emb.stop(); });
+let ENV, restarted = null;
+after(async () => { if (restarted) await restarted.stop(); if (w) await w.stop(); if (proxy) await proxy.stop(); if (emb) await emb.stop(); });
+/** Poll until `fn()` is truthy (the bookkeeping writes land after their answers). */
+async function until(fn, ms = 20000) {
+  const end = Date.now() + ms;
+  for (;;) { const v = await fn(); if (v) return v; assert.ok(Date.now() < end, 'it happened within the time'); await new Promise((r) => setTimeout(r, 100)); }
+}
 
 const call = async (method, route, payload, { seat = 'seat-a', base = w?.rest.baseUrl } = {}) => {
   const headers = { ...(seat ? { authorization: `Bearer ${TOK[seat]}` } : {}), ...(payload ? { 'content-type': 'application/json' } : {}) };
@@ -155,10 +172,10 @@ const posted = async (author, body, extra = {}, seat = author in SEATS ? author 
   return r;
 };
 /** Wait until a post's GET carries `recall` (or the time runs out). The hook runs after the answer, so this polls. */
-async function recallOf(id, { ms = 20000 } = {}) {
+async function recallOf(id, { ms = 20000, seat = 'seat-a' } = {}) {
   const until = Date.now() + ms;
   for (;;) {
-    const g = await call('GET', `/api/conversations/${id}`);
+    const g = await call('GET', `/api/conversations/${id}`, null, { seat });
     if (g.json?.recall || Date.now() > until) return g;
     await new Promise((r) => setTimeout(r, 100));
   }
@@ -167,7 +184,7 @@ async function recallOf(id, { ms = 20000 } = {}) {
  *  where nothing surfaced is absent from every read, so this waits on the state file itself, in the server's data folder. */
 async function settle() {
   const s = await posted('seat-b', long('lime lime'));   // lime matches nothing seeded
-  const file = path.join(path.dirname(w.boardFile), 'recall-state.json');
+  const file = path.join(path.dirname(w.boardFile), 'recall-queue.json');
   const until = Date.now() + 20000;
   for (;;) {
     let has = false;
@@ -312,19 +329,19 @@ test('P5 the read routes ask the executor and the embedder nothing more for a po
   await settle();
   const cost = async (id) => {
     const q0 = proxy.st.queries, e0 = emb.st.calls, c0 = proxy.st.claimsReads;
-    const g = await call('GET', `/api/conversations/${id}`);
+    const g = await call('GET', `/api/conversations/${id}`, null, { seat: null });   // anonymous: a seat's read also writes its bookkeeping, after the answer (K2)
     return { q: proxy.st.queries - q0, e: emb.st.calls - e0, c: proxy.st.claimsReads - c0, has: 'recall' in g.json };
   };
   const a = await cost(withR.json.id); const b = await cost(untouched.json.id);
   assert.equal(a.has, true); assert.equal(b.has, false);
   assert.deepEqual([a.q, a.e, a.c], [b.q, 0, 0], `GET one: ${JSON.stringify({ withRecall: a, without: b })}`);
   const q0 = proxy.st.queries, e0 = emb.st.calls, c0 = proxy.st.claimsReads;
-  const l = await call('GET', '/api/conversations?limit=50');
+  const l = await call('GET', '/api/conversations?limit=50', null, { seat: null });
   assert.ok(l.json.some((x) => x.recall), 'the list carries recall');
   assert.deepEqual([emb.st.calls - e0, proxy.st.claimsReads - c0], [0, 0], 'the list asks the embedder nothing and never reads the claims');
   const lq = proxy.st.queries - q0;
   const l2q0 = proxy.st.queries;
-  await call('GET', '/api/conversations?author=board&limit=50');   // the same route and shape over posts that carry none
+  await call('GET', '/api/conversations?author=board&limit=50', null, { seat: null });   // the same route and shape over posts that carry none
   assert.equal(lq, proxy.st.queries - l2q0, 'the same executor queries as a list with no recall on it');
 });
 
@@ -367,40 +384,65 @@ test('K1 opened: validated, 404 for an unknown post or an offer that was not mad
   assert.equal((await call('GET', '/api/recall/counts?since=yesterday')).json.code, 'BAD_SINCE');
 });
 
-test('K2 a seat\'s read of a post with a reading is counted once; no credential is not attributed; the list counts nothing; the read costs the same', T, async () => {
+test('K2 a seat\'s read of a post with an offer is recorded once, in the graph, after the answer; no credential and the list record nothing; the read costs the same', T, async () => {
   // a source of its own: every earlier one surfaced within the last quietPosts posts
   await seedRun({ title: 'The olive grove', url: 'https://example.com/olive', claims: [{ gist: 'olive', quote: 'Olives.' }] });
   await recall('olive');
   const q = await posted('seat-a', long('olive olive'));
-  const g = await recallOf(q.json.id);
+  const g = await recallOf(q.json.id, { seat: null });
   assert.ok(g.json.recall?.items?.length, g.text);
-  const seats0 = (await call('GET', '/api/recall/counts')).json.seats;
-  const before = (k) => seats0[k]?.readCarrying ?? 0;
+  const counts = async () => (await call('GET', '/api/recall/counts', null, { seat: null })).json;
+  const b0 = (await counts()).seats['seat-b']?.readCarrying ?? 0;
   const cost = async (seat) => {
-    const q0 = proxy.st.queries, e0 = emb.st.calls;
+    const q0 = proxy.st.queries, u0 = proxy.st.updates, e0 = emb.st.calls;
     const r = await call('GET', `/api/conversations/${q.json.id}`, null, { seat });
-    return { q: proxy.st.queries - q0, e: emb.st.calls - e0, ms: r.ms, text: r.text };
+    return { q: proxy.st.queries - q0, u: proxy.st.updates - u0, e: emb.st.calls - e0, ms: r.ms, text: r.text };
   };
   const anon = await cost(null);
-  const b1 = await cost('seat-b'); const b2 = await cost('seat-b'); const b3 = await cost('seat-b');
-  assert.deepEqual([b1.q, b1.e], [anon.q, anon.e], `a seat's read asks nothing more than an anonymous one: ${JSON.stringify({ anon: anon.q, seat: b1.q })}`);
-  assert.equal(b1.text, anon.text, 'and answers the same bytes');
-  await call('GET', '/api/conversations?limit=20', null, { seat: 'seat-a' });   // the list is not a read of a post
-  const c = (await call('GET', '/api/recall/counts')).json;
-  assert.equal((c.seats['seat-b']?.readCarrying ?? 0) - before('seat-b'), 1, 'three reads, counted once');
-  assert.equal((c.seats['seat-a']?.readCarrying ?? 0) - before('seat-a'), 0, 'the list and the anonymous read count nothing');
-  console.log(`# K2 GET /api/conversations/:id ms: anonymous ${anon.ms.toFixed(1)}, seat ${[b1, b2, b3].map((x) => x.ms.toFixed(1)).join('/')}`);
+  await call('GET', '/api/conversations?limit=20', null, { seat: 'seat-b' });   // the list is not a read of a post
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal((await counts()).seats['seat-b']?.readCarrying ?? 0, b0, 'the anonymous read and the list recorded nothing');
+  const u0 = proxy.st.updates;
+  const b1 = await cost('seat-b');
+  await until(async () => ((await counts()).seats['seat-b']?.readCarrying ?? 0) === b0 + 1);
+  assert.equal(proxy.st.updates - u0, 1, 'the first read wrote ONE recall.read, after its answer');
+  const b2 = await cost('seat-b'); const b3 = await cost('seat-b');
+  await new Promise((r) => setTimeout(r, 300));
+  for (const b of [b2, b3]) assert.deepEqual([b.q, b.u, b.e], [anon.q, 0, anon.e], `a re-read asks exactly what an anonymous read asks: ${JSON.stringify({ anon, b })}`);
+  for (const b of [b1, b2, b3]) assert.equal(b.text, anon.text, 'and answers the same bytes');
+  assert.equal((await counts()).seats['seat-b'].readCarrying, b0 + 1, 'three reads, recorded once');
+  console.log(`# K2 GET /api/conversations/:id ms: anonymous ${anon.ms.toFixed(1)}, seat first read ${b1.ms.toFixed(1)}, re-reads ${b2.ms.toFixed(1)}/${b3.ms.toFixed(1)}; first read's own executor queries before settling: ${b1.q} (anonymous ${anon.q})`);
   // an opening with a seat is attributed; the browser's (no credential) counts in opened only
   const run = g.json.recall.items[0].readingPage.split('run=')[1];
-  const o0 = c.opened;
+  const c = await counts();
   assert.equal((await call('POST', '/api/recall/opened', { run, post: q.json.id }, { seat: null })).status, 200);
-  const c2 = (await call('GET', '/api/recall/counts')).json;
-  assert.equal(c2.opened, o0 + 1);
+  const c2 = await counts();
+  assert.equal(c2.opened, c.opened + 1);
   assert.equal(c2.seats['seat-b']?.opened ?? 0, c.seats['seat-b']?.opened ?? 0);
+  const again = await call('POST', '/api/recall/opened', { run, post: q.json.id }, { seat: null });
+  assert.deepEqual([again.status, again.json.already], [200, true], 'a re-open adds nothing');
   assert.equal((await call('POST', '/api/recall/opened', { run, post: q.json.id }, { seat: 'seat-b' })).status, 200);
-  const c3 = (await call('GET', '/api/recall/counts')).json;
-  assert.equal(c3.opened, o0 + 1, 'the same (post, run) pair is one opening overall');
+  const c3 = await counts();
+  assert.equal(c3.opened, c.opened + 1, 'the same offer is one opening overall');
   assert.equal(c3.seats['seat-b'].opened, (c.seats['seat-b']?.opened ?? 0) + 1, 'and attributed to the seat that opened it');
+});
+
+test('X1 an offer write that committed but reported UNKNOWN: unavailable, then the next retry yields the offer exactly once', T, async () => {
+  await seedRun({ title: 'The date palm', url: 'https://example.com/date', claims: [{ gist: 'date', quote: 'Dates.' }] });
+  await recall('date');
+  proxy.st.commitThenFail = true;
+  const p = await posted('seat-a', long('date date'));
+  const g = await recallOf(p.json.id, { seat: null });
+  assert.match(g.json.recall.unavailable, /UNKNOWN/, `reported failed, so not carried (${g.text})`);
+  assert.equal(proxy.st.commitThenFail, false, 'PRECONDITION: the injected fault fired');
+  const post = `https://scrumboard.local/entity/${p.json.id}`;
+  const gc = createGraphClient({ baseUrl: w.exec.baseUrl, expectedDatasetId: WB_DATASET, timeoutMs: 30000, label: 'kr1689' });
+  const offersOn = async () => { const r = await gc.query(`SELECT ?o WHERE { ?o <${RS}offerOn> <${post}> }`); assert.ok(r.ok, r.reason); return r.rows; };
+  assert.equal((await offersOn()).length, 1, 'though the offer landed');
+  await settle();   // a later post's success retries it: the write is refused as not fresh, and the landed node is read back
+  const after = await call('GET', `/api/conversations/${p.json.id}`, null, { seat: null });
+  assert.deepEqual(after.json.recall.items.map((i) => i.source.title), ['The date palm']);
+  assert.equal((await offersOn()).length, 1, 'exactly one offer node');
 });
 
 test('L1 latency: POST /api/conversations with recall on, against a post that gets none (printed, not asserted beyond "no wait")', T, async () => {
@@ -415,4 +457,22 @@ test('L1 latency: POST /api/conversations with recall on, against a post that ge
     console.log(`# L1 POST /api/conversations median ms: eligible for recall ${med(eligible).toFixed(1)}, not eligible ${med(none).toFixed(1)} (embedder delay 1500 ms)`);
     assert.ok(med(eligible) < 1000, 'the post never waits for the embedder');
   } finally { emb.st.mode = 'pass'; emb.st.delayMs = 0; }
+});
+
+test('X2 the offer cache is a projection: delete it, restart the server, and the same posts carry the same recall', T, async () => {
+  const dir = path.dirname(w.boardFile);
+  const ids = (await call('GET', '/api/conversations?limit=200', null, { seat: null })).json.filter((x) => x.recall?.items).map((x) => x.id).slice(-5);
+  assert.ok(ids.length >= 3, 'PRECONDITION: posts that carry recall');
+  const before = {};
+  for (const id of ids) before[id] = (await call('GET', `/api/conversations/${id}`, null, { seat: null })).text;
+  await w.rest.kill();
+  await new Promise((r) => setTimeout(r, 300));
+  fs.rmSync(path.join(dir, 'recall-offers.json'));
+  restarted = await startRestServer({ boardFile: w.boardFile, env: { SCRUM_GRAPH_DATASET_ID: WB_DATASET, SCRUM_GRAPH_EXECUTOR_URL: w.frontUrl,
+    SCRUM_GRAPH_UNIT_CARDS: '1', SCRUM_GRAPH_UNIT_COLUMNS: '1', SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_GRAPH_UNIT_LOGBORN: '1', ...ENV } });
+  const base = restarted.baseUrl;
+  // the first read starts the rebuild (one query) and is not held for it; the cache is ready on a later read
+  await until(async () => 'recall' in (await call('GET', `/api/conversations/${ids[0]}`, null, { seat: null, base })).json);
+  for (const id of ids) assert.equal((await call('GET', `/api/conversations/${id}`, null, { seat: null, base })).text, before[id], `post ${id}: the same bytes`);
+  assert.ok(fs.existsSync(path.join(dir, 'recall-offers.json')), 'and the cache file is written again');
 });

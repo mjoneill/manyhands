@@ -115,6 +115,7 @@
   "tests/knowledge-delivery-show-1852.test.mjs",
   "tests/knowledge-reading-rest-1894.test.mjs",
   "tests/knowledge-recall-rest-1689.test.mjs",
+  "tests/knowledge-recall-graph-1689.test.mjs",
   "tests/knowledge-delivery-rest-1852.test.mjs",
   "tests/knowledge-linking-dismiss-1852.test.mjs",
   "tests/knowledge-extraction-entry-1810.test.mjs",

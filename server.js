@@ -85,7 +85,9 @@ import { createGraphClient, setExecutorMeter } from './core/graph-client.mjs';  
 import { decideIntention as linkDecideIntention, linkCountsQuery, countLinkUse, linkDecisionsQuery, decisionsOfRows, retiringDecision, dismissalCount } from './core/knowledge-linking.mjs';   // #1851, #1850, #1852
 import { deliveryQuery, linksOfDeliveryRows, selectDeliveries, firstShowings, deliverySourcesQuery, sourcesOfRows, deliveryBlock, showIntention, DELIVERY_DEADLINE_MS } from './core/knowledge-delivery.mjs';   // #1852
 import * as READING from './core/knowledge-reading.mjs';   // #1894
-import { readRecallConfig, createRecallEngine, createRecallState, createRecallHook, publicItem as recallPublicItem, RECALL_COUNTS_MEANS } from './core/knowledge-recall.mjs';   // #1689
+import { readRecallConfig, createRecallEngine, createRecallQueue, createOfferProjection, createRecallHook, publicItem as recallPublicItem, RECALL_COUNTS_MEANS,
+  POST_IRI as RECALL_POST_IRI, offerIri as recallOfferIri, offerIntention as recallOfferIntention, openIntention as recallOpenIntention, readIntention as recallReadIntention,
+  offersQuery as recallOffersQuery, offersOfRows, RECALL_TERMS } from './core/knowledge-recall.mjs';   // #1689
 import { createExecutorMeter, createKeepAlive, captureCpuProfile } from './core/executor-meter.mjs';   // #1570 — what REST asks the executor, and REST's own loop delay
 import { postFeed, DiscoveryError } from './core/post-discovery.mjs';   // #1574 R3
 import { createReadGate } from './core/read-admission.mjs';   // #1574 A1–A5
@@ -7159,14 +7161,18 @@ async function handleGetReading(req, res, rawId) {
 }
 // ── #1689 — AMBIENT RECALL: a room post carries the readings it touches, with the sentence that matched ──────────────────
 // The rules and the index live in core/knowledge-recall.mjs; this is the I/O. The claims are read from the graph with the
-// log-born unit's reader, the embedder is the search's own, and both files sit in the data folder beside the search index.
-// Recall is OFF, and says why, when the config is invalid, the unit is off or no embedder is configured.
+// log-born unit's reader, the embedder is the search's own. The RECORDS (offers, openings, a seat's read of a post carrying
+// one) are graph nodes; the files beside the search index are the vectors, the job's queue, and a read cache of the offers.
+// Recall is OFF, and says why, when the config is invalid, a graph unit it needs is off, or no embedder is configured.
 const RECALL_INDEX_FILE = path.join(DATA_DIR, 'recall-index.jsonl');
-const RECALL_STATE_FILE = path.join(DATA_DIR, 'recall-state.json');
+const RECALL_QUEUE_FILE = path.join(DATA_DIR, 'recall-queue.json');
+const RECALL_OFFERS_FILE = path.join(DATA_DIR, 'recall-offers.json');
 const RECALL_POST_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 let _recall = null;
 function recallOffReason() {
-  if (!LOGBORN) return 'recall is off: the claims live in the graph executor, and this server does not run the log-born unit (SCRUM_GRAPH_UNIT_LOGBORN)';
+  if (!LOGBORN) return 'recall is off: the claims and the offers live in the graph executor, and this server does not run the log-born unit (SCRUM_GRAPH_UNIT_LOGBORN)';
+  // an offer names its post, and the compiler checks that post is a schema:Comment in the graph: with posts in the document only, it cannot
+  if (!ANNOUNCE_EXECUTOR) return 'recall is off: posts are not in the graph on this server (SCRUM_GRAPH_UNIT_CONVERSATIONS), so an offer could not name its post';
   if (!SEARCH_EMBED_URL || !SEARCH_EMBED_MODEL) return 'recall is off: no embedder is configured on this server (SEARCH_EMBED_URL, SEARCH_EMBED_MODEL)';
   return null;
 }
@@ -7182,6 +7188,26 @@ async function recallPostText(id) {
   const i = findConversationIndex(data, id);
   return i < 0 ? null : data.conversations[i].body;
 }
+const recallRebuild = async () => offersOfRows(await LOGBORN.query(recallOffersQuery()));
+/**
+ * One post's offers, written as ONE `recall.offer` by the board itself (BOARD_PERSON, as its other own writes are attributed),
+ * never by the post's author. Only APPLIED makes them real. A freshness refusal may be a write that DID land earlier though it
+ * was reported failed (a timeout that committed, #1898): the post's offers are read back, and if the graph holds any they
+ * are this post's answer, taken exactly once.
+ */
+async function recallWriteOffers(id, seq, items) {
+  const cfg = readRecallConfig();
+  if (!cfg.ok) return { ok: false, reason: `recall is off: ${cfg.error}` };
+  const post = RECALL_POST_IRI(id);
+  const r = await LOGBORN.write(recallOfferIntention({ post, actor: BOARD_PERSON, at: new Date().toISOString(),
+    offers: items.map((i) => ({ source: i.sourceIri, assertion: i.why.claim, score: i.score, bar: cfg.minScore })) }));
+  if (r.outcome === 'APPLIED') return { ok: true, items: items.map((i) => ({ ...i, offer: recallOfferIri(post, i.sourceIri) })) };
+  if (r.outcome === 'PRECONDITION_FAILED') {
+    const back = offersOfRows(await LOGBORN.query(recallOffersQuery([post]))).get(id);
+    if (back?.items.length) return { ok: true, items: back.items, adopted: true };
+  }
+  return { ok: false, reason: `the offer write is ${r.outcome}${r.reason ? `: ${String(r.reason).slice(0, 200)}` : ''}` };
+}
 function recallUnit() {
   if (_recall) return _recall;
   const engine = createRecallEngine({
@@ -7190,34 +7216,54 @@ function recallUnit() {
     embed: (texts, o) => embedTexts(texts, o), model: SEARCH_EMBED_MODEL,
     indexFile: RECALL_INDEX_FILE, maxEmbed: SEARCH_MAX_EMBED, maxEmbedChars: SEARCH_MAX_EMBED_CHARS,
   });
-  const state = createRecallState({ file: RECALL_STATE_FILE });
-  const loaded = state.load();
+  const queue = createRecallQueue({ file: RECALL_QUEUE_FILE });
+  const loaded = queue.load();
   if (!loaded.ok) console.error(`[#1689] ${loaded.error}`);
-  _recall = { engine, state, hook: createRecallHook({ engine, state, readConfig: () => readRecallConfig(), readPostText: recallPostText }) };
+  const projection = createOfferProjection({ file: RECALL_OFFERS_FILE });
+  const ready = () => projection.ensure(recallRebuild);
+  _recall = { engine, queue, projection, ready,
+    hook: createRecallHook({ engine, queue, projection, ready, readConfig: () => readRecallConfig(), readPostText: recallPostText, writeOffers: recallWriteOffers }) };
   return _recall;
 }
 /**
- * The `recall` field a post read carries, from the state alone: no executor query, no embedder call. A post with nothing
- * decided, or nothing surfaced, is returned AS IT WAS (the same object), so its answer is unchanged byte for byte. A
- * redacted post never carries one.
+ * The `recall` field a post read carries, from the offer cache and the queue alone: no executor query, no embedder call. A
+ * post with nothing offered, nothing pending, is returned AS IT WAS (the same object), byte for byte. A redacted post never
+ * carries one. With no cache file the cache is rebuilt from the graph ONCE per process, in the background, never awaited here.
  */
 function withRecall(post) {
   if (!post || typeof post !== 'object' || post.redacted || typeof post.id !== 'string') return post;
   let r;
-  try { r = recallUnit().state.publicOf(post.id); } catch { return post; }
+  try {
+    const u = recallUnit();
+    // the file, when there is one, costs no query; the rebuild runs only where recall is on
+    if (!u.projection.ready() && !u.projection.loadFile() && !recallOffReason()) u.ready().catch((e) => console.error(`[#1689] offer cache not rebuilt yet: ${e?.message ?? e}`));
+    r = u.projection.publicOf(post.id) ?? (u.queue.loaded() ? u.queue.unavailableOf(post.id) : undefined);
+  } catch { return post; }
   return r ? { ...post, recall: r } : post;
 }
-/** The seat a request is from, or null; never a refusal (the #1852 delivery's rule, deliverySeat: no key, a read-scope key
- *  or an unbound actor is simply no seat). Production runs auth in observe mode, so req.auth.enforced is not what decides. */
-function recallSeat(req) {
+/** The seat a request is from, as its actor IRI, or null; never a refusal (the #1852 delivery's rule, deliverySeat: no key, a
+ *  read-scope key or an unbound actor is simply no seat). Production runs auth in observe mode, so req.auth.enforced does not decide. */
+function recallSeatActor(req) {
   if (!LOGBORN) return null;
-  try { const a = deliverySeat(req); return a ? a.replace(/^urn:ex:seat\//, '') : null; } catch { return null; }
+  try { return deliverySeat(req); } catch { return null; }
 }
-/** After a single-post read that SHOWED a reading: note (post, seat) once, in memory, to tell "noticed" from "carried". */
+const recallReadsNoted = new Set();   // (post, seat) already sent this process: a re-read sends nothing (a restart forgets, and the graph refuses the repeat)
+/**
+ * After a single-post read that SHOWED an offer: one `recall.read` (post, seat), written by that seat, AFTER the answer and
+ * never awaited, the way recordShowings does it. A failure is logged and goes no further; a repeat is refused by the graph.
+ */
 function noteRecallRead(req, shown) {
   if (!shown?.recall?.items) return;
-  const seat = recallSeat(req);
-  if (seat) { try { recallUnit().state.noteRead(shown.id, seat); } catch { /* a read that could not be noted is only not counted */ } }
+  const actor = recallSeatActor(req);
+  if (!actor) return;
+  const key = `${shown.id}\u0000${actor}`;
+  if (recallReadsNoted.has(key)) return;
+  recallReadsNoted.add(key);
+  setImmediate(() => {
+    LOGBORN.write(recallReadIntention({ post: RECALL_POST_IRI(shown.id), actor, at: new Date().toISOString() })).then((r) => {
+      if (r.outcome !== 'APPLIED' && r.outcome !== 'PRECONDITION_FAILED') { recallReadsNoted.delete(key); console.error(`[#1689] read of ${shown.id} not recorded: ${r.outcome}${r.reason ? ` ${r.reason}` : ''}`); }
+    }, (e) => { recallReadsNoted.delete(key); console.error(`[#1689] read of ${shown.id} not recorded: ${e?.message ?? e}`); });
+  });
 }
 /**
  * Which posts recall is computed for: a ROOM post (no card, no talk) by a person or a seat, at least minChars long. A seat
@@ -7264,16 +7310,23 @@ async function handleRecallOpened(req, res) {
     try { body = JSON.parse((await readBody(req)) || '{}'); } catch { body = {}; }
     if (!READING.isRunId(body?.run)) return sendJSON(res, 400, { error: 'run is "run-" followed by a lowercase UUID', code: 'BAD_RUN_ID' });
     if (typeof body.post !== 'string' || !RECALL_POST_ID_RE.test(body.post)) return sendJSON(res, 400, { error: 'post is a post id (a lowercase UUID)', code: 'BAD_POST_ID' });
-    const { state } = recallUnit();
-    if (!state.loaded()) return sendJSON(res, 503, { error: state.error(), code: 'RECALL_UNAVAILABLE' });
-    const r = state.opened({ run: body.run, post: body.post, seat: recallSeat(req) });   // the browser has no seat: counted, unattributed
-    if (!r.ok) {
-      return sendJSON(res, 404, r.code === 'RECALL_POST_NOT_FOUND'
-        ? { error: `post ${body.post} carries no recall`, code: 'RECALL_POST_NOT_FOUND' }
-        : { error: `run ${body.run} was not offered on post ${body.post}`, code: 'RECALL_OFFER_NOT_FOUND' });
+    if (!LOGBORN) return sendJSON(res, 503, { error: recallOffReason(), code: 'RECALL_UNAVAILABLE' });
+    const u = recallUnit();
+    await u.ready();
+    const item = u.projection.itemFor(body.post, body.run);
+    if (!item) {
+      return sendJSON(res, 404, u.projection.hasItems(body.post)
+        ? { error: `run ${body.run} was not offered on post ${body.post}`, code: 'RECALL_OFFER_NOT_FOUND' }
+        : { error: `post ${body.post} carries no recall`, code: 'RECALL_POST_NOT_FOUND' });
     }
-    sendJSON(res, 200, { recorded: true, run: body.run, post: body.post });
+    // a seat's opening is its own; a page with no seat (the browser) is stood for by the board, and the node says which
+    const seat = recallSeatActor(req);
+    const r = await LOGBORN.write(recallOpenIntention({ offer: item.offer, actor: seat ?? BOARD_PERSON, via: seat ? 'seat' : 'browser', at: new Date().toISOString() }));
+    // not fresh = this opener already opened this offer (the offer itself is known to the cache): nothing more to record
+    if (r.outcome === 'APPLIED' || r.outcome === 'PRECONDITION_FAILED') return sendJSON(res, 200, { recorded: true, run: body.run, post: body.post, ...(r.outcome === 'PRECONDITION_FAILED' ? { already: true } : {}) });
+    sendJSON(res, 503, { error: `the opening could not be recorded: ${r.outcome}${r.reason ? ` ${r.reason}` : ''}`, code: 'GRAPH_WRITE_UNKNOWN' });
   } catch (e) {
+    if (executorRefused(res, e)) return;
     console.error('POST /api/recall/opened:', e.message);
     sendJSON(res, 500, { error: e.message });
   }
@@ -7282,14 +7335,30 @@ async function handleRecallCounts(req, res) {
   try {
     const qs = parseQuery(req.url);
     const raw = qs.since == null ? null : String(qs.since);
-    // the same reading of an instant as GET /api/links/counts
+    // the same reading of an instant as GET /api/links/counts; it reaches SPARQL only re-serialised by Date
     const ms = raw == null ? null : /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/.test(raw) ? Date.parse(raw) : NaN;
     if (ms !== null && !Number.isFinite(ms)) return sendJSON(res, 400, { error: 'since is an ISO date-time, e.g. 2026-11-05T00:00:00Z', code: 'BAD_SINCE' });
     const since = ms === null ? null : new Date(ms).toISOString();
-    const { state } = recallUnit();
-    if (!state.loaded()) return sendJSON(res, 503, { error: state.error(), code: 'RECALL_UNAVAILABLE' });
-    sendJSON(res, 200, { ...state.counts(since), since, means: RECALL_COUNTS_MEANS });
+    if (!LOGBORN) return sendJSON(res, 503, { error: recallOffReason(), code: 'RECALL_UNAVAILABLE' });
+    const { queue } = recallUnit();
+    if (!queue.loaded()) return sendJSON(res, 503, { error: queue.error(), code: 'RECALL_UNAVAILABLE' });
+    const T = RECALL_TERMS;
+    const after = since ? `FILTER(STR(?at) >= ${JSON.stringify(since)}) ` : '';
+    const offers = await LOGBORN.query(`SELECT ?o ?post WHERE { ?o a <${T.RecallOffer}> ; <${T.offerOn}> ?post ; <${T.dateCreated}> ?at ${after}}`);
+    const opens = await LOGBORN.query(`SELECT ?o ?by ?via WHERE { ?x a <${T.RecallOpening}> ; <${T.ofOffer}> ?o ; <${T.openedBy}> ?by ; <${T.openedVia}> ?via ; <${T.dateCreated}> ?at ${after}}`);
+    const reads = await LOGBORN.query(`SELECT ?post ?by WHERE { ?x a <${T.RecallRead}> ; <${T.readOf}> ?post ; <${T.readBy}> ?by ; <${T.dateCreated}> ?at ${after}}`);
+    const seatOf = (iri) => (String(iri).startsWith('urn:ex:seat/') ? String(iri).slice('urn:ex:seat/'.length) : null);
+    const seats = {};
+    const seat = (k) => (seats[k] ??= { readCarrying: new Set(), opened: new Set() });
+    for (const r of reads) { const k = seatOf(r.by.value); if (k) seat(k).readCarrying.add(r.post.value); }
+    for (const r of opens) { const k = r.via.value === 'seat' ? seatOf(r.by.value) : null; if (k) seat(k).opened.add(r.o.value); }
+    for (const k of Object.keys(seats)) seats[k] = { readCarrying: seats[k].readCarrying.size, opened: seats[k].opened.size };
+    sendJSON(res, 200, {
+      offered: new Set(offers.map((r) => r.o.value)).size, opened: new Set(opens.map((r) => r.o.value)).size,
+      postsWithRecall: new Set(offers.map((r) => r.post.value)).size, ...queue.counts(since), seats, since, means: RECALL_COUNTS_MEANS,
+    });
   } catch (e) {
+    if (executorRefused(res, e)) return;
     console.error('GET /api/recall/counts:', e.message);
     sendJSON(res, 500, { error: e.message });
   }

@@ -24,6 +24,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { quoteOf } from './knowledge-delivery.mjs';
 import { isRunId } from './knowledge-reading.mjs';
+import { LOGBORN_TERMS as TM } from './graph-compiler.mjs';
 
 export const RECALL_CONFIG_FILE = fileURLToPath(new URL('../knowledge-recall.json', import.meta.url));
 
@@ -144,7 +145,7 @@ export function recallItems({ queryVec, claims, rows, minScore, k, text }) {
     });
 }
 
-export const publicItem = ({ sourceIri, runId, ...item }) => item;
+export const publicItem = ({ sourceIri, runId, offer, ...item }) => item;
 
 // ── the index file ────────────────────────────────────────────────────────────────────────────────────────────────────
 // A header line {generation: {model, dims, textShape, builtAt}}, then {id, hash, vec} rows. A PROJECTION: delete it and the
@@ -309,182 +310,249 @@ export function applyQuiet({ items, seq, entries, quietPosts }) {
   return items.filter((i) => !recent.has(i.sourceIri));
 }
 
-// ── the state ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+// ── the work queue (a file) ───────────────────────────────────────────────────────────────────────────────────────────
+// #1689 (the owner's ruling): the RECORDS (offers, openings, reads) are graph nodes. What stays in a file is the JOB's own
+// state: which posts were decided (so none is computed twice), which could not be and are waiting for a retry, and which
+// gave up. Losing it costs a little recomputation and the pending retries, never a fact about the room.
 const POST_CAP = 2000;
-const OPENED_CAP = 10000;
-const READS_CAP = 20000;
-const READS_FLUSH_MS = 10000;
-export const RECALL_COUNTS_MEANS = 'offered: (post, source) pairs attached to posts decided at or after `since`. opened: distinct (post, run) pairs whose reading page '
-  + 'was opened from an offer at or after `since` (a reopen counts once). postsWithRecall: posts that carry at least one item. unavailable: posts whose recall '
-  + 'could not be computed (first failure at or after `since`), of which pendingRetries are still to be retried by later posts and gaveUp failed three times. '
-  + 'A post where the search ran and nothing surfaced is in none of these. '
-  + 'seats: per seat, readCarrying = distinct posts carrying a reading that the seat READ (GET /api/conversations/:id with its credential; the list is not a read, a read '
-  + 'with no credential is not attributed) and opened = distinct (post, run) pairs it opened. "carried" (offered) is not "noticed" (readCarrying) is not "opened". '
-  + 'An opening with no seat (the browser) counts in `opened` only.';
+const atomicWrite = (fsImpl, file, text) => { const tmp = `${file}.tmp-${process.pid}`; fsImpl.writeFileSync(tmp, text); fsImpl.renameSync(tmp, file); };
+function jsonFile(fsImpl, file, shape) {
+  const raw = fsImpl.existsSync(file) ? fsImpl.readFileSync(file, 'utf8') : null;
+  if (raw == null) return null;
+  const doc = JSON.parse(raw);
+  if (!shape(doc)) throw new Error('not the shape this file holds');
+  return doc;
+}
 
 /**
- * The per-post decisions and the openings, in one small JSON file written atomically (temp + rename). A file that cannot
- * be read is NEVER overwritten: recall stays off until someone looks at it.
- *   entry: { seq, at, items: [...], sources: [...] }                          something surfaced
- *          { seq, at, none: true }                                              the search ran; nothing surfaced (or all quiet)
- *          { seq, at, unavailable, tries, lastReason, firstFailedAt, gaveUp? }  it could not look
+ *   entry: { seq, at, offered: n }                                       offers APPLIED in the graph (the graph holds them)
+ *          { seq, at, none: true }                                        the search ran; nothing surfaced (or all were quiet)
+ *          { seq, at, unavailable, tries, lastReason, firstFailedAt, gaveUp? }   it could not look, or the offer write failed
+ * A file that cannot be read is NEVER overwritten: recall stays off until someone looks at it.
  */
-export function createRecallState({ file, cap = POST_CAP, openedCap = OPENED_CAP, readsCap = READS_CAP, flushMs = READS_FLUSH_MS, fsImpl = fs, now = () => Date.now(), log = (m) => console.error(m) }) {
-  let st = null;
+export function createRecallQueue({ file, cap = POST_CAP, fsImpl = fs }) {
+  let posts = null;
   let loadError = null;
-  let readKeys = new Set();   // `${post}\u0000${seat}` already noted
-  let flushTimer = null;
   function load() {
-    try {
-      const raw = fsImpl.existsSync(file) ? fsImpl.readFileSync(file, 'utf8') : null;
-      if (raw == null) { st = { posts: {}, opened: [], reads: [] }; readKeys = new Set(); return { ok: true }; }
-      const doc = JSON.parse(raw);
-      if (!doc || typeof doc.posts !== 'object' || !Array.isArray(doc.opened)) throw new Error('not a recall state (posts, opened)');
-      st = { posts: doc.posts, opened: doc.opened, reads: Array.isArray(doc.reads) ? doc.reads : [] };
-      readKeys = new Set(st.reads.map((r) => `${r.post}\u0000${r.seat}`));
-      return { ok: true };
-    } catch (e) { st = null; loadError = `${path.basename(file)} cannot be read (${e.message}); recall is off until it is fixed or moved aside`; return { ok: false, error: loadError }; }
+    try { posts = jsonFile(fsImpl, file, (d) => d && typeof d.posts === 'object')?.posts ?? {}; return { ok: true }; }
+    catch (e) { posts = null; loadError = `${path.basename(file)} cannot be read (${e.message}); recall is off until it is fixed or moved aside`; return { ok: false, error: loadError }; }
   }
-  const need = () => { if (!st) throw new Error(`recall state not loaded: ${loadError ?? 'load() was not called'}`); };
+  const need = () => { if (!posts) throw new Error(`recall queue not loaded: ${loadError ?? 'load() was not called'}`); };
   function save() {
-    const ids = Object.keys(st.posts);
-    if (ids.length > cap) {
-      ids.sort((a, b) => st.posts[a].seq - st.posts[b].seq);
-      for (const id of ids.slice(0, ids.length - cap)) delete st.posts[id];
-    }
-    if (st.opened.length > openedCap) st.opened = st.opened.slice(-openedCap);
-    if (st.reads.length > readsCap) { st.reads = st.reads.slice(-readsCap); readKeys = new Set(st.reads.map((r) => `${r.post}\u0000${r.seat}`)); }
-    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }   // this write carries any noted reads
-    const tmp = `${file}.tmp-${process.pid}`;
-    fsImpl.writeFileSync(tmp, JSON.stringify({ version: 1, posts: st.posts, opened: st.opened, reads: st.reads }));
-    fsImpl.renameSync(tmp, file);
+    const ids = Object.keys(posts);
+    if (ids.length > cap) { ids.sort((a, b) => posts[a].seq - posts[b].seq); for (const id of ids.slice(0, ids.length - cap)) delete posts[id]; }
+    atomicWrite(fsImpl, file, JSON.stringify({ version: 2, posts }));
   }
-  const iso = () => new Date(now()).toISOString();
   return {
-    load,
-    loaded: () => !!st,
-    error: () => loadError,
-    has: (id) => !!st && Object.hasOwn(st.posts, id),
-    raw: (id) => (st && Object.hasOwn(st.posts, id) ? st.posts[id] : undefined),
-    entries: () => (st ? Object.values(st.posts) : []),
-    /** The field a reader sees, or undefined (absent) when nothing surfaced or nothing was decided. */
-    publicOf(id) {
-      const e = st && Object.hasOwn(st.posts, id) ? st.posts[id] : null;
-      if (!e) return undefined;
-      if (Array.isArray(e.items) && e.items.length) return { items: e.items.map(publicItem) };
-      if (typeof e.unavailable === 'string') return { unavailable: e.unavailable, ...(e.gaveUp ? { gaveUp: true } : {}) };
-      return undefined;
-    },
-    decide(id, entry) { need(); st.posts[id] = entry; save(); },
-    /** The oldest posts still waiting to be retried, by sequence. */
-    pending(n) { need(); return Object.entries(st.posts).filter(([, e]) => typeof e.unavailable === 'string' && !e.gaveUp).sort(([, a], [, b]) => a.seq - b.seq).slice(0, n).map(([id, e]) => ({ id, ...e })); },
-    opened({ run, post, seat = null }) {
-      need();
-      const e = Object.hasOwn(st.posts, post) ? st.posts[post] : null;
-      if (!e || !Array.isArray(e.items) || !e.items.length) return { ok: false, code: 'RECALL_POST_NOT_FOUND' };
-      if (!e.items.some((i) => i.runId === run)) return { ok: false, code: 'RECALL_OFFER_NOT_FOUND' };
-      st.opened.push({ run, post, seat: typeof seat === 'string' && seat ? seat : null, at: iso() });
-      save();
-      return { ok: true };
-    },
-    /**
-     * A seat READ a post that carries a reading: noted once per (post, seat), in memory only. It rides the next state write
-     * (a post's decision or an opening), or a debounced flush when none comes; never a file write on the read itself. A
-     * restart before that write loses the batch: an undercount of "noticed", accepted for a read path that costs nothing.
-     */
-    noteRead(post, seat) {
-      if (!st || typeof seat !== 'string' || !seat) return false;
-      const e = Object.hasOwn(st.posts, post) ? st.posts[post] : null;
-      if (!e || !Array.isArray(e.items) || !e.items.length) return false;
-      const key = `${post}\u0000${seat}`;
-      if (readKeys.has(key)) return false;
-      readKeys.add(key);
-      st.reads.push({ post, seat, at: iso() });
-      if (!flushTimer) {
-        flushTimer = setTimeout(() => { flushTimer = null; try { save(); } catch (err) { log(`[#1689] noted reads not persisted yet: ${err?.message ?? err}`); } }, flushMs);
-        flushTimer.unref?.();
-      }
-      return true;
+    load, loaded: () => !!posts, error: () => loadError,
+    has: (id) => !!posts && Object.hasOwn(posts, id),
+    raw: (id) => (posts && Object.hasOwn(posts, id) ? posts[id] : undefined),
+    decide(id, entry) { need(); posts[id] = entry; save(); },
+    /** The oldest posts still waiting for a retry, by sequence. */
+    pending(n) { need(); return Object.entries(posts).filter(([, e]) => typeof e.unavailable === 'string' && !e.gaveUp).sort(([, a], [, b]) => a.seq - b.seq).slice(0, n).map(([id, e]) => ({ id, ...e })); },
+    /** A post's `recall` when it could not be decided: { unavailable, gaveUp? }, else undefined. */
+    unavailableOf(id) {
+      const e = posts && Object.hasOwn(posts, id) ? posts[id] : null;
+      return e && typeof e.unavailable === 'string' ? { unavailable: e.unavailable, ...(e.gaveUp ? { gaveUp: true } : {}) } : undefined;
     },
     counts(since = null) {
       need();
-      const after = (t) => !since || (typeof t === 'string' && t >= since);
-      let offered = 0, postsWithRecall = 0, unavailable = 0, pendingRetries = 0, gaveUp = 0;
-      for (const e of Object.values(st.posts)) {
-        if (Array.isArray(e.items) && e.items.length && after(e.at)) { offered += e.items.length; postsWithRecall++; }
-        if (typeof e.unavailable === 'string' && after(e.firstFailedAt)) { unavailable++; if (e.gaveUp) gaveUp++; else pendingRetries++; }
+      let unavailable = 0, pendingRetries = 0, gaveUp = 0;
+      for (const e of Object.values(posts)) {
+        if (typeof e.unavailable !== 'string' || (since && !(typeof e.firstFailedAt === 'string' && e.firstFailedAt >= since))) continue;
+        unavailable++; if (e.gaveUp) gaveUp++; else pendingRetries++;
       }
-      const openedRows = st.opened.filter((o) => after(o.at));
-      const opened = new Set(openedRows.map((o) => `${o.post}\u0000${o.run}`)).size;
-      const seats = {};
-      const seat = (k) => (seats[k] ??= { readCarrying: 0, opened: new Set() });
-      for (const r of st.reads) if (after(r.at)) seat(r.seat).readCarrying++;   // already distinct per (post, seat)
-      for (const o of openedRows) if (o.seat) seat(o.seat).opened.add(`${o.post}\u0000${o.run}`);
-      for (const k of Object.keys(seats)) seats[k].opened = seats[k].opened.size;
-      return { offered, opened, postsWithRecall, unavailable, pendingRetries, gaveUp, seats };
+      return { unavailable, pendingRetries, gaveUp };
     },
   };
 }
+
+// ── the read cache of offers (a file, a PROJECTION of the graph) ──────────────────────────────────────────────────────
+/**
+ * The offers each post carries, keyed by post id, so a post read adds no executor query. Rebuilt from the graph with ONE
+ * query (offersQuery) when the file is missing or unreadable; added to when an offer write is APPLIED. Delete it and the next
+ * process gives back the same `recall` on the same posts.
+ */
+export function createOfferProjection({ file, fsImpl = fs, log = (m) => console.error(m) }) {
+  let posts = null;          // id → { seq, items }
+  let building = null;
+  const save = () => { try { atomicWrite(fsImpl, file, JSON.stringify({ version: 1, posts })); } catch (e) { log(`[#1689] offer cache not persisted (it is rebuilt from the graph): ${e.message}`); } };
+  const self = {
+    ready: () => !!posts,
+    /** Load from the file alone (no query). True when the cache is now loaded. */
+    loadFile() {
+      if (posts) return true;
+      try {
+        const doc = jsonFile(fsImpl, file, (d) => d && typeof d.posts === 'object');
+        if (doc) { posts = doc.posts; return true; }
+      } catch (e) { log(`[#1689] offer cache unreadable, it is rebuilt from the graph: ${e.message}`); }
+      return false;
+    },
+    /** Load from the file, or (missing, unreadable) rebuild from `rebuild()` → Map id → {seq, items}. Single-flight. */
+    ensure(rebuild) {
+      if (self.loadFile()) return Promise.resolve(true);
+      building ??= (async () => {
+        const m = await rebuild();
+        posts = Object.fromEntries(m);
+        save();
+        return true;
+      })().finally(() => { building = null; });
+      return building;
+    },
+    add(id, seq, items) { if (!posts) return; posts[id] = { seq, items: [...items].sort(byScore) }; save(); },
+    has: (id) => !!posts && Object.hasOwn(posts, id),
+    publicOf(id) { const e = posts && Object.hasOwn(posts, id) ? posts[id] : null; return e && e.items.length ? { items: e.items.map(publicItem) } : undefined; },
+    entries: () => (posts ? Object.values(posts).map((e) => ({ seq: e.seq, sources: e.items.map((i) => i.sourceIri) })) : []),
+    itemFor(id, runId) { const e = posts && Object.hasOwn(posts, id) ? posts[id] : null; return e ? e.items.find((i) => i.runId === runId) ?? null : null; },
+    hasItems: (id) => !!posts && Object.hasOwn(posts, id) && posts[id].items.length > 0,
+  };
+  return self;
+}
+
+export const RECALL_COUNTS_MEANS = 'Read from the graph\'s records. offered: offers (one per post and source) made at or after `since`. postsWithRecall: posts carrying at least one. '
+  + 'opened: offers opened at least once (by a seat or by a browser with no seat). seats: per seat, readCarrying = posts carrying an offer that the seat READ '
+  + '(GET /api/conversations/:id with its credential; the list is not a read, a read with no credential is not attributed) and opened = offers it opened. '
+  + '"carried" (offered) is not "noticed" (readCarrying) is not "opened". From the job\'s queue: unavailable = posts whose recall could not be computed or '
+  + 'whose offer could not be written (first failure at or after `since`), of which pendingRetries will be retried by later posts and gaveUp failed three times. '
+  + 'A post where the search ran and nothing surfaced is in none of these.';
 
 // ── the hook ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 export const RETRIES_PER_TRIGGER = 2;
 export const MAX_TRIES = 3;
 
 /**
- * After a post's answer is sent: decide its recall, once. The work is QUEUED (one at a time, in the order posts were
- * answered) so the quiet rule sees every earlier decision; the caller never waits for it.
+ * After a post's answer is sent: decide its recall, once. QUEUED (one at a time, in the order posts were answered) so the
+ * quiet rule sees every earlier decision; the caller never waits for it.
  *
- * A post whose recall could not be computed (the local embedder is evicted whenever another local model loads, #1530, so
- * this recurs exactly when the room is busy) is RETRIED, bounded, with no scheduler of its own: after a later post's recall
- * succeeds, up to RETRIES_PER_TRIGGER of the oldest unavailable posts are tried again, each at most MAX_TRIES times in all
- * (its first attempt is try 1). Success replaces its entry with its real answer, decided as of its own sequence; after the
- * last failure it stays unavailable with gaveUp and is never tried again. Recall OFF (not configured) stores nothing.
+ * An offer EXISTS only once its graph write is APPLIED (`writeOffers`, injected): only then does the post carry it. A write
+ * that is refused, unknown or late leaves the post unavailable for the retry below. `writeOffers` recognises a write that
+ * landed although it was reported as failed (the IRI is derived from post and source, so the retry is refused as not fresh,
+ * and the node read back is the answer): such a post gets its offers exactly once.
+ *
+ * Bounded retry, no scheduler of its own: the local embedder is evicted whenever another local model loads (#1530), so
+ * "unavailable" recurs exactly when the room is busy. After a later post's recall succeeds, up to RETRIES_PER_TRIGGER of the
+ * oldest unavailable posts are tried again, each at most MAX_TRIES times in all (the first attempt is try 1); success
+ * decides the post as of its OWN sequence (only earlier posts quiet it, and a later post's offers are never rewritten); the
+ * last failure leaves it unavailable with gaveUp. Recall OFF (not configured) stores nothing.
  */
-export function createRecallHook({ engine, state, readConfig, readPostText, log = (m) => console.error(m), now = () => Date.now() }) {
-  let queue = Promise.resolve();
+export function createRecallHook({ engine, queue, projection, ready = async () => {}, readConfig, readPostText, writeOffers, log = (m) => console.error(m), now = () => Date.now() }) {
+  let chain = Promise.resolve();
   const iso = () => new Date(now()).toISOString();
-  const decideFrom = (id, seq, items, cfg, extra = {}) => {
-    const kept = applyQuiet({ items, seq, entries: state.entries(), quietPosts: cfg.quietPosts }).slice(0, cfg.maxItems);
-    state.decide(id, kept.length ? { seq, at: iso(), items: kept, sources: kept.map((i) => i.sourceIri), ...extra } : { seq, at: iso(), none: true, ...extra });
-  };
+  /** → true when decided (offers written, or nothing to offer); a reason string when the write failed. */
+  async function decideFrom(id, seq, items, cfg, extra = {}) {
+    const kept = applyQuiet({ items, seq, entries: projection.entries(), quietPosts: cfg.quietPosts }).slice(0, cfg.maxItems);
+    if (!kept.length) { queue.decide(id, { seq, at: iso(), none: true, ...extra }); return true; }
+    let w;
+    try { w = await writeOffers(id, seq, kept); } catch (e) { w = { ok: false, reason: `the offer could not be written: ${e?.message ?? e}` }; }
+    if (!w.ok) return w.reason;
+    projection.add(id, seq, w.items);
+    queue.decide(id, { seq, at: iso(), offered: w.items.length, ...extra });
+    return true;
+  }
   async function retry(e, cfg) {
     let text = null;
     try { text = await readPostText(e.id); } catch (err) { text = undefined; log(`[#1689] post ${e.id} could not be re-read for its retry: ${err?.message ?? err}`); }
     const tries = (e.tries ?? 1) + 1;
-    const failed = (reason) => {
-      const { id, ...was } = e;
-      state.decide(id, { ...was, unavailable: reason, lastReason: reason, tries, ...(tries >= MAX_TRIES ? { gaveUp: true } : {}) });
-    };
-    if (text === null) {   // gone (redacted or deleted): nothing will ever be computed for it
-      const { id, ...was } = e;
-      return state.decide(id, { ...was, unavailable: 'the post can no longer be read', lastReason: 'the post can no longer be read', gaveUp: true });
-    }
+    const { id, ...was } = e;
+    const failed = (reason) => queue.decide(id, { ...was, unavailable: reason, lastReason: reason, tries, ...(tries >= MAX_TRIES ? { gaveUp: true } : {}) });
+    if (text === null) return queue.decide(id, { ...was, unavailable: 'the post can no longer be read', lastReason: 'the post can no longer be read', gaveUp: true });
     if (text === undefined) return failed('the post could not be re-read');
+    if (projection.has(id)) return queue.decide(id, { seq: e.seq, at: iso(), offered: projection.publicOf(id)?.items.length ?? 0, retried: tries });   // already in the graph (a rebuilt cache found it)
     const r = await engine.recall(text, { allSources: true });
     if (r.off) return;   // recall turned off since: not a try
     if (!r.available) return failed(r.reason);
-    decideFrom(e.id, e.seq, r.items, cfg, { retried: tries });
+    const d = await decideFrom(id, e.seq, r.items, cfg, { retried: tries });
+    if (d !== true) failed(d);
   }
   async function run({ id, seq, text }) {
-    if (!state.loaded() || state.has(id)) return;   // decided once; a re-read always gives the same answer
+    if (!queue.loaded() || queue.has(id)) return;   // decided once; a re-read always gives the same answer
     const cfg = readConfig();
     if (!cfg.ok) return;
+    await ready();                                  // the quiet rule reads the offer cache
+    if (projection.has(id)) return;
     const r = await engine.recall(text, { allSources: true });
     if (r.off) return;
-    if (!r.available) {
-      const at = iso();
-      return state.decide(id, { seq, at, unavailable: r.reason, lastReason: r.reason, tries: 1, firstFailedAt: at });
-    }
-    decideFrom(id, seq, r.items, cfg);
-    for (const e of state.pending(RETRIES_PER_TRIGGER)) await retry(e, cfg);
+    const at = iso();
+    const unavailable = (reason) => queue.decide(id, { seq, at, unavailable: reason, lastReason: reason, tries: 1, firstFailedAt: at });
+    if (!r.available) return unavailable(r.reason);
+    const d = await decideFrom(id, seq, r.items, cfg);
+    if (d !== true) return unavailable(d);
+    for (const e of queue.pending(RETRIES_PER_TRIGGER)) await retry(e, cfg);
   }
-  const hook = {
+  return {
     engine,
     /** Queue one post's recall. Returns at once; never throws, never rejects. */
     afterPost(post) {
-      queue = queue.then(() => run(post)).catch((e) => log(`[#1689] recall for post ${post?.id} failed: ${e?.message ?? e}`));
+      chain = chain.then(() => run(post)).catch((e) => log(`[#1689] recall for post ${post?.id} failed: ${e?.message ?? e}`));
     },
-    idle: () => queue.then(() => engine.idle?.()),
+    idle: () => chain.then(() => engine.idle?.()),
   };
-  return hook;
+}
+
+// ── the records, in the graph ─────────────────────────────────────────────────────────────────────────────────────────
+// #1689 (the owner's ruling on storage): what recall OFFERED, what was OPENED, and which seats READ a post that carried an
+// offer are records, so they are graph nodes, small and separate, never a rewrite of the post. Each IRI is derived from what
+// it is about, so a repeat (a retry after a write that did land, a re-open, a re-read) names the same node and is refused.
+const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
+/** The compiler's own terms, for the server's count queries: never a hand-typed predicate IRI. */
+export const RECALL_TERMS = TM;
+export const POST_IRI = (id) => `https://scrumboard.local/entity/${id}`;
+export const offerIri = (post, source) => `https://scrumboard.local/recall/${sha(`${post}\n${source}`)}`;
+export const openingIri = (offer, actor) => `${offer}/opened/${sha(actor)}`;
+export const readIri = (post, actor) => `https://scrumboard.local/recall/read/${sha(`${post}\n${actor}`)}`;
+const op = () => `urn:ex:op/${crypto.randomUUID()}`;
+
+/** All of one post's offers in ONE `recall.offer`. `offers`: [{ source, assertion, score, bar }]. */
+export function offerIntention({ post, offers, actor, at, opId = op() }) {
+  return { kind: 'recall.offer', opId, actor, post, at, offers: offers.map((o) => ({ iri: offerIri(post, o.source), source: o.source, assertion: o.assertion, score: o.score, bar: o.bar })) };
+}
+export function openIntention({ offer, actor, via, at, opId = op() }) {
+  return { kind: 'recall.open', opId, actor, offer, opening: openingIri(offer, actor), via, at };
+}
+export function readIntention({ post, actor, at, opId = op() }) {
+  return { kind: 'recall.read', opId, actor, post, read: readIri(post, actor), at };
+}
+
+/**
+ * Every offer (or those on `posts`), joined to what a reader is shown: the claim's gist and quote, its run (for the reading
+ * page) and when that run finished, the source's title and url, and the post's sequence (for the quiet rule).
+ */
+export function offersQuery(posts = null) {
+  const pin = posts && posts.length ? `VALUES ?post { ${posts.map((p) => `<${p}>`).join(' ')} } ` : '';
+  return `SELECT ?o ?post ?seq ?src ?a ?sc ?bar ?gist ?span ?r ?rat ?name ?url WHERE { ${pin}?o a <${TM.RecallOffer}> ; <${TM.offerOn}> ?post ; <${TM.offeredSource}> ?src ; `
+    + `<${TM.fromAssertion}> ?a ; <${TM.score}> ?sc ; <${TM.minScore}> ?bar OPTIONAL { ?post <${TM.postSeq}> ?seq } `
+    + `OPTIONAL { ?a <${TM.gist}> ?gist } OPTIONAL { ?a <${TM.anchorText}> ?span } `
+    + `OPTIONAL { ?a <${TM.ofRun}> ?r OPTIONAL { ?rep a <${TM.ExtractionReport}> ; <${TM.ofRun}> ?r ; <${TM.at}> ?rat } } `
+    + `OPTIONAL { ?src <${TM.name}> ?name } OPTIONAL { ?src <${TM.url}> ?url } }`;
+}
+
+/** Items sort the same way however they were made: best score first, then the claim's IRI. */
+const byScore = (x, y) => y.score - x.score || String(x.why.claim).localeCompare(String(y.why.claim));
+
+/** Rows of offersQuery → Map postId → { seq, items } (items as a post carries them, plus sourceIri, runId and offer). */
+export function offersOfRows(rows) {
+  const out = new Map();
+  const seen = new Set();
+  for (const r of rows || []) {
+    const o = r.o?.value; const post = r.post?.value;
+    if (!o || !post || seen.has(o) || !post.startsWith(POST_IRI(''))) continue;
+    seen.add(o);
+    const id = post.slice(POST_IRI('').length);
+    const runSeg = String(r.r?.value ?? '').split('/').pop();
+    const runId = isRunId(runSeg) ? runSeg : null;
+    const { quote, truncated } = quoteOf(lit(r, 'span') ?? '');
+    const item = {
+      source: { title: lit(r, 'name'), url: lit(r, 'url') },
+      readingPage: runId ? `/reading.html?run=${runId}` : null,
+      readAt: lit(r, 'rat'),
+      why: { gist: lit(r, 'gist'), quote, ...(truncated ? { quoteTruncated: true } : {}), claim: r.a.value },
+      score: Number(r.sc.value),
+      sourceIri: r.src.value, runId, offer: o,
+    };
+    const e = out.get(id) ?? { seq: r.seq ? Number(r.seq.value) : null, items: [] };
+    e.items.push(item);
+    out.set(id, e);
+  }
+  for (const e of out.values()) e.items.sort(byScore);
+  return out;
 }

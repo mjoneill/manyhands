@@ -16,12 +16,15 @@
  *   E4  recall off (config invalid, unit off, no embedder): available:false and off:true, and nothing is embedded
  *   E5  no claims at all: an answer (the search ran over nothing), and the embedder is not asked
  *   S1  the quiet rule: a source attached at post N is not attached at N+1…N+quietPosts, and is again at N+quietPosts+1
- *   S2  the state is written atomically, capped to the most recent posts by sequence, and reads back the same
- *   H1  the hook never makes its caller wait, and stores one decision per post, which a re-read gives back unchanged
+ *   S2  the work queue is written atomically, capped by sequence, reads back the same, and an unreadable one is never overwritten
+ *   S3  the offer cache: loaded from its file, or rebuilt ONCE from the graph when the file is missing; reads add nothing
+ *   H1  the hook never makes its caller wait, and decides each post once, which a re-read gives back unchanged
  *   H2  unavailable → retried on a later post's success (oldest first, at most 2 per trigger), each at most 3 tries in all
- *   H3  a retry applies the quiet rule as of the retried post's own sequence, and never rewrites another post's stored answer
+ *   H3  a retry applies the quiet rule as of the retried post's own sequence, and never rewrites another post's offers
  *   H4  computed-but-nothing is stored (never recomputed) and is not shown to readers
- *   K1  counts: offered pairs, opened pairs, posts with recall, unavailable, pending retries, gave up, and `since`
+ *   H5  an offer exists only once its write is APPLIED: a failed write leaves the post unavailable and it is retried; a write
+ *       that landed although reported failed is taken back (the writer reads it), exactly once
+ *   K1  the queue's counts: unavailable, pending retries, gave up, and `since`
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -31,7 +34,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {
   validateRecallConfig, readRecallConfig, RECALL_CONFIG_FILE, claimsOfRows, claimText, recallItems, publicItem,
-  createRecallEngine, createRecallState, createRecallHook, applyQuiet,
+  createRecallEngine, createRecallQueue, createOfferProjection, createRecallHook, applyQuiet,
 } from '../core/knowledge-recall.mjs';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'recall1689-'));
@@ -225,33 +228,71 @@ test('S1 the quiet rule by post sequence', () => {
   assert.deepEqual(applyQuiet({ items: [it('A')], seq: 99, entries, quietPosts: 20 }).map((i) => i.sourceIri), ['A'], 'a LATER post never quiets an earlier one');
 });
 
-test('S2 the state file: atomic, capped by sequence, reads back the same', () => {
-  const d = tmp(); const file = path.join(d, 'recall-state.json');
+test('S2 the work queue: atomic, capped by sequence, reads back the same; an unreadable one is never overwritten', () => {
+  const d = tmp(); const file = path.join(d, 'recall-queue.json');
   try {
-    const s = createRecallState({ file, cap: 3 });
+    const s = createRecallQueue({ file, cap: 3 });
     assert.equal(s.load().ok, true);
-    for (let n = 1; n <= 5; n++) s.decide(`p${n}`, { seq: n, at: new Date().toISOString(), items: [it(`S${n}`)], sources: [`S${n}`] });
-    assert.deepEqual(fs.readdirSync(d), ['recall-state.json'], 'no temp file left behind');
-    const back = createRecallState({ file, cap: 3 }); back.load();
-    assert.equal(back.has('p1'), false); assert.equal(back.has('p2'), false);
-    assert.deepEqual(back.publicOf('p5'), { items: [publicItem(it('S5'))] });
-    assert.equal(back.publicOf('p404'), undefined);
+    for (let n = 1; n <= 5; n++) s.decide(`p${n}`, { seq: n, at: new Date().toISOString(), none: true });
+    assert.deepEqual(fs.readdirSync(d), ['recall-queue.json'], 'no temp file left behind');
+    const back = createRecallQueue({ file, cap: 3 }); back.load();
+    assert.equal(back.has('p1'), false); assert.equal(back.has('p2'), false); assert.equal(back.raw('p5').none, true);
     fs.writeFileSync(file, '{ torn');
-    const torn = createRecallState({ file }); const l = torn.load();
-    assert.equal(l.ok, false); assert.match(l.error, /recall-state\.json/);
-    assert.throws(() => torn.decide('p9', { seq: 9, none: true }), /not loaded/, 'an unreadable state is never overwritten');
+    const torn = createRecallQueue({ file }); const l = torn.load();
+    assert.equal(l.ok, false); assert.match(l.error, /recall-queue\.json/);
+    assert.throws(() => torn.decide('p9', { seq: 9, none: true }), /not loaded/);
     assert.equal(fs.readFileSync(file, 'utf8'), '{ torn');
   } finally { fs.rmSync(d, { recursive: true, force: true }); }
 });
 
-// ── the hook ──────────────────────────────────────────────────────────────────────────────────────────────────────────
+test('S3 the offer cache: from its file, or rebuilt once from the graph; a missing file gives back the same answer', async () => {
+  const d = tmp(); const file = path.join(d, 'recall-offers.json');
+  try {
+    let rebuilds = 0;
+    const graph = new Map([['p1', { seq: 1, items: [it('S1', 0.7)] }]]);
+    const rebuild = async () => { rebuilds++; return graph; };
+    const a = createOfferProjection({ file }); await Promise.all([a.ensure(rebuild), a.ensure(rebuild)]);
+    assert.equal(rebuilds, 1, 'single-flight');
+    const first = JSON.stringify(a.publicOf('p1'));
+    assert.deepEqual(JSON.parse(first), { items: [publicItem(it('S1', 0.7))] });
+    const b = createOfferProjection({ file }); await b.ensure(rebuild);
+    assert.equal(rebuilds, 1, 'the file is used when it is there');
+    fs.rmSync(file);
+    const c = createOfferProjection({ file }); await c.ensure(rebuild);
+    assert.equal(rebuilds, 2); assert.equal(JSON.stringify(c.publicOf('p1')), first, 'the same recall on the same post');
+    assert.equal(c.publicOf('p2'), undefined);
+  } finally { fs.rmSync(d, { recursive: true, force: true }); }
+});
+
+// ── the hook, over a fake offer writer that behaves as the graph does (fresh per post and source) ─────────────────────
+function fakeGraph() {
+  const nodes = new Map();   // `${post}|${source}` → item
+  const g = { nodes, fail: null, landThenFail: false, writes: 0 };
+  g.write = async (id, seq, items) => {
+    g.writes++;
+    if (g.fail) return { ok: false, reason: g.fail };
+    const taken = items.filter((i) => nodes.has(`${id}|${i.sourceIri}`));
+    if (taken.length) {   // the freshness refusal: read back what is there, as the server's writer does
+      const back = [...nodes.entries()].filter(([k]) => k.startsWith(`${id}|`)).map(([, v]) => v);
+      return back.length ? { ok: true, items: back, adopted: true } : { ok: false, reason: 'PRECONDITION_FAILED' };
+    }
+    for (const i of items) nodes.set(`${id}|${i.sourceIri}`, i);
+    if (g.landThenFail) { g.landThenFail = false; return { ok: false, reason: 'the offer write is UNKNOWN: http 502' }; }
+    return { ok: true, items };
+  };
+  return g;
+}
 function hookOver(dir, { embed = fakeEmbed(), rows = [claimRow({ gist: 'kiwi', src: 'SK', name: 'Kiwi' }), claimRow({ gist: 'plum', src: 'SP', name: 'Plum' })], texts = new Map() } = {}) {
   const { e } = engineOver(dir, rows, { embed, maxEmbed: 50 });
-  const state = createRecallState({ file: path.join(dir, 'recall-state.json') }); state.load();
-  const hook = createRecallHook({ engine: e, state, readConfig: () => ({ ok: true, ...GOOD }), readPostText: async (id) => texts.get(id) ?? null, log: () => {} });
-  return { hook, state, embed, texts };
+  const queue = createRecallQueue({ file: path.join(dir, 'recall-queue.json') }); queue.load();
+  const projection = createOfferProjection({ file: path.join(dir, 'recall-offers.json') });
+  const graph = fakeGraph();
+  const hook = createRecallHook({ engine: e, queue, projection, ready: () => projection.ensure(async () => new Map()), readConfig: () => ({ ok: true, ...GOOD }),
+    readPostText: async (id) => texts.get(id) ?? null, writeOffers: (...a) => graph.write(...a), log: () => {} });
+  return { hook, queue, projection, embed, texts, graph };
 }
 const post = (h, id, seq, text) => { h.texts.set(id, text); h.hook.afterPost({ id, seq, text }); };
+const shown = (h, id) => h.projection.publicOf(id) ?? h.queue.unavailableOf(id);
 
 test('H1 the hook never makes its caller wait; one decision per post, stable on re-read', async () => {
   const d = tmp();
@@ -261,17 +302,18 @@ test('H1 the hook never makes its caller wait; one decision per post, stable on 
     const t0 = Date.now();
     post(h, 'a', 1, 'kiwi kiwi kiwi');
     assert.ok(Date.now() - t0 < 50, 'afterPost returned at once');
-    assert.equal(h.state.has('a'), false, 'nothing decided yet');
+    assert.equal(h.queue.has('a'), false, 'nothing decided yet');
     await h.hook.idle();
-    const first = JSON.stringify(h.state.publicOf('a'));
+    const first = JSON.stringify(shown(h, 'a'));
     assert.equal(JSON.parse(first).items[0].source.title, 'Kiwi');
     h.hook.afterPost({ id: 'a', seq: 1, text: 'plum plum' });   // the same post again: decided once
     await h.hook.idle();
-    assert.equal(JSON.stringify(h.state.publicOf('a')), first);
+    assert.equal(JSON.stringify(shown(h, 'a')), first);
+    assert.equal(h.graph.writes, 1);
   } finally { fs.rmSync(d, { recursive: true, force: true }); }
 });
 
-test('H2 unavailable → retried on later successes, oldest first, 2 per trigger, 3 tries in all, then gave up', async () => {
+test('H2 unavailable → retried on later successes, oldest first, 2 per trigger, 3 tries in all, then gave up; H4 nothing is stored, absent', async () => {
   const d = tmp();
   try {
     const embed = fakeEmbed();
@@ -279,101 +321,74 @@ test('H2 unavailable → retried on later successes, oldest first, 2 per trigger
     embed.down = true;
     post(h, 'u1', 1, 'kiwi kiwi'); post(h, 'u2', 2, 'kiwi kiwi'); post(h, 'u3', 3, 'plum plum');
     await h.hook.idle();
-    for (const id of ['u1', 'u2', 'u3']) assert.match(h.state.publicOf(id).unavailable, /embedder/);
-    assert.equal(h.state.raw('u1').tries, 1); assert.ok(h.state.raw('u1').firstFailedAt);
+    for (const id of ['u1', 'u2', 'u3']) assert.match(shown(h, id).unavailable, /embedder/);
+    assert.equal(h.queue.raw('u1').tries, 1); assert.ok(h.queue.raw('u1').firstFailedAt);
     embed.down = false;
     post(h, 'ok4', 4, 'fig fig');   // succeeds (nothing above the bar) → retries u1, u2, not u3
     await h.hook.idle();
-    assert.equal(h.state.publicOf('u1').items[0].source.title, 'Kiwi', 'the earlier post now carries its pointer');
-    assert.equal(h.state.publicOf('u2'), undefined, 'u2 retried: Kiwi is quiet (u1 surfaced it 1 post before) → nothing surfaced, absent');
-    assert.equal(h.state.raw('u2').none, true);
-    assert.match(h.state.publicOf('u3').unavailable, /embedder/, 'the cap is 2 per trigger');
-    assert.equal(h.state.publicOf('ok4'), undefined, 'computed, nothing surfaced: absent for readers');
-    assert.equal(h.state.raw('ok4').none, true, 'but stored, so it is never recomputed');
-    // three failures in all, then gave up: u3 has 1; fail it twice more through triggers whose own compute succeeds
-    let failNext = 0;
+    assert.equal(shown(h, 'u1').items[0].source.title, 'Kiwi', 'the earlier post now carries its pointer');
+    assert.equal(shown(h, 'u2'), undefined, 'u2 retried: Kiwi is quiet (u1 carries it, 1 post before) → nothing, absent');
+    assert.equal(h.queue.raw('u2').none, true);
+    assert.match(shown(h, 'u3').unavailable, /embedder/, 'the cap is 2 per trigger');
+    assert.equal(shown(h, 'ok4'), undefined, 'computed, nothing surfaced: absent for readers');
+    assert.equal(h.queue.raw('ok4').none, true, 'but stored, so it is never recomputed');
     const real = h.hook.engine.recall.bind(h.hook.engine);
-    h.hook.engine.recall = async (text, o) => (failNext-- > 0 ? { available: false, reason: 'embedder answered 503', items: [] } : real(text, o));
-    failNext = 0; post(h, 'ok5', 5, 'pear pear'); await h.hook.idle();   // ok5 computes first (succeeds)…
-    // …and u3's retry ran on the same trigger and succeeded, so make a fresh pending one to exhaust
+    post(h, 'ok5', 5, 'pear pear'); await h.hook.idle();   // retries u3 (succeeds)
     embed.down = true; post(h, 'u6', 6, 'plum plum'); await h.hook.idle(); embed.down = false;
-    assert.equal(h.state.raw('u6').tries, 1);
+    assert.equal(h.queue.raw('u6').tries, 1);
     for (const [id, seq] of [['t7', 7], ['t8', 8]]) {
       h.hook.engine.recall = async (text, o) => (text === 'plum plum' ? { available: false, reason: `embedder answered 503 at ${id}`, items: [] } : real(text, o));
       post(h, id, seq, 'fig fig'); await h.hook.idle();
     }
-    assert.equal(h.state.raw('u6').tries, 3);
-    assert.deepEqual(h.state.publicOf('u6'), { unavailable: 'embedder answered 503 at t8', gaveUp: true });
+    assert.equal(h.queue.raw('u6').tries, 3);
+    assert.deepEqual(shown(h, 'u6'), { unavailable: 'embedder answered 503 at t8', gaveUp: true });
     h.hook.engine.recall = real;
     post(h, 't9', 9, 'fig fig'); await h.hook.idle();
-    assert.equal(h.state.raw('u6').tries, 3, 'no fourth try');
+    assert.equal(h.queue.raw('u6').tries, 3, 'no fourth try');
   } finally { fs.rmSync(d, { recursive: true, force: true }); }
 });
 
-test('H3 a retry decides as of its own sequence, and never rewrites a later post\'s stored answer', async () => {
+test('H3 a retry decides as of its own sequence, and never rewrites a later post\'s offers', async () => {
   const d = tmp();
   try {
     const embed = fakeEmbed();
     const h = hookOver(d, { embed });
     embed.down = true; post(h, 'early', 10, 'kiwi kiwi'); await h.hook.idle(); embed.down = false;
-    post(h, 'later', 11, 'kiwi kiwi'); await h.hook.idle();   // surfaces Kiwi itself (early had nothing stored), then retries early
-    const laterBefore = JSON.stringify(h.state.raw('later'));
-    assert.equal(h.state.publicOf('later').items[0].source.title, 'Kiwi');
-    assert.equal(h.state.publicOf('early').items[0].source.title, 'Kiwi', 'the earlier post keeps the pointer: only PREVIOUS posts quiet it');
-    assert.equal(JSON.stringify(h.state.raw('later')), laterBefore, 'the later post\'s stored answer is unchanged');
+    post(h, 'later', 11, 'kiwi kiwi'); await h.hook.idle();   // surfaces Kiwi itself (early had none yet), then retries early
+    const laterBefore = JSON.stringify(shown(h, 'later'));
+    assert.equal(shown(h, 'later').items[0].source.title, 'Kiwi');
+    assert.equal(shown(h, 'early').items[0].source.title, 'Kiwi', 'the earlier post keeps the pointer: only PREVIOUS posts quiet it');
+    assert.equal(JSON.stringify(shown(h, 'later')), laterBefore, 'the later post\'s offers are unchanged');
   } finally { fs.rmSync(d, { recursive: true, force: true }); }
 });
 
-test('K1 counts and the opened log', async () => {
+test('H5 an offer exists only once APPLIED; a failed write is retried; one that landed though reported failed is taken back once', async () => {
   const d = tmp();
   try {
     const h = hookOver(d);
-    post(h, 'k1', 1, 'kiwi kiwi'); post(h, 'k2', 30, 'kiwi plum'); await h.hook.idle();
+    h.graph.fail = 'the offer write is REJECTED: no';
+    post(h, 'w1', 1, 'kiwi kiwi'); await h.hook.idle();
+    assert.match(shown(h, 'w1').unavailable, /REJECTED/, 'not carried: the graph never accepted it');
+    h.graph.fail = null;
+    post(h, 'w2', 2, 'fig fig'); await h.hook.idle();
+    assert.equal(shown(h, 'w1').items[0].source.title, 'Kiwi', 'the retry wrote it');
+    h.graph.landThenFail = true;
+    post(h, 'w3', 40, 'plum plum'); await h.hook.idle();
+    assert.match(shown(h, 'w3').unavailable, /UNKNOWN/, 'reported failed, so not carried yet');
+    assert.equal(h.graph.nodes.has('w3|SP'), true, 'though it landed');
+    post(h, 'w4', 41, 'fig fig'); await h.hook.idle();
+    assert.deepEqual(shown(h, 'w3').items.map((i) => i.source.title), ['Plum'], 'the retry took the landed offer back, exactly once');
+    assert.equal([...h.graph.nodes.keys()].filter((k) => k.startsWith('w3|')).length, 1);
+  } finally { fs.rmSync(d, { recursive: true, force: true }); }
+});
+
+test('K1 the queue\'s counts', async () => {
+  const d = tmp();
+  try {
+    const h = hookOver(d);
     h.hook.engine.recall = async () => ({ available: false, reason: 'embedder answered 500', items: [] });
     post(h, 'k3', 60, 'kiwi'); await h.hook.idle();
-    const run = h.state.raw('k1').items[0].runId;
-    assert.equal(h.state.opened({ run, post: 'k1' }).ok, true);
-    assert.equal(h.state.opened({ run, post: 'k1' }).ok, true);   // a reopen counts once
-    assert.equal(h.state.opened({ run, post: 'nope' }).code, 'RECALL_POST_NOT_FOUND');
-    assert.equal(h.state.opened({ run: `run-${uuid()}`, post: 'k1' }).code, 'RECALL_OFFER_NOT_FOUND');
-    const c = h.state.counts();
-    assert.deepEqual({ offered: c.offered, opened: c.opened, postsWithRecall: c.postsWithRecall, unavailable: c.unavailable, pendingRetries: c.pendingRetries, gaveUp: c.gaveUp },
-      { offered: 3, opened: 1, postsWithRecall: 2, unavailable: 1, pendingRetries: 1, gaveUp: 0 });
-    const later = h.state.counts(new Date(Date.now() + 60_000).toISOString());
-    assert.deepEqual([later.offered, later.opened, later.postsWithRecall, later.unavailable], [0, 0, 0, 0]);
-  } finally { fs.rmSync(d, { recursive: true, force: true }); }
-});
-
-test('K2 a seat\'s read of a post carrying a reading is noted once, in memory, and rides the next state write', async () => {
-  const d = tmp(); const file = path.join(d, 'recall-state.json');
-  try {
-    const s = createRecallState({ file, flushMs: 60_000 }); s.load();
-    s.decide('r1', { seq: 1, at: new Date().toISOString(), items: [it('S1')], sources: ['S1'] });
-    s.decide('r2', { seq: 2, at: new Date().toISOString(), none: true });
-    const before = fs.readFileSync(file, 'utf8');
-    assert.equal(s.noteRead('r1', 'seat-a'), true);
-    assert.equal(s.noteRead('r1', 'seat-a'), false, 'a re-read is not counted again');
-    assert.equal(s.noteRead('r1', null), false, 'a read with no seat is not attributed');
-    assert.equal(s.noteRead('r2', 'seat-a'), false, 'a post that carries nothing is not a carrying read');
-    assert.equal(fs.readFileSync(file, 'utf8'), before, 'no file write on the read');
-    assert.deepEqual(s.counts().seats, { 'seat-a': { readCarrying: 1, opened: 0 } });
-    s.decide('r3', { seq: 3, at: new Date().toISOString(), none: true });   // the next write carries the noted read
-    const back = createRecallState({ file }); back.load();
-    assert.deepEqual(back.counts().seats, { 'seat-a': { readCarrying: 1, opened: 0 } });
-    assert.equal(back.noteRead('r1', 'seat-a'), false, 'still once after a reload');
-    const run = it('S1').runId;   // null: an item with no run cannot be opened
-    assert.equal(run, null);
-  } finally { fs.rmSync(d, { recursive: true, force: true }); }
-});
-
-test('K3 a noted read with no later write is flushed on a short debounce', async () => {
-  const d = tmp(); const file = path.join(d, 'recall-state.json');
-  try {
-    const s = createRecallState({ file, flushMs: 50 }); s.load();
-    s.decide('r1', { seq: 1, at: new Date().toISOString(), items: [it('S1')], sources: ['S1'] });
-    s.noteRead('r1', 'seat-b');
-    await new Promise((r) => setTimeout(r, 200));
-    const back = createRecallState({ file }); back.load();
-    assert.deepEqual(back.counts().seats, { 'seat-b': { readCarrying: 1, opened: 0 } });
+    assert.deepEqual(h.queue.counts(), { unavailable: 1, pendingRetries: 1, gaveUp: 0 });
+    assert.deepEqual(h.queue.counts(new Date(Date.now() + 60_000).toISOString()), { unavailable: 0, pendingRetries: 0, gaveUp: 0 });
   } finally { fs.rmSync(d, { recursive: true, force: true }); }
 });
