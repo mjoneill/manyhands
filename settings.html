@@ -1041,6 +1041,7 @@ function agentRow(a) {
           <p class="when" data-agent-grants-meta>settings as of ${when(a.updatedAt || a.createdAt)}</p>
           ${a.conflict ? `<p class="msg err" style="margin:0 0 10px" data-agent-conflict-note>⚠ The prompt ${esc(a.conflict.reason)} (&quot;${esc(a.conflict.phrase)}&quot;), so these grants may be cancelled by the instruction. Since ${esc(when(a.conflict.since))}. #1242</p>` : ''}
           ${TOOLS.length ? TOOLS.map((t) => `<label class="grant"><input type="checkbox" value="${esc(t.name)}"${grants.has(t.name) ? ' checked' : ''}><span title="${esc(t.description)}"><code>${esc(t.name)}</code><div class="desc">${esc(firstSentence(t.description))}</div></span></label>`).join('') : '<p class="hint">the tool list could not be loaded, so grants cannot be edited from here</p>'}
+          <p class="hint" data-agent-link-hint hidden></p>
           <div class="form-grid" style="margin-top:14px">
             <label>Hop ceiling <input data-agent-maxhops type="number" min="1" max="20" value="${a.maxHops ?? ''}" placeholder="default"><span class="hint">how many times it may look before it must answer</span></label>
             <label>Thinking <select data-agent-thinking>${THINKING_OPTS(a.thinking)}</select><span class="hint">unset sends no flag at all</span></label>
@@ -1112,6 +1113,20 @@ function agentRow(a) {
   };
   row.querySelectorAll('[data-agent-wake] input').forEach((i) => i.addEventListener('change', refreshWakeState));
   refreshWakeState();
+
+  // #1895 — A HINT, NEVER A GATE. Links are shown inside card_get answers (#1852); an agent that can read cards but is not granted
+  // link_decide is shown claims it cannot answer, and the shown/used counts then say nothing about it. Shown live as boxes change,
+  // set with textContent, and it never touches saving.
+  const linkHint = row.querySelector('[data-agent-link-hint]');
+  const refreshLinkHint = () => {
+    const on = (n) => !!row.querySelector(`[data-agent-grants] input[type=checkbox][value="${n}"]`)?.checked;
+    const offered = TOOLS.some((t) => t.name === 'link_decide');
+    const show = offered && on('card_get') && !on('link_decide');
+    linkHint.hidden = !show;
+    linkHint.textContent = show ? 'This agent can be shown claims on cards but cannot answer them (grant link_decide).' : '';
+  };
+  row.querySelectorAll('[data-agent-grants] input[type=checkbox]').forEach((c) => c.addEventListener('change', refreshLinkHint));
+  refreshLinkHint();
 
   // #1346 — DELIVERY MODE. Two modes, mutually exclusive, a selector rather than
   // a checkbox so they cannot combine silently. "channel": every post is offered

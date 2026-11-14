@@ -621,6 +621,8 @@ export function buildMessages({ agent, wake, changes = [], changesUnreadable = f
     // #1383 — the two writes about the seat itself are named as such, so a model
     // told it can "look things up" also knows it may speak for its own seat.
     if ((agent.toolGrants || []).includes('seat_declare')) lines.push('You may declare your OWN seat state with seat_declare (availability, whether you take routine work, an expiry, and the role you hold); seat_clear withdraws it. It is about you, never another seat.');
+    // #1895 - named only to a seat granted link_decide, as seat_declare's line is: an ungranted tool is never named.
+    if ((agent.toolGrants || []).includes('link_decide')) lines.push('If you are shown a "bears on" link, answer it with link_decide: confirmed (with the number of the card you were working on) only if the claim mattered to it, dismissed if it does not bear on it. A confirm counts as use, so never confirm on looks alone.');
   }
   const system = lines.join('\n\n');
   const ctx = [];
