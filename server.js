@@ -11555,11 +11555,15 @@ async function handleClaimCard(req, res, idOrShortId) {
     });
     // Outside the lock, fire-and-forget — same contract as an ordinary commons
     // post (#119): a down MCP server must never break claiming.
+    // #1852 — the claimed card's links: the read STARTS here, after the lock is released and only for a claim that succeeded,
+    // and is awaited last. The room must hear "claimed" at once, so both announcement paths fire before that wait.
+    const delivery = result.card ? roomHasRead(req, result.card, 'claim') : null;
     if (result.announced) notifyMcpOfPost(result.announced);
-    // #1852 — the claimed card's links, read here: after the lock is released, and only for a claim that succeeded
-    const d = result.card ? await roomHasRead(req, result.card, 'claim') : {};
+    // #1574 1b — never awaited, so a down executor never costs the claim. It used to follow the answer; the obligation is
+    // already durable in the claim's own write, so nothing here depends on the answer having gone out.
+    if (result.publish) publishAnnouncements(result.publish);
+    const d = delivery ? await delivery : {};
     sendJSON(res, result.status, d.block ? { ...result.payload, roomHasRead: d.block } : result.payload);
-    if (result.publish) publishAnnouncements(result.publish);   // #1574 1b — after the answer: a down executor never costs the claim
     recordShowings(d.show);
   } catch (e) {
     if (e instanceof PostSeqStateCorrupt) return sendJSON(res, 500, e.body);   // #1592

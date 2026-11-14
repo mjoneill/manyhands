@@ -28,6 +28,8 @@
  *   U1  the delivery read fails: the claim still answers 200 with roomHasRead.unavailable; so does a seat's read
  *   U2  the delivery read is slow: the answer goes out at the deadline saying unavailable, and nothing is recorded
  *   U3  without the log-born unit: a claim says unavailable; a read carries no field
+ *   A1  the room hears of a claim before a held delivery read lets the claim answer: the announcement is in the graph while the
+ *       claim is still waiting for its links, and the claim answers 200 saying unavailable while the read is still held
  *   R1  with auth REQUIRED the same holds: the claim carries the block and the showing is the key's seat's
  *   K1  link_counts: a delivery raises `shown` and `delivered`, never `used`, and does not make the seat a decider
  *   K2  a delivered link the seat then confirms is ONE shown link, delivered 1, used 1
@@ -70,9 +72,10 @@ const ENV = { SCRUM_ROSTER_FILE: ROSTER, SCRUM_SEAT_TOKENS: TOKENS, SCRUM_AUTH: 
 
 /** The delivery read is the one query that starts from a card's links and leaves the dismissed ones out. */
 const isDeliveryRead = (body) => body.includes(`${RS}bearsOnCard`) && body.includes('"dismissed"');
-/** A proxy in front of the executor: counts every /query, and can fail (`mode='fail'`) or hold (`mode='slow'`) the delivery read alone. */
+/** A proxy in front of the executor: counts every /query, and can fail (`mode='fail'`), slow (`mode='slow'`) or hold until told
+ *  (`hold()`) the delivery read alone. A held read lets a row assert ORDER (what happened while it was held), not elapsed time. */
 function executorProxy() {
-  const state = { queries: 0, deliveryReads: 0, mode: 'pass', holdMs: 0, server: null };
+  const state = { queries: 0, deliveryReads: 0, mode: 'pass', holdMs: 0, server: null, gate: null };
   const start = (execUrl) => new Promise((resolve) => {
     state.server = http.createServer((req, res) => {
       const chunks = []; req.on('data', (c) => chunks.push(c));
@@ -86,6 +89,7 @@ function executorProxy() {
             state.deliveryReads += 1;
             if (state.mode === 'fail') { res.writeHead(500, { 'content-type': 'text/plain' }); return res.end('injected fault'); }
             if (state.mode === 'slow') await new Promise((r) => setTimeout(r, state.holdMs));
+            if (state.mode === 'hold') { state.gate.arrived(); await state.gate.opened; }
           }
           const f = await fetch(`${execUrl}${req.url}`, { method: req.method, headers, body: req.method === 'GET' ? undefined : body });
           const t = await f.text();
@@ -95,7 +99,14 @@ function executorProxy() {
     });
     state.server.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${state.server.address().port}`));
   });
-  return { state, start, stop: () => new Promise((r) => (state.server ? state.server.close(() => r()) : r())) };
+  /** Hold the next delivery read at the executor's door: `seen` resolves when it arrives; it stays there until `release()`. */
+  const hold = () => {
+    let arrived, open; let held = true;
+    const seen = new Promise((r) => { arrived = r; }); const opened = new Promise((r) => { open = r; });
+    state.gate = { arrived, opened }; state.mode = 'hold';
+    return { seen, held: () => held, release: () => { held = false; state.mode = 'pass'; open(); } };
+  };
+  return { state, start, hold, stop: () => new Promise((r) => (state.server ? state.server.close(() => r()) : r())) };
 }
 
 let w, gc, proxy;
@@ -372,6 +383,32 @@ test('U3 without the log-born unit: a claim says unavailable; a read carries no 
     assert.deepEqual(Object.keys(r.json.roomHasRead), ['unavailable']);
     assert.match(r.json.roomHasRead.unavailable, /log-born unit/);
   } finally { await o.stop(); }
+});
+
+test('A1 the room hears of a claim before a held delivery read lets the claim answer', T, async () => {
+  const card = await newCard(); await seedLink(card, { source: await seedSource() });
+  const announced = async () => (await q(`SELECT ?p WHERE { ?p <${RDF}type> <${SC}Comment> ; <${SC}text> ?t FILTER(CONTAINS(?t, "seat-a claimed #${card.shortId} ")) }`)).length;
+  assert.equal(await announced(), 0, 'PRECONDITION: nothing has announced this claim yet');
+  const gate = proxy.hold();
+  try {
+    let answered = false;
+    const t0 = Date.now();
+    const inflight = claim('seat-a', card).then((r) => { answered = true; return { r, ms: Date.now() - t0 }; });
+    await gate.seen;   // the claim is written and its delivery read is now held at the executor's door
+    let posted = 0; let answeredWhenPosted = null;
+    while (posted === 0 && !answered) {
+      posted = await announced(); answeredWhenPosted = answered;
+      if (posted === 0) await new Promise((x) => setTimeout(x, 10));
+    }
+    assert.equal(posted, 1, 'the claim\'s announcement reached the graph before the claim answered');
+    assert.equal(answeredWhenPosted, false, 'and the claim was still waiting for its links when it did');
+    const { r, ms } = await inflight;
+    assert.equal(gate.held(), true, 'the claim answered while the read was STILL held: the read never held it past the deadline');
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.claimed, true);
+    assert.deepEqual(Object.keys(r.json.roomHasRead), ['unavailable']);
+    assert.ok(ms >= DELIVERY_DEADLINE_MS - 50, `CONTROL: the claim did wait for the read, up to the deadline (${ms} ms)`);
+  } finally { gate.release(); }
 });
 
 test('R1 with auth required the same holds: the claim carries the block and the showing is the key\'s seat\'s', T, async () => {
