@@ -83,6 +83,7 @@ import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, auditOutbox, mode
 import * as U3 from './core/unit3-graph.mjs';   // #1582 — deliveries and model calls in the graph
 import { createGraphClient, setExecutorMeter } from './core/graph-client.mjs';   // #1574 C3b — the conversations unit's executor door
 import { decideIntention as linkDecideIntention, linkCountsQuery, countLinkUse } from './core/knowledge-linking.mjs';   // #1851, #1850
+import { deliveryQuery, linksOfDeliveryRows, selectDeliveries, firstShowings, deliverySourcesQuery, sourcesOfRows, deliveryBlock, showIntention, DELIVERY_DEADLINE_MS } from './core/knowledge-delivery.mjs';   // #1852
 import { createExecutorMeter, createKeepAlive, captureCpuProfile } from './core/executor-meter.mjs';   // #1570 — what REST asks the executor, and REST's own loop delay
 import { postFeed, DiscoveryError } from './core/post-discovery.mjs';   // #1574 R3
 import { createReadGate } from './core/read-admission.mjs';   // #1574 A1–A5
@@ -7104,7 +7105,7 @@ async function handleListLinks(req, res) {
     sendJSON(res, 500, { error: e.message });
   }
 }
-/** #1850 — per seat, how many links it was SHOWN (decided) and how many it USED (confirmed, naming its working card). */
+/** #1850 — per seat, how many links it was SHOWN (decided, or delivered: #1852) and how many it USED (confirmed, naming its working card). */
 async function handleLinkCounts(req, res) {
   try {
     if (!LOGBORN) return sendJSON(res, 503, { error: 'links live in the graph executor, and this server does not run the log-born unit (SCRUM_GRAPH_UNIT_LOGBORN)', code: 'LINKS_UNAVAILABLE' });
@@ -7115,10 +7116,13 @@ async function handleLinkCounts(req, res) {
     if (!Number.isFinite(ms)) return sendJSON(res, 400, { error: 'since is an ISO date-time, e.g. 2026-11-05T00:00:00Z' });
     const since = new Date(ms).toISOString();
     const rows = await LOGBORN.query(linkCountsQuery(since));
-    const c = countLinkUse(rows.map((r) => ({ by: r.by.value, link: r.l.value, verdict: r.v.value })));
+    // a row with a verdict is a decision; one without is a delivery (#1852)
+    const c = countLinkUse(rows.map((r) => (r.v ? { by: r.by.value, link: r.l.value, verdict: r.v.value } : { by: r.by.value, link: r.l.value, delivered: true })));
     sendJSON(res, 200, { since, ...c,
-      means: 'Per seat, over distinct links. shown: links the seat confirmed or dismissed (deliveries will add to it once they exist; a link_list read is not counted). '
-        + 'used: links the seat confirmed, which names the card it was working on. A confirm is the seat\'s own record that it acted on the claim, not proof the claim changed the outcome.' });
+      means: 'Per seat, over distinct links. shown: links the seat confirmed, dismissed, or was delivered (a link_list read is not counted). '
+        + 'delivered: the part of shown that was handed to the seat with a card it claimed or read, counted once per link at its first showing. '
+        + 'used: links the seat confirmed, which names the card it was working on. A confirm is the seat\'s own record that it acted on the claim, not proof the claim changed the outcome. '
+        + 'deciders counts only seats that confirmed or dismissed something.' });
   } catch (e) {
     if (executorRefused(res, e)) return;
     console.error('GET /api/links/counts:', e.message);
@@ -7158,6 +7162,56 @@ async function handleDecideLink(req, res, id) {
     console.error('POST /api/links/:id/decide:', e.message);
     sendJSON(res, 500, { error: e.message });
   }
+}
+
+// ── #1852 — DELIVERY: a card's proposed links handed to the seat that claims it, and to a seat the first time she reads it ──
+// Nobody goes looking for a link (#1850), so the claim and the read carry a few (core/knowledge-delivery.mjs holds the rules).
+// A delivery is a courtesy on top of another answer: it never fails that answer, never changes its status, and never holds
+// it past DELIVERY_DEADLINE_MS. What it could not read it calls UNAVAILABLE; "no links" always means it looked.
+const LINK_UNIT_OFF = 'links live in the graph executor, and this server does not run the log-born unit (SCRUM_GRAPH_UNIT_LOGBORN)';
+/**
+ * WHO a delivery is for: the request's own credential, judged as a graph write would be (LOGBORN.actorFor), because showing a
+ * seat a link is recorded under her name. Production runs auth in observe mode, where req.auth is not enforced on a read, so
+ * the matched key is what identifies her. No key, a read-only key, a trial's unbound actor: no seat, and nothing is answered
+ * about it here (a read with no seat is simply an ordinary read).
+ */
+function deliverySeat(req) {
+  const who = LOGBORN.actorFor(req, 'link.show');
+  return typeof who.actor === 'string' && who.actor.startsWith('urn:ex:seat/') ? who.actor : null;
+}
+async function readDelivery(card, actor, how) {
+  const cardIri = `https://scrumboard.local/entity/${card.id}`;
+  const set = selectDeliveries(linksOfDeliveryRows(await LOGBORN.query(deliveryQuery({ card: cardIri, actor }))));
+  // a claim shows the card's set every time; a read shows only what this seat has not been shown
+  const items = how === 'get' ? firstShowings(set) : set;
+  if (items.length === 0) return {};
+  const sq = deliverySourcesQuery([...new Set(items.map((l) => l.source).filter(Boolean))]);
+  const sources = sq ? sourcesOfRows(await LOGBORN.query(sq)) : new Map();
+  return { block: deliveryBlock({ items, shortId: card.shortId, sources, recorded: actor ? undefined : false }),
+    show: actor ? { links: firstShowings(items).map((l) => l.iri), card: cardIri, how, actor } : null };
+}
+/** `{ block?, show? }` for one answer. Never throws and never waits past the deadline. */
+async function roomHasRead(req, card, how) {
+  if (!LOGBORN) return how === 'claim' ? { block: { unavailable: LINK_UNIT_OFF } } : {};
+  let actor;
+  try { actor = deliverySeat(req); } catch (e) { return { block: { unavailable: `the seat could not be identified: ${e?.message ?? e}` } }; }
+  if (how === 'get' && !actor) return {};
+  if (!SAFE_ID.test(String(card.id))) return {};   // an id that cannot go into a query safely has no links to find
+  let timer;
+  const late = new Promise((resolve) => { timer = setTimeout(() => resolve({ block: { unavailable: `the links could not be read within ${DELIVERY_DEADLINE_MS} ms` } }), DELIVERY_DEADLINE_MS); });
+  const read = readDelivery(card, actor, how).catch((e) => ({ block: { unavailable: `the links could not be read: ${e?.message ?? e}` } }));
+  try { return await Promise.race([read, late]); } finally { clearTimeout(timer); }
+}
+/**
+ * Record the first showings of one answer, AFTER that answer is sent: ONE link.show for all of them. A failure is logged and
+ * goes no further; the seat already has her answer. PRECONDITION_FAILED here is two answers showing the same link at once:
+ * the other one recorded it, and anything else this one carried is shown, and recorded, on the next read.
+ */
+function recordShowings(show) {
+  if (!show || show.links.length === 0) return;
+  LOGBORN.write(showIntention(show)).then((r) => {
+    if (r.outcome !== 'APPLIED') console.error(`[#1852] ${show.links.length} showing(s) on ${show.card} not recorded: ${r.outcome}${r.reason ? ` ${r.reason}` : ''}`);
+  }, (e) => console.error(`[#1852] showing(s) on ${show.card} not recorded: ${e?.message ?? e}`));
 }
 
 async function handleRelateDecision(req, res, ref) {
@@ -10609,6 +10663,8 @@ async function handleGetCard(req, res, idOrShortId) {
     const data = readBoard();
     const idx = findCardIndex(data, idOrShortId);
     if (idx < 0) return sendJSON(res, 404, { error: 'Card not found' });
+    // #1852 — started before the posts are read, so the two reads overlap instead of adding up. It never rejects.
+    const delivery = roomHasRead(req, data.cards[idx], 'get');
     let posts;
     try {   // #1574 T1 — the unit on: only this card's posts (a card id that cannot go into a query safely takes the bulk path)
       const t = ANNOUNCE_EXECUTOR ? await targetedPosts(data.conversations, { attachedTo: data.cards[idx].id }) : null;
@@ -10624,19 +10680,25 @@ async function handleGetCard(req, res, idOrShortId) {
     // in the response. `descriptionChars` is kept so a caller can see the cost
     // it just declined to pay.
     const url = new URL(req.url, 'http://localhost');
+    // #1852 — for a seat only, and only when there is something to say: a read with no seat keeps today's bytes.
+    const d = await delivery;
+    const roomBlock = d.block ? { roomHasRead: d.block } : {};
     if (url.searchParams.get('outline') != null) {
       const { description, ...rest } = card;
       const outline = cardOutline(description);
-      return sendJSON(res, 200, {
+      sendJSON(res, 200, {
         ...rest,
         descriptionChars: outline.totalChars,
         outline,
         comments: commentMetadata(posts, card.id),
+        ...roomBlock,
       });
+      return recordShowings(d.show);
     }
     // Spread rather than mutate: `data` came from readBoard() and the stored
     // object must not acquire a derived field.
-    sendJSON(res, 200, { ...card, comments: commentMetadata(posts, card.id) });
+    sendJSON(res, 200, { ...card, comments: commentMetadata(posts, card.id), ...roomBlock });
+    recordShowings(d.show);
   } catch (e) {
     console.error('GET /api/cards/:id:', e.message);
     sendJSON(res, 500, { error: 'Failed to read card' });
@@ -11455,7 +11517,7 @@ async function handleClaimCard(req, res, idOrShortId) {
         if (pub) {
           writeBoard(data, [cardEvent('update', card, by), ...pub.events]);
           raisePostSeqMark(pub.nextMark);
-          return { status: 200, payload: { claimed: true, holder: by, claimedAt: now }, publish: [pub.entry] };
+          return { status: 200, payload: { claimed: true, holder: by, claimedAt: now }, publish: [pub.entry], card: { id: card.id, shortId: card.shortId } };
         }
         // #578 — the announcement rides the SAME write as the claim. Appending
         // it here rather than in a second write keeps the two atomic: there is
@@ -11470,6 +11532,7 @@ async function handleClaimCard(req, res, idOrShortId) {
           status: 200,
           payload: { claimed: true, holder: by, claimedAt: now },
           announced,
+          card: { id: card.id, shortId: card.shortId },
         };
       }
       // Already held — do NOT write; report the incumbent holder.
@@ -11481,8 +11544,11 @@ async function handleClaimCard(req, res, idOrShortId) {
     // Outside the lock, fire-and-forget — same contract as an ordinary commons
     // post (#119): a down MCP server must never break claiming.
     if (result.announced) notifyMcpOfPost(result.announced);
-    sendJSON(res, result.status, result.payload);
+    // #1852 — the claimed card's links, read here: after the lock is released, and only for a claim that succeeded
+    const d = result.card ? await roomHasRead(req, result.card, 'claim') : {};
+    sendJSON(res, result.status, d.block ? { ...result.payload, roomHasRead: d.block } : result.payload);
     if (result.publish) publishAnnouncements(result.publish);   // #1574 1b — after the answer: a down executor never costs the claim
+    recordShowings(d.show);
   } catch (e) {
     if (e instanceof PostSeqStateCorrupt) return sendJSON(res, 500, e.body);   // #1592
     console.error('POST /api/cards/:id/claim:', e.message);

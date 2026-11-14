@@ -5,9 +5,10 @@
  * missed the one real use). Definition accepted by the Value Steward, commons 52810.
  *
  * INTERFACE PINNED HERE:
- *   GET /api/links/counts?since=<ISO instant>  → 200 { since, seats: [{ seat, shown, used }], deciders, label, means }
+ *   GET /api/links/counts?since=<ISO instant>  → 200 { since, seats: [{ seat, shown, delivered, used }], deciders, label, means }
  *     shown  distinct links the seat DECIDED (confirmed or dismissed): a seat cannot decide a link it was never shown.
- *            (Deliveries, #1852, will add to it; they do not exist yet.)
+ *            Since #1852 also the links it was DELIVERED, with `delivered` as their own number: those rows are K1-K3 in
+ *            knowledge-delivery-rest-1852, where a delivery can be made. Nothing here is delivered, so `delivered` is 0.
  *     used   distinct links the seat CONFIRMED at least once. A confirm must name the card the seat was working on, so it
  *            records the seat acting on the claim, not merely agreeing with it. A later dismiss does not unmake that act.
  *     deciders  how many distinct seats have decided any link in the window
@@ -92,7 +93,9 @@ test('K1 a dismiss raises shown and not used', T, async () => {
   const id = await seedLink(2);
   const a = await counts();
   await decide('ada', id, 'dismissed');
-  assert.deepEqual(delta(a, await counts(), 'ada'), { shown: 1, used: 0 });
+  const b = await counts();
+  assert.deepEqual(delta(a, b, 'ada'), { shown: 1, used: 0 });
+  assert.equal(of(b, 'ada').delivered, 0, 'a link the seat found and decided herself was not delivered (#1852)');
 });
 
 test('K2 a confirm raises shown AND used', T, async () => {
