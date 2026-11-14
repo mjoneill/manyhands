@@ -21,6 +21,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { ingestSource } from './knowledge-extraction.mjs';
+import { linkPublished, linkSummary } from './knowledge-linking-supply.mjs';
 
 const ENTITY = 'https://scrumboard.local/entity/';
 const sha256 = (b) => crypto.createHash('sha256').update(b).digest('hex');
@@ -91,7 +92,7 @@ export function fileJobId(file, conversion = CONVERSION[path.extname(file).toLow
 // nothing ticks a file: a failed run resumes from its checkpoint only when the same bytes are run again
 const RETRY_HOW = 'run the same file again to resume';
 
-export async function extractFile({ file, extractor, sourcesDir, modelKey, prompt, askedIn, exec, report = null, now = () => new Date().toISOString() }) {
+export async function extractFile({ file, extractor, sourcesDir, modelKey, prompt, askedIn, exec, report = null, link = null, now = () => new Date().toISOString() }) {
   for (const [k, v] of Object.entries({ file, extractor, sourcesDir, modelKey, askedIn })) if (!v) throw new Error(`extractFile needs ${k}`);
   if (typeof prompt !== 'string') throw new Error('extractFile needs the prompt text');
   const converted = convertFile(file, exec ? { exec } : {});   // refuses an unsupported format BEFORE any state read or model call
@@ -111,9 +112,11 @@ export async function extractFile({ file, extractor, sourcesDir, modelKey, promp
   const label = `${path.basename(file)} (urn:sha256:${original})`;
   const finish = async (r, blocks) => {
     const published = r.published.map((p) => ({ ...p, page: pageOfBlock(blocks, p.block) }));
-    await tell({ kind: 'finish', url: label, result: { ...r, published } });
+    // #1852: a file's run is linked to our cards as a link's run is, before its finish report. Linking never fails the run.
+    const links = await linkPublished(link, r);
+    await tell({ kind: 'finish', url: label, result: { ...r, published }, ...(links ? { links } : {}) });
     return { file: path.basename(file), jobId, runId: r.runId, outcome: r.outcome, converter: converted.converter, from: converted.from,
-      original: `sha256:${original}`, published, rejected: r.rejected.length, ...(typeof report === 'function' ? { reportErrors } : {}) };
+      original: `sha256:${original}`, published, rejected: r.rejected.length, ...(links ? { links: linkSummary(links) } : {}), ...(typeof report === 'function' ? { reportErrors } : {}) };
   };
   // A job that DIED mid-run has a checkpoint with a next node. The id comes from the bytes, so nothing else would ever
   // pick it up: resume it from the checkpoint (the model is not asked again).

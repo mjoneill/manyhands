@@ -3,7 +3,8 @@
  * The linker's whole promise ("no link" never means "never searched") rests on this adapter refusing every answer that did
  * not search everything, so those refusals are the rows.
  *
- *   S1  an answer maps to hits: id, shortId, score, kind; the request carries q, k, by and the bearer
+ *   S1  an answer maps to hits: id, shortId, title, score, kind; the request carries q, k, by and the bearer
+ *       (#1852 added the title: the extractor's finish post names the card a claim may bear on)
  *   S2  available:false (no embedder, unreadable index) ⇒ ok:false with the server's reason
  *   S3  partial:true (cards or Sources not yet embedded) ⇒ ok:false: a partial index could not search everything
  *   S4  an "abstain" verdict still returns its hits: the linker thresholds the scores itself, the verdict is a different question
@@ -27,7 +28,7 @@ test('S1 an answer maps to hits; the request carries q, k, by and the bearer', a
   const f = fakeFetch({ json: answer() });
   const search = createRestSearch({ base: 'http://board', token: 'tok', by: 'extractor', k: 8, fetchImpl: f });
   const r = await search('keep the top layer small');
-  assert.deepEqual(r, { ok: true, hits: [{ id: 'uuid-1', shortId: 1319, score: 0.681, kind: 'card' }, { id: 'https://scrumboard.local/source/abc', shortId: null, score: 0.6, kind: 'source' }] });
+  assert.deepEqual(r, { ok: true, hits: [{ id: 'uuid-1', shortId: 1319, title: 't', score: 0.681, kind: 'card' }, { id: 'https://scrumboard.local/source/abc', shortId: null, title: 's', score: 0.6, kind: 'source' }] });
   assert.equal(f.calls[0].url, 'http://board/api/search');
   assert.deepEqual(f.calls[0].body, { q: 'keep the top layer small', k: 8, by: 'extractor' });
   assert.equal(f.calls[0].init.headers.Authorization, 'Bearer tok');

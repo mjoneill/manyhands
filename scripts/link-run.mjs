@@ -10,6 +10,10 @@
  * on stdout. A refused search or graph read writes nothing and exits 1 with the reason. A missing variable or flag exits 2
  * naming it (a NAME, never a value), before any network.
  *
+ * Since #1852 the extractor links each run it publishes, at the values in the tracked knowledge-linking.json. This script is
+ * unchanged and still takes its threshold as a flag: it is how a run whose links were not made is linked afterwards, and how
+ * a different threshold is read with --dry-run before anyone changes that file.
+ *
  * Environment (names, no values):
  *   SCRUM_BOARD_URL           REST                                (default http://127.0.0.1:3141)
  *   SCRUM_SEAT_TOKEN_FILE     the bearer token for the search      (required)

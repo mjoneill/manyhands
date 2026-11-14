@@ -14,6 +14,11 @@
  *   SCRUM_SEAT_TOKEN_FILE, SCRUM_GRAPH_EXECUTOR_URL, SCRUM_GRAPH_DATASET_ID, SCRUM_EXTRACT_SOURCES_DIR   (required)
  *   SCRUM_BOARD_URL, SCRUM_EXTRACT_MODEL_KEY, SCRUM_EXTRACT_PROMPT                                     (optional)
  *   SCRUM_EXTRACT_REPORTS=0    do NOT post the run's start and finish to the commons (#1862; default: both are posted)
+ *
+ * #1852: the run is then linked to our cards exactly as a link's run is (core/knowledge-linking-supply.mjs), at the threshold
+ * in the tracked knowledge-linking.json. The summary's `links` says what was proposed, or why linking was not done.
+ * This script runs once and has no state file (the tick's SCRUM_EXTRACT_STATE_FILE is not read here, and two writers of that
+ * file would race), so a refused linking is NOT retried: the finish post gives the scripts/link-run.mjs command instead.
  */
 import fs from 'node:fs';
 import { createGraphClient } from '../core/graph-client.mjs';
@@ -21,6 +26,7 @@ import { createExtractor } from '../core/knowledge-extraction.mjs';
 import { createRestBoard, createOpenRouterModel } from '../core/knowledge-extraction-adapters.mjs';
 import { extractFile, convertFile } from '../core/knowledge-extraction-file.mjs';
 import { createAnnouncer } from '../core/knowledge-extraction-report.mjs';
+import { createRunLinker } from '../core/knowledge-linking-supply.mjs';
 
 const ACTOR = 'extractor';
 const DEFAULT_PROMPT = 'Extract what this source says: its concepts, the claims it makes about them, and a short synopsis.';
@@ -81,7 +87,8 @@ async function main() {
     if (r.status !== 201) throw new Error(`POST /api/conversations → ${r.status}`);
     return r.json();
   } });
-  const summary = await extractFile({ file, extractor, sourcesDir: SOURCES_DIR, modelKey: MODEL_KEY, prompt: PROMPT, askedIn, ...(report ? { report } : {}) });
+  const link = createRunLinker({ graphClient, boardUrl: BOARD, token, actor: ACTOR });   // #1852: the same linking step the tick uses
+  const summary = await extractFile({ file, extractor, sourcesDir: SOURCES_DIR, modelKey: MODEL_KEY, prompt: PROMPT, askedIn, link, ...(report ? { report } : {}) });
   console.log(JSON.stringify({ at: new Date().toISOString(), modelKey: MODEL_KEY, model: entry.model, ...summary }, null, 2));
 }
 
