@@ -97,13 +97,44 @@ export async function linkRun({ graphClient, search, run, minScore, perAssertion
   return { ok: true, assertions: assertions.length, proposed: p.proposals.length, skipped: p.skipped, outcome: w.outcome, links: p.proposals };
 }
 
-/** A seat's verdict on one proposed link: ONE `link.decide`, appending a LinkDecision under the link. */
-export function decideIntention({ link, verdict, workingOn = null, actor, at = new Date().toISOString(), opId = `urn:ex:op/${crypto.randomUUID()}` } = {}) {
+/**
+ * A seat's verdict on one proposed link: ONE `link.decide`, appending a LinkDecision under the link. A dismiss is that
+ * seat's alone; `retiresWith` (#1852) names ANOTHER seat's standing dismissal, and only then is the link retired for everyone.
+ */
+export function decideIntention({ link, verdict, workingOn = null, retiresWith = null, actor, at = new Date().toISOString(), opId = `urn:ex:op/${crypto.randomUUID()}` } = {}) {
   return {
     kind: 'link.decide', opId, actor, link, verdict, decision: `${link}/decision/${crypto.randomUUID()}`,
-    workingOn: workingOn == null ? null : `${ENTITY}entity/${workingOn}`, at,
+    workingOn: workingOn == null ? null : `${ENTITY}entity/${workingOn}`, ...(retiresWith ? { retiresWith } : {}), at,
   };
 }
+
+/**
+ * #1852 — a dismiss is ONE SEAT'S: it hides the link from her, and the link is retired for everyone only when two distinct
+ * seats' STANDING verdicts are both dismissals. A seat's standing verdict is her latest decision (by time, then by the
+ * decision IRI, so one instant has one order). These three read the decisions; the compiler guards what they conclude.
+ */
+export function standingVerdicts(decisions) {
+  const per = new Map();
+  for (const d of decisions ?? []) {
+    const cur = per.get(d.by);
+    if (!cur || d.at > cur.at || (d.at === cur.at && d.decision > cur.decision)) per.set(d.by, d);
+  }
+  return per;
+}
+/** ANOTHER seat's standing dismissal for a dismiss by `actor` to retire the link with, or null: the first, so the answer is fixed. */
+export function retiringDecision(decisions, actor) {
+  const others = [...standingVerdicts(decisions).values()].filter((d) => d.by !== actor && d.verdict === 'dismissed')
+    .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.decision < b.decision ? -1 : 1));
+  return others.length ? others[0].decision : null;
+}
+/** How many seats' standing verdict is a dismissal: seats, never decisions. */
+export const dismissalCount = (decisions) => [...standingVerdicts(decisions).values()].filter((d) => d.verdict === 'dismissed').length;
+/** Every decision on one link, or on every link: the rows the three rules above read. */
+export function linkDecisionsQuery(link = null) {
+  return `SELECT ?l ?d ?by ?v ?at WHERE { ?d a <${TM.LinkDecision}> ; <${TM.ofLink}> ?l ; <${TM.linkVerdict}> ?v ; <${TM.decidedBy}> ?by ; <${TM.dateCreated}> ?at `
+    + `${link ? `FILTER(?l = <${link}>) ` : ''}}`;
+}
+export const decisionsOfRows = (rows) => (rows ?? []).map((r) => ({ link: r.l.value, decision: r.d.value, by: r.by.value, verdict: r.v.value, at: r.at.value }));
 
 /**
  * The live `search(q)`: the board's own POST /api/search (the dense index search_all uses). Every answer that did not search
@@ -134,32 +165,38 @@ export function createRestSearch({ base, token, by, k = 8, fetchImpl = fetch, ti
 }
 
 /**
- * #1850 (#1848 slice 1) — SHOWN and USED, two numbers never merged, read from what #1851 records (accepted by the Value Steward,
- * commons 52810). Per deciding seat, over DISTINCT links:
- *   shown  links the seat decided, confirmed or dismissed: a seat cannot decide a link it was never shown. (Deliveries, #1852,
- *          will add to shown; they do not exist yet. A link_list READ is not counted: reads are not recorded.)
- *   used   links the seat confirmed at least once. A confirm must name the card the seat was working on (the compiler refuses one
- *          without it), so it records acting on the claim, not agreeing with it. A later dismiss does not unmake that act.
- * `label` is set while fewer than three distinct seats have decided: the numbers are then the builder's and reviewer's own, and
- * read as self-attributed. It is a count, never a list of names.
+ * #1850 (#1848 slice 1) — SHOWN and USED, two numbers never merged, read from what #1851 and #1852 record (accepted by the Value
+ * Steward, commons 52810). Per seat, over DISTINCT links:
+ *   shown      links the seat decided (confirmed or dismissed: a seat cannot decide a link it was never shown) or was DELIVERED
+ *              (#1852: handed to her with a card she claimed or read). A link_list READ is not counted: reads are not recorded.
+ *   delivered  the delivered part of shown, as its own number, so what the board pushed is never mistaken for what a seat found.
+ *   used       links the seat confirmed at least once. A confirm must name the card the seat was working on (the compiler refuses one
+ *              without it), so it records acting on the claim, not agreeing with it. A later dismiss does not unmake that act.
+ * `deciders` counts the seats that DECIDED something; being delivered a link does not make a seat one. `label` is set while fewer
+ * than three have: the numbers are then the builder's and reviewer's own, and read as self-attributed. It is a count, never a
+ * list of names.
  */
 export const LINK_COUNTS_MIN_DECIDERS = 3;
 export function linkCountsQuery(since) {
   // every term from the compiler's own table, never retyped: dateCreated is schema.org's, not scrum:'s, and a hand-typed IRI that
-  // matches nothing returns a clean zero, which would read as "nobody used anything"
-  return `SELECT ?by ?l ?v WHERE { ?d a <${TM.LinkDecision}> ; <${TM.ofLink}> ?l ; <${TM.linkVerdict}> ?v ; <${TM.decidedBy}> ?by ; <${TM.dateCreated}> ?at `
+  // matches nothing returns a clean zero, which would read as "nobody used anything". A showing has no verdict: ?v stays unbound.
+  return `SELECT ?by ?l ?v WHERE { { ?d a <${TM.LinkDecision}> ; <${TM.ofLink}> ?l ; <${TM.linkVerdict}> ?v ; <${TM.decidedBy}> ?by ; <${TM.dateCreated}> ?at } `
+    + `UNION { ?d a <${TM.LinkShowing}> ; <${TM.ofLink}> ?l ; <${TM.shownTo}> ?by ; <${TM.dateCreated}> ?at } `
     + `FILTER(?at >= ${JSON.stringify(since)}) }`;
 }
+/** rows: a decision `{ by, link, verdict }` or a delivery `{ by, link, delivered: true }`. */
 export function countLinkUse(rows, { seatNs = 'urn:ex:seat/' } = {}) {
   const per = new Map();
   for (const r of rows) {
     const seat = r.by.startsWith(seatNs) ? r.by.slice(seatNs.length) : r.by;
-    if (!per.has(seat)) per.set(seat, { shown: new Set(), used: new Set() });
+    if (!per.has(seat)) per.set(seat, { shown: new Set(), delivered: new Set(), used: new Set(), decided: false });
     const p = per.get(seat);
     p.shown.add(r.link);
+    if (r.delivered) { p.delivered.add(r.link); continue; }
+    p.decided = true;
     if (r.verdict === 'confirmed') p.used.add(r.link);
   }
-  const seats = [...per].map(([seat, p]) => ({ seat, shown: p.shown.size, used: p.used.size })).sort((a, b) => (a.seat < b.seat ? -1 : a.seat > b.seat ? 1 : 0));
-  const deciders = seats.length;
+  const seats = [...per].map(([seat, p]) => ({ seat, shown: p.shown.size, delivered: p.delivered.size, used: p.used.size })).sort((a, b) => (a.seat < b.seat ? -1 : a.seat > b.seat ? 1 : 0));
+  const deciders = [...per.values()].filter((p) => p.decided).length;
   return { seats, deciders, label: deciders < LINK_COUNTS_MIN_DECIDERS ? `self-attributed: ${deciders} seat(s) have decided a link, fewer than ${LINK_COUNTS_MIN_DECIDERS}, so these numbers come from the seats that built and reviewed the linker` : null };
 }
