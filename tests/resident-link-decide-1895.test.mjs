@@ -53,7 +53,9 @@ test('L1 link_decide is in the catalog: link, verdict, workingOn and nothing tha
   assert.match(d, /bears on/i, 'says what a link is');
   assert.match(d, /USED/, 'says a confirm is counted as used');
   assert.match(d, /never confirm just because/i, 'warns off a confirm that only looks related');
-  assert.match(d, /never be proposed/i, 'says what a dismiss does');
+  // #1852: a dismiss is one seat's. The words must not tell a small model its verdict removes the link for everyone.
+  assert.match(d, /hides it from YOU alone/, 'says what a dismiss does, and for whom');
+  assert.doesNotMatch(d, /never be proposed/i, 'does not overstate a single dismiss');
   assert.match(d, /workingOn/, 'names workingOn');
   assert.match(d, /YOUR (OWN )?seat/i, 'says the verdict is recorded under the seat it is');
 });

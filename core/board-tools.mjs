@@ -207,7 +207,7 @@ export const BOARD_TOOLS = Object.freeze([
       description: 'Answer a "bears on" link you were shown: the board proposed that a claim someone shared (a sentence from a source) bears on one of our cards. '
         + 'confirmed means "this claim mattered to the card I was working on". It is counted as USED, so never confirm just because it looks related: confirm only if it changed what you did or said. '
         + 'workingOn is REQUIRED with confirmed: the number of the card you were working on, e.g. 1852. '
-        + 'dismissed means the claim does not bear on that card; that same sentence will never be proposed for that card again. '
+        + 'dismissed means the claim does not bear on that card. A dismiss hides it from YOU alone (#1852): it is retired for everyone only when a second seat also dismisses it. '
         + 'The verdict is recorded under YOUR own seat; you cannot answer for another seat.',
       parameters: {
         type: 'object',
