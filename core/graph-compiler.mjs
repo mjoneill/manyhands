@@ -528,7 +528,7 @@ export function staticCheck(sparql, opId) {
 // =====================================================================================
 
 export const RECORD_V = 2;   // 2: memory.revise records the identity it replaces (a MemoryRevision node)
-export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create', 'card.write', 'entity.put', 'origin.prepare', 'refusal.record', 'extraction.publish', 'link.propose', 'link.decide']);
+export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create', 'card.write', 'entity.put', 'origin.prepare', 'refusal.record', 'extraction.publish', 'link.propose', 'link.decide', 'link.show']);
 
 const RS = 'https://scrumboard.local/ns#';
 const RSC = 'https://schema.org/';
@@ -587,6 +587,8 @@ export const LOGBORN_TERMS = Object.freeze({
   BearsOn: `${RS}BearsOn`, fromAssertion: `${RS}fromAssertion`, bearsOnCard: `${RS}bearsOnCard`, score: `${RS}score`, minScore: `${RS}minScore`,
   searchQuery: `${RS}searchQuery`, spanKey: `${RS}spanKey`, Card: `${RS}Card`,
   LinkDecision: `${RS}LinkDecision`, ofLink: `${RS}ofLink`, linkVerdict: `${RS}linkVerdict`, workingOn: `${RS}workingOn`,
+  // #1852 — the first time a link was put in front of a seat (core/knowledge-delivery.mjs), at <link>/shown/<sha256(actor)>
+  LinkShowing: `${RS}LinkShowing`, shownTo: `${RS}shownTo`, shownOn: `${RS}shownOn`, shownVia: `${RS}shownVia`,
 });
 const TM = LOGBORN_TERMS;
 
@@ -613,6 +615,7 @@ const RECORD_FIELDS = {
   'extraction.publish': ['run', 'source', 'assertions', 'rejected', 'report'],   // #1810 — one run's whole output (source, reifiers, rejected, report) in ONE guarded update
   'link.propose': ['links', 'at'],          // #1851 — one linking run's proposed BearsOn links, every claim and card checked, in ONE update
   'link.decide': ['link', 'verdict', 'decision', 'workingOn', 'at'],   // #1851 — a seat's verdict on one link: its status replaced, one LinkDecision appended
+  'link.show': ['showings', 'card', 'how', 'at'],   // #1852 — the links one answer showed a seat for the first time, one LinkShowing each, in ONE update
 };
 
 // #1762 S1b — the record kinds whose write records ONE ChangeActivity (part 0) when the intention carries `history`. The
@@ -852,6 +855,22 @@ function canonicalizeRecord(i) {
     const workingOn = rOptIri(i.workingOn, 'workingOn');
     if (i.verdict === 'confirmed' && workingOn == null) fail('a confirm names workingOn, the card the seat was working on: an unattributed confirm cannot be counted as used');
     record = { link, verdict: i.verdict, decision, workingOn, at: rStr(i.at, 'at') };
+  } else if (i.kind === 'link.show') {
+    // #1852 — one node per (seat, link): the IRI is derived from the link and the ACTOR (core/knowledge-delivery.mjs showIri),
+    // and the compiler checks that derivation, so a second showing names the same node and the freshness guard refuses it.
+    // That is what keeps #1850's "shown" a count of links and never a count of re-reads.
+    if (!['claim', 'get'].includes(i.how)) fail('how must be claim or get: the two places a link is delivered');
+    const showings = rList(i.showings, 'showings', (x, what) => {
+      const sh = obj(x, ['iri', 'link'], what);
+      const link = checkIri(sh.link, `${what}.link`);
+      if (!/^https:\/\/scrumboard\.local\/link\/[0-9a-f]{64}$/.test(link)) fail(`${what}.link must be a link/<sha256> IRI`);
+      const iri = checkIri(sh.iri, `${what}.iri`);
+      if (iri !== `${link}/shown/${createHash('sha256').update(actor).digest('hex')}`) fail(`${what}.iri must be <link>/shown/<sha256(actor)>`);
+      return { iri, link };
+    });
+    if (showings.length === 0) fail('a link.show carries at least one showing');
+    if (new Set(showings.map((x) => x.link)).size !== showings.length) fail('a link.show names each link once');
+    record = { showings, card: checkIri(i.card, 'card'), how: i.how, at: rStr(i.at, 'at') };
   } else if (i.kind === 'post.create') {
     // #1574 C3c — every field comes from the outbox entry's frozen payload plus the two values the server fixed once
     // at the first publish attempt (publicationAt, postSeq). All of it is in `record`, so all of it is digest-covered.
@@ -1195,6 +1214,17 @@ function planRecord(c) {
     add(R.decision, TM.type, I(TM.LinkDecision)); add(R.decision, TM.ofLink, I(R.link)); add(R.decision, TM.linkVerdict, L(R.verdict));
     add(R.decision, TM.decidedBy, I(c.actor)); add(R.decision, TM.workingOn, R.workingOn && I(R.workingOn));
     add(R.decision, TM.dateCreated, L(R.at)); add(R.decision, TM.recordedBy, ref(c.opId));
+  } else if (c.kind === 'link.show') {
+    // #1852 — every showing is fresh, and its link must be a BearsOn that bears on the card it was shown on; one failing
+    // showing refuses the whole update. Nothing on the link itself is touched: being shown is not a verdict.
+    target = null;
+    for (const x of R.showings) {
+      fresh.push(x.iri);
+      pre.push(`    ${I(x.link)} ${I(TM.type)} ${I(TM.BearsOn)} .`, `    ${I(x.link)} ${I(TM.bearsOnCard)} ${I(R.card)} .`);
+      add(x.iri, TM.type, I(TM.LinkShowing)); add(x.iri, TM.ofLink, I(x.link)); add(x.iri, TM.shownTo, I(c.actor));
+      add(x.iri, TM.shownOn, I(R.card)); add(x.iri, TM.shownVia, L(R.how));
+      add(x.iri, TM.dateCreated, L(R.at)); add(x.iri, TM.recordedBy, ref(c.opId));
+    }
   } else if (c.kind === 'post.create') {
     const P = R.post; target = null;   // a create: the post IRI must be fresh
     dispatchHold = `${P.mutationId}:${P.slot}`;   // #1749 A8: the announcement is a dispatch of this obligation

@@ -182,7 +182,8 @@ export const KIND_DECLARATIONS = Object.freeze([
       + 'found (`scrum:searchQuery`, `scrum:score`, the `scrum:minScore` in force, `scrum:model`) and `scrum:status` '
       + '(proposed at birth; a seat confirms or dismisses). Its IRI is link/<sha256 of `scrum:spanKey`>, a hash of the '
       + 'claim\'s normalised span and the card, so the same claim re-extracted names the same node and can never be '
-      + 'proposed twice: a dismissal sticks. A proposal is not a room endorsement and is not delivered to anyone by itself.',
+      + 'proposed twice: a dismissal sticks. A proposal is not a room endorsement. It is handed to a seat with the card it '
+      + 'bears on, a few at a time (#1852: scrum:LinkShowing records each first showing).',
   },
   {
     name: 'scrum:LinkDecision', eventKind: null, collection: null,
@@ -192,6 +193,16 @@ export const KIND_DECLARATIONS = Object.freeze([
       + '`scrum:workingOn`: the card the seat was working on when the claim mattered. A confirm without it is refused, because '
       + 'a confirm is what counts a claim as USED (#1850) and an unattributed one cannot be told from habit. Appended, never '
       + 'rewritten: the link\'s own `scrum:status` is replaced by the latest verdict, and these nodes are its history.',
+  },
+  // #1852 — written by ONE compiler kind, `link.show`, all of one answer's first showings per update. Executor-only.
+  {
+    name: 'scrum:LinkShowing', eventKind: null, collection: null,
+    createdBy: 'implicitly, by a successful card_claim and by a seat\'s card_get, the first time each shows that seat a link (compiler kind link.show)',
+    definition: 'THE FIRST TIME a scrum:BearsOn link was put in front of a seat without her asking, at '
+      + '<link>/shown/<sha256 of the seat\'s actor IRI>: `scrum:ofLink`, `scrum:shownTo` the authenticated seat, `scrum:shownOn` '
+      + 'the card it was delivered with, `scrum:shownVia` (claim or get) and `schema:dateCreated`. ONE node per seat and link: '
+      + 'the IRI is derived from both, so a re-read names the same node and is refused, and the count of what a seat was shown '
+      + '(#1850) is a count of links, never of reads. Being shown is not a verdict: the link\'s status is untouched.',
   },
   // ── decisions and their scaffolding ───────────────────────────────────────
   {
