@@ -4,15 +4,15 @@ import { LOGBORN_TERMS as TM } from './graph-compiler.mjs';   // every term from
  * #1852 (#1848 slice 3) — DELIVERY: the proposed links a seat is handed WITH a card, at the moment of work.
  *
  * #1850 measured that nobody goes looking for a proposed link, so a link that waits to be found is never used. Here the
- * board hands a card's links to the seat that claims it, and to a seat the first time she reads it. The rules are pure so
- * they are tested without a graph; server.js does the two reads and the one write around them.
+ * board hands a card's links to the seat that claims it, and to a seat that reads it until she has answered them. The rules
+ * are pure so they are tested without a graph; server.js does the two reads and the one write around them.
  *
  * A delivery is small on purpose: it rides on card_get, the most-called read on the board, and a seat that is shown ten
  * machine proposals reads none of them. So a card has at most DELIVERY_MAX, never two from one source, never a link the
  * room retired (status dismissed) and never one this seat dismissed herself: a dismiss is one seat's, and hides it from her.
  *
  * Each first showing is recorded as its own node (kind `link.show`), one per seat and link, so #1850 can count what a seat
- * was SHOWN beside what she USED, and so a re-read does not show the same block again.
+ * was SHOWN beside what she USED. A repeat is shown again but never recorded again, and says `shownBefore`.
  */
 export const DELIVERY_MAX = 2;
 export const QUOTE_MAX_CHARS = 300;
@@ -20,7 +20,7 @@ export const QUOTE_MAX_CHARS = 300;
 export const DELIVERY_DEADLINE_MS = 1500;
 export const DELIVERY_MEANS = 'Claims from documents the room has read that a meaning search proposed as bearing on this card: MACHINE PROPOSALS, '
   + 'not endorsements, so read the quote before trusting the gist; a confirm means "this claim mattered to the work on this card", and a dismiss '
-  + 'hides it from you alone (a second seat\'s dismiss retires it for everyone).';
+  + 'hides it from you alone (a second seat\'s dismiss retires it for everyone); a claim keeps appearing on this card until you answer it.';
 
 const sha = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
 /** A passage is `<source>/block/<n>` (core/knowledge-extraction.mjs); the graph holds no other edge from a claim to its source. */
@@ -42,12 +42,17 @@ export function quoteOf(span) {
  * The card's delivery SET. Confirmed first (a seat already said it mattered), then the higher score, then the id, so the
  * same card always yields the same set. A link whose source is unknown shares one slot with every other such link: two
  * unknowns are never assumed to be two sources.
+ *
+ * `unanswered` is the card READ's rule: only links this seat has given NO verdict on, shown before or not. A seat that saw
+ * a claim and did not answer must find it again when she reopens the card (an agent in a new wake remembers nothing of the
+ * first block), or the claim is counted as shown and can never be used. The filter comes BEFORE the cap, so answering one
+ * claim lets the next one surface. A claim keeps the plain rule: it shows the card's two, one she confirmed among them.
  */
-export function selectDeliveries(links, { max = DELIVERY_MAX } = {}) {
+export function selectDeliveries(links, { max = DELIVERY_MAX, unanswered = false } = {}) {
   const rank = (l) => (l.status === 'confirmed' ? 0 : 1);
   const score = (l) => (Number.isFinite(l.score) ? l.score : -Infinity);
   const ordered = (links ?? [])
-    .filter((l) => l && l.status !== 'dismissed' && l.mine !== 'dismissed' && (l.span || l.gist))
+    .filter((l) => l && l.status !== 'dismissed' && l.mine !== 'dismissed' && (l.span || l.gist) && !(unanswered && l.mine != null))
     .sort((a, b) => rank(a) - rank(b) || score(b) - score(a) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const taken = new Set();
   const out = [];
@@ -61,10 +66,7 @@ export function selectDeliveries(links, { max = DELIVERY_MAX } = {}) {
   return out;
 }
 
-/**
- * What a card READ shows: the part of the set this seat has not been shown. It filters the capped set, never the whole
- * list, or every re-read would walk two further down a long list and the cap would mean nothing.
- */
+/** The part of a set this seat has not been shown: what a showing is RECORDED for. A repeat is delivered, never recorded twice. */
 export const firstShowings = (set) => (set ?? []).filter((l) => !l.shown);
 
 /**
@@ -86,6 +88,7 @@ export function deliveryBlock({ items, shortId, sources = new Map(), recorded } 
           confirm: { tool: 'link_decide', args: { link: l.id, verdict: 'confirmed', workingOn: shortId } },
           dismiss: { tool: 'link_decide', args: { link: l.id, verdict: 'dismissed' } },
         },
+        ...(l.shown ? { shownBefore: true } : {}),   // a long-lived session can tell a repeat from news
       };
     }),
     ...(recorded === false ? { recorded: false } : {}),

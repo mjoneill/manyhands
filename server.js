@@ -7176,7 +7176,7 @@ async function handleDecideLink(req, res, id) {
   }
 }
 
-// ── #1852 — DELIVERY: a card's proposed links handed to the seat that claims it, and to a seat the first time she reads it ──
+// ── #1852 — DELIVERY: a card's proposed links handed to the seat that claims it, and to a seat that reads it, until she answers ──
 // Nobody goes looking for a link (#1850), so the claim and the read carry a few (core/knowledge-delivery.mjs holds the rules).
 // A delivery is a courtesy on top of another answer: it never fails that answer, never changes its status, and never holds
 // it past DELIVERY_DEADLINE_MS. What it could not read it calls UNAVAILABLE; "no links" always means it looked.
@@ -7193,9 +7193,9 @@ function deliverySeat(req) {
 }
 async function readDelivery(card, actor, how) {
   const cardIri = `https://scrumboard.local/entity/${card.id}`;
-  const set = selectDeliveries(linksOfDeliveryRows(await LOGBORN.query(deliveryQuery({ card: cardIri, actor }))));
-  // a claim shows the card's set every time; a read shows only what this seat has not been shown
-  const items = how === 'get' ? firstShowings(set) : set;
+  // a claim shows the card's set every time; a read shows what this seat has not ANSWERED, so an unanswered claim is still
+  // there when she reopens the card. Only a first showing is recorded (below); a repeat says shownBefore.
+  const items = selectDeliveries(linksOfDeliveryRows(await LOGBORN.query(deliveryQuery({ card: cardIri, actor }))), { unanswered: how === 'get' });
   if (items.length === 0) return {};
   const sq = deliverySourcesQuery([...new Set(items.map((l) => l.source).filter(Boolean))]);
   const sources = sq ? sourcesOfRows(await LOGBORN.query(sq)) : new Map();

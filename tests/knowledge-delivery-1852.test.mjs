@@ -8,7 +8,9 @@
  *   selectDeliveries(links)            links: [{ id, status, score, source, shown, span, gist }] → the card's delivery SET:
  *                                      never dismissed · one per source · at most DELIVERY_MAX (2) · confirmed first, then
  *                                      score descending, then id
- *   firstShowings(set)                 the part of the set this seat has not been shown (card_get shows only that)
+ *   selectDeliveries(links, { unanswered: true })   what a card READ shows: the same rules over the links this seat has
+ *                                      given NO verdict on, so a claim keeps appearing until she answers it
+ *   firstShowings(set)                 the part of a set this seat has not been shown: what a showing is RECORDED for
  *   deliveryBlock({ items, shortId, sources, recorded }) → { means, items: [{ link, status, gist, quote, quoteTruncated?,
  *                                      source: { title, url }, score, answer: { confirm, dismiss } }], recorded? } | null
  *   quoteOf(span)                      → { quote, truncated }   cut at QUOTE_MAX_CHARS (300) with an ellipsis
@@ -22,8 +24,8 @@
  *   S5  links whose source is not known share ONE slot: two of them are never assumed to be two sources
  *   S6  a link with neither a quote nor a gist is not deliverable
  *   S7  a link the seat herself dismissed is never delivered to her, whatever its status; one she confirmed may be
- *   F1  card_get shows only what the seat has not been shown, and the cap is applied BEFORE that: a re-read does not walk
- *       down the list two at a time
+ *   F1  a card READ shows what the seat has not ANSWERED, shown before or not, and the cap is applied AFTER that filter:
+ *       answering one claim lets the next one surface. A showing is recorded only for what she has not been shown.
  *   Q1  a long quote is cut at 300 characters with an ellipsis and flagged; a short one is untouched and carries no flag
  *   B1  an item carries the link id, status, gist, quote, source, score and the two exact answering calls, and no triple
  *   B2  the gist falls back to the quote
@@ -31,6 +33,7 @@
  *   B4  `means` says these are machine proposals found by meaning search, not endorsements, and what a confirm means
  *   B5  `recorded: false` appears only when the showing could not be recorded
  *   B6  a page is never invented
+ *   B7  an item the seat was shown before says so (`shownBefore: true`), so a long-lived session can tell a repeat from news
  *   I1  the showing's IRI is fixed by link and seat: the same pair names the same node, another seat another node
  *   P1  the source of a passage
  */
@@ -90,11 +93,16 @@ test('S7 a link the seat herself dismissed is never delivered to her; one she co
   assert.deepEqual(ids(got), [hex(3), hex(4)]);
 });
 
-test('F1 card_get shows only what the seat has not been shown, and the cap comes first', () => {
-  const set = selectDeliveries([link(1, { score: 0.9, shown: true }), link(2, { score: 0.8 }), link(3, { score: 0.7 })]);
-  assert.deepEqual(ids(firstShowings(set)), [hex(2)], 'link 3 is outside the card\'s two, so a re-read never reaches it');
-  const seen = selectDeliveries([link(1, { score: 0.9, shown: true }), link(2, { score: 0.8, shown: true }), link(3, { score: 0.7 })]);
-  assert.deepEqual(firstShowings(seen), [], 'both of the card\'s two were shown: nothing is new');
+test('F1 a card read shows what the seat has not answered, and the cap comes after that filter', () => {
+  // WHY (reviewer, 2026-11-14): a seat that sees a claim, does not answer, and opens the card again (a resident agent in a
+  // new wake remembers nothing of the first block) must still be able to answer it. Showing a link once and never again
+  // would record "shown, never used" for a claim that could not be answered a second time.
+  const links = [link(1, { score: 0.9, mine: 'confirmed' }), link(2, { score: 0.8, shown: true }), link(3, { score: 0.7 }), link(4, { score: 0.6 })];
+  const read = selectDeliveries(links, { unanswered: true });
+  assert.deepEqual(ids(read), [hex(2), hex(3)], 'the one she answered is left out BEFORE the cap, so the next one surfaces; one she was only shown stays');
+  assert.deepEqual(ids(selectDeliveries(links)), [hex(1), hex(2)], 'CONTROL: a claim shows the card\'s two, a link she confirmed among them');
+  assert.deepEqual(ids(firstShowings(read)), [hex(3)], 'only the link she has not been shown is a first showing to record');
+  assert.deepEqual(selectDeliveries([link(1, { mine: 'confirmed' }), link(2, { mine: 'dismissed' })], { unanswered: true }), [], 'everything answered: nothing to show');
 });
 
 test('Q1 a long quote is cut at 300 characters with an ellipsis and flagged; a short one is untouched', () => {
@@ -141,6 +149,7 @@ test('B4 `means` says these are machine proposals found by meaning search, not e
   assert.match(means, /meaning search/);
   assert.match(means, /not endorsements/);
   assert.match(means, /mattered to the work on this card/);
+  assert.match(means, /until you answer it/, 'and that an unanswered claim keeps appearing on the card');
 });
 
 test('B5 `recorded: false` appears only when the showing could not be recorded', () => {
@@ -151,6 +160,12 @@ test('B5 `recorded: false` appears only when the showing could not be recorded',
 test('B6 a page is never invented', () => {
   const b = deliveryBlock({ items: [link(1)], shortId: 7, sources: new Map() });
   assert.equal('page' in b.items[0], false);
+});
+
+test('B7 an item the seat was shown before says so', () => {
+  const b = deliveryBlock({ items: [link(1, { shown: true }), link(2, { source: 'https://scrumboard.local/source/other' })], shortId: 7, sources: new Map() });
+  assert.equal(b.items[0].shownBefore, true);
+  assert.equal('shownBefore' in b.items[1], false, 'news carries no flag');
 });
 
 test('I1 the showing\'s IRI is fixed by link and seat', () => {
