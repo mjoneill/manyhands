@@ -220,5 +220,7 @@
   "tests/write-protocol-floor-1748.test.mjs",
   "tests/write-protocol-guard-1748.test.mjs",
   "tests/outbox-summary-1751.test.mjs",
-  "tests/one-memory-read-1865.test.mjs"
+  "tests/one-memory-read-1865.test.mjs",
+  "tests/seat-inbox-1902.test.mjs",
+  "tests/seat-inbox-rest-1902.test.mjs"
 ]
