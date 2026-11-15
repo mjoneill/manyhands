@@ -174,9 +174,13 @@ export function parseRecallIndex(text, { model }) {
 
 // ── the engine ────────────────────────────────────────────────────────────────────────────────────────────────────────
 const LATE = Symbol('late');
+// The deadline timer is NOT unref'd: it is the one thing that settles this race when the awaited work never does, so it
+// must be able to hold the event loop until it fires. An unref'd deadline beside an unref'd wait leaves nothing alive, and
+// the process ends with the promise pending (node 22's test runner cancels every later row). It is cleared as soon as the
+// race settles, so it never outlives the call.
 function within(promise, ms) {
   let t;
-  const late = new Promise((r) => { t = setTimeout(() => r(LATE), Math.max(0, ms)); t.unref?.(); });
+  const late = new Promise((r) => { t = setTimeout(() => r(LATE), Math.max(0, ms)); });
   return Promise.race([promise, late]).finally(() => clearTimeout(t));
 }
 export const RECALL_MEANS = 'Readings the room has done (sources the extractor read, #1810) whose claims a meaning search found close to this text: '
