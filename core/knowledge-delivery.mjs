@@ -44,8 +44,8 @@ export function quoteOf(span) {
 }
 
 /**
- * The card's delivery SET. Confirmed first (a seat already said it mattered), then the higher score, then the id, so the
- * same card always yields the same set. A link whose source is unknown shares one slot with every other such link: two
+ * The card's delivery SET. A DELIVERY-BORN confirm first (a seat was handed the claim and said it mattered), then the higher
+ * score, then the id, so the same card always yields the same set. A link whose source is unknown shares one slot with every other such link: two
  * unknowns are never assumed to be two sources.
  *
  * `unanswered` is the card READ's rule: only links this seat has given NO verdict on, shown before or not. A seat that saw
@@ -54,7 +54,13 @@ export function quoteOf(span) {
  * claim lets the next one surface. A claim keeps the plain rule: it shows the card's two, one she confirmed among them.
  */
 export function selectDeliveries(links, { max = DELIVERY_MAX, unanswered = false } = {}) {
-  const rank = (l) => (l.status === 'confirmed' ? 0 : 1);
+  // #1901 — a confirm leads ONLY when it is delivery-born (linksOfDeliveryRows): a seat whose confirm stands had been SHOWN the
+  // link before she gave it. The nine triage confirms of 11-13 (#1850/#1851: seats confirming from link_list, ruled not real
+  // uses) predate every showing, so they fall back to score order with the proposed links; no history is rewritten.
+  // reopensIf: seats confirm from link_list (or any surface that records no LinkShowing) in REAL work without ever being
+  // shown the link. Those are real uses, and this rule would rank them by score as if they were triage. If that happens, the
+  // showing is the wrong witness: record the surface a confirm came from on the decision, and rank by that instead.
+  const rank = (l) => (l.status === 'confirmed' && l.deliveryBorn === true ? 0 : 1);
   const score = (l) => (Number.isFinite(l.score) ? l.score : -Infinity);
   const ordered = (links ?? [])
     .filter((l) => l && l.status !== 'dismissed' && l.mine !== 'dismissed' && (l.span || l.gist) && !(unanswered && l.mine != null))
@@ -136,16 +142,19 @@ export function showIntention({ links, card, how, actor, at = new Date().toISOSt
  * seat, which links that seat has been shown. One row per decision; a link nobody decided gives one row.
  */
 export function deliveryQuery({ card, actor = null } = {}) {
-  return `SELECT ?l ?st ?sc ?span ?gist ?pass ?sh ?d ?dby ?dv ?dat WHERE { ?l <${TM.bearsOnCard}> <${card}> ; a <${TM.BearsOn}> ; <${TM.status}> ?st ; <${TM.fromAssertion}> ?a `
+  return `SELECT ?l ?st ?sc ?span ?gist ?pass ?sh ?d ?dby ?dv ?dat ?dsh ?dshat WHERE { ?l <${TM.bearsOnCard}> <${card}> ; a <${TM.BearsOn}> ; <${TM.status}> ?st ; <${TM.fromAssertion}> ?a `
     + `FILTER(?st != "dismissed") OPTIONAL { ?l <${TM.score}> ?sc } OPTIONAL { ?a <${TM.anchorText}> ?span } OPTIONAL { ?a <${TM.gist}> ?gist } `
     + `OPTIONAL { ?a <${TM.expressedIn}> ?pass } ${actor ? `OPTIONAL { ?sh a <${TM.LinkShowing}> ; <${TM.ofLink}> ?l ; <${TM.shownTo}> <${actor}> } ` : ''}`
-    + `OPTIONAL { ?d a <${TM.LinkDecision}> ; <${TM.ofLink}> ?l ; <${TM.decidedBy}> ?dby ; <${TM.linkVerdict}> ?dv ; <${TM.dateCreated}> ?dat } }`;
+    + `OPTIONAL { ?d a <${TM.LinkDecision}> ; <${TM.ofLink}> ?l ; <${TM.decidedBy}> ?dby ; <${TM.linkVerdict}> ?dv ; <${TM.dateCreated}> ?dat `
+    // #1901 — the deciding seat's own showing of the link (at most one per seat and link), for "delivery-born"
+    + `OPTIONAL { ?dsh a <${TM.LinkShowing}> ; <${TM.ofLink}> ?l ; <${TM.shownTo}> ?dby ; <${TM.dateCreated}> ?dshat } } }`;
 }
 /**
  * The delivery query's bindings as the links selectDeliveries reads, one per link. From each seat's STANDING verdict (her latest
  * decision, #1852's rule): `mine`, the reader's own; and, #1901, who confirmed the link. `confirmedBy` is the reader herself when
  * her confirm stands (so it never disagrees with `yours`), otherwise the seat whose standing confirm is the most recent;
  * `confirmedByCount` counts SEATS whose confirm stands. A confirm later replaced by that seat's dismiss is no one's confirm.
+ * `deliveryBorn` (internal, never rendered): a standing confirm whose seat had a LinkShowing for the link dated before it.
  */
 export function linksOfDeliveryRows(rows, { actor = null } = {}) {
   const byId = new Map();
@@ -158,7 +167,7 @@ export function linksOfDeliveryRows(rows, { actor = null } = {}) {
     }
     const l = byId.get(iri);
     if (r.sh) l.shown = true;
-    if (r.d) l.decisions.set(r.d.value, { decision: r.d.value, by: r.dby.value, verdict: r.dv.value, at: r.dat.value });
+    if (r.d) l.decisions.set(r.d.value, { decision: r.d.value, by: r.dby.value, verdict: r.dv.value, at: r.dat.value, shownAt: r.dshat?.value ?? null });
   }
   return [...byId.values()].map(({ decisions, ...l }) => {
     const standing = standingVerdicts([...decisions.values()]);
@@ -167,7 +176,9 @@ export function linksOfDeliveryRows(rows, { actor = null } = {}) {
     const own = actor ? standing.get(actor) ?? null : null;
     const named = own?.verdict === 'confirmed' ? own : confirms[0] ?? null;
     return { ...l, mine: own?.verdict ?? null, confirmedBy: named ? seatKeyOf(named.by) : null, confirmedAt: named?.at ?? null,
-      confirmedByCount: confirms.length, yours: own?.verdict === 'confirmed' };
+      confirmedByCount: confirms.length, yours: own?.verdict === 'confirmed',
+      // #1901 — delivery-born: some STANDING confirm whose seat had been shown the link before it (selectDeliveries ranks by it)
+      deliveryBorn: confirms.some((d) => d.shownAt != null && d.shownAt < d.at) };
   });
 }
 const IRI_SAFE = /^[^\s<>"{}|\\^`]+$/;

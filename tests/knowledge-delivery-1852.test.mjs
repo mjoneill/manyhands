@@ -6,8 +6,8 @@
  *
  * INTERFACE PINNED HERE:
  *   selectDeliveries(links)            links: [{ id, status, score, source, shown, span, gist }] → the card's delivery SET:
- *                                      never dismissed · one per source · at most DELIVERY_MAX (2) · confirmed first, then
- *                                      score descending, then id
+ *                                      never dismissed · one per source · at most DELIVERY_MAX (2) · a DELIVERY-BORN confirm
+ *                                      first (#1901), then score descending, then id
  *   selectDeliveries(links, { unanswered: true })   what a card READ shows: the same rules over the links this seat has
  *                                      given NO verdict on, so a claim keeps appearing until she answers it
  *   firstShowings(set)                 the part of a set this seat has not been shown: what a showing is RECORDED for
@@ -26,7 +26,8 @@
  *   S1  a dismissed link is never delivered
  *   S2  at most two per card
  *   S3  at most one per source: the second link from a source is passed over for the next source's
- *   S4  the order: confirmed before proposed, then the higher score, then the link id
+ *   S4  the order: a delivery-born confirm before everything else, then the higher score, then the link id. #1901: a confirm
+ *       that was NOT delivery-born (no showing to its seat before it) ranks by score with the proposed ones
  *   S5  links whose source is not known share ONE slot: two of them are never assumed to be two sources
  *   S6  a link with neither a quote nor a gist is not deliverable
  *   S7  a link the seat herself dismissed is never delivered to her, whatever its status; one she confirmed may be
@@ -46,6 +47,7 @@
  *       a proposed item is exactly what it was
  *   D3  #1901 DONE WHEN 2, a fixture of the block's TEXT: confirmed by seat X and read by seat Y, the text names X beside the
  *       confirm and says plainly it was not Y; read by X, it says it was X
+ *   D5  #1901 a link is delivery-born when a seat whose confirm STANDS had been shown it (a LinkShowing) before that confirm
  *   D4  #1901 `means` says "confirmed" names another seat's verdict unless `yours` is true
  *   I1  the showing's IRI is fixed by link and seat: the same pair names the same node, another seat another node
  *   P1  the source of a passage
@@ -80,9 +82,14 @@ test('S3 at most one per source: the second link from a source is passed over fo
   assert.deepEqual(ids(got), [hex(1), hex(3)]);
 });
 
-test('S4 the order: confirmed before proposed, then the higher score, then the link id', () => {
-  const got = selectDeliveries([link(1, { score: 0.9 }), link(2, { score: 0.5, status: 'confirmed' })]);
-  assert.deepEqual(ids(got), [hex(2), hex(1)], 'a confirmed link leads a higher-scored proposal');
+test('S4 the order: a delivery-born confirm first, then the higher score, then the link id', () => {
+  const got = selectDeliveries([link(1, { score: 0.9 }), link(2, { score: 0.5, status: 'confirmed', deliveryBorn: true })]);
+  assert.deepEqual(ids(got), [hex(2), hex(1)], 'a delivery-born confirm leads a higher-scored proposal');
+  // #1901 — nine triage confirms (seats confirming from link_list, never shown the link) led six cards' deliveries
+  const triage = selectDeliveries([link(1, { score: 0.9 }), link(2, { score: 0.5, status: 'confirmed', deliveryBorn: false })]);
+  assert.deepEqual(ids(triage), [hex(1), hex(2)], 'a confirm that was not delivery-born ranks by score with the proposed ones');
+  const unknown = selectDeliveries([link(1, { score: 0.9 }), link(2, { score: 0.5, status: 'confirmed' })]);
+  assert.deepEqual(ids(unknown), [hex(1), hex(2)], 'and one nobody showed to be delivery-born is not assumed to be');
   const [lo, hi] = [hex(3), hex(4)].sort();
   const tie = selectDeliveries([{ ...link(3), id: hi }, { ...link(4), id: lo }]);
   assert.deepEqual(ids(tie), [lo, hi], 'equal scores are ordered by id, whatever order they arrived in');
@@ -215,6 +222,20 @@ test('D1 a confirmed link names who confirmed it and when, from standing verdict
   assert.deepEqual({ by: p.confirmedBy, n: p.confirmedByCount, yours: p.yours }, { by: null, n: 0, yours: false }, 'a proposed link has no confirmer');
   const [other] = linksOfDeliveryRows([{ ...row(4), d: v(`${LINK(4)}/decision/e`), dby: v('urn:ex:agent/linker'), dv: v('confirmed'), dat: v(T1) }], { actor: Y });
   assert.equal(other.confirmedBy, 'urn:ex:agent/linker', 'an actor that is not a seat is named by its whole IRI, never cut to a fake seat key');
+});
+
+test('D5 a link is delivery-born when a seat whose confirm stands had been shown it before that confirm', () => {
+  const T0 = '2026-11-12T00:00:00.000Z';
+  /** A decision row by `by`, with that seat's showing of the link at `shownAt` (or none). */
+  const dr = (n, by, verdict, at, id, shownAt = null) => ({ ...row(n, { d: { id, by, verdict, at } }),
+    ...(shownAt ? { dsh: v(`${LINK(n)}/shown/${hex(by)}`), dshat: v(shownAt) } : {}) });
+  const born = (rows) => linksOfDeliveryRows(rows, { actor: Y })[0].deliveryBorn;
+  assert.equal(born([dr(1, 'seat-x', 'confirmed', T2, 'a', T1)]), true, 'shown, then confirmed: delivery-born');
+  assert.equal(born([dr(1, 'seat-x', 'confirmed', T1, 'a')]), false, 'confirmed with no showing (a link_list triage confirm): not');
+  assert.equal(born([dr(1, 'seat-x', 'confirmed', T1, 'a', T2)]), false, 'shown only AFTER the confirm: not');
+  assert.equal(born([dr(1, 'seat-x', 'confirmed', T1, 'a', T0), dr(1, 'seat-x', 'dismissed', T2, 'b', T0)]), false, 'a confirm its seat replaced with a dismiss no longer stands, so it lends no rank');
+  assert.equal(born([dr(1, 'seat-x', 'confirmed', T1, 'a'), dr(1, 'seat-z', 'confirmed', T3, 'b', T2)]), true, 'one standing delivery-born confirm among others is enough');
+  assert.equal(born([row(1, { st: 'proposed' })]), false, 'a proposed link is never delivery-born');
 });
 
 const confirmedBy = (by, { at = T1, count = 1, reader = Y } = {}) => ({ ...link(1, { status: 'confirmed', score: 0.5 }), confirmedBy: by, confirmedAt: at, confirmedByCount: count, yours: `urn:ex:seat/${by}` === reader });

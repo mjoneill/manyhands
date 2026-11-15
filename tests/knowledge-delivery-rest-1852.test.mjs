@@ -14,7 +14,8 @@
  *   Each first showing is one scrum:LinkShowing (kind link.show), written after the answer.
  *
  *   C1  a successful claim carries the card's links, and each first showing is recorded as the AUTHENTICATED seat's, via "claim"
- *   C2  the rules through REST: no dismissed link, one per source, at most two, confirmed first
+ *   C2  the rules through REST: no dismissed link, one per source, at most two; a confirm with no showing before it (a
+ *       triage confirm) ranks by score (#1901)
  *   C3  a card with no links: the claim's answer is exactly what it was, with no field
  *   C4  a refused claim (409 held, 404, 400) carries no field and records nothing
  *   C5  a second claim delivers the same set again (now flagged shownBefore), and the graph still holds ONE showing per link
@@ -22,6 +23,8 @@
  *   C7  the bearer is another seat's than the body's `by`: the showing is the bearer's
  *   C8  #1901 a confirmed item names the seat that confirmed it and when, read from the graph: to another seat it is not
  *       hers (on her claim and on her read), to the confirming seat it is
+ *   C9  #1901 a delivery-born confirm (the seat was shown the link, then confirmed it) leads the card's set; a confirm by a seat
+ *       never shown the link does not
  *   G1  a read with no bearer carries no field, byte for byte what a card with no links answers, and records nothing
  *   G2  a seat's first read carries the block (full and outline) and is recorded via "get"; while she has not answered, the
  *       next read carries the same link with shownBefore:true, and no second showing is recorded
@@ -63,7 +66,7 @@ const T = { skip: SKIP, timeout: 300000 };
 const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
 const RS = 'https://scrumboard.local/ns#';
 const SC = 'https://schema.org/';
-const SEATS = { 'seat-a': 'admin', 'seat-b': 'admin', 'seat-c': 'admin', 'seat-r': 'read' };
+const SEATS = { 'seat-a': 'admin', 'seat-b': 'admin', 'seat-c': 'admin', 'seat-d': 'admin', 'seat-r': 'read' };   // seat-c stays untouched until K1; seat-d is C9's
 
 const ROSTER = path.join(os.tmpdir(), `kd1852-roster-${process.pid}.json`);
 fs.writeFileSync(ROSTER, JSON.stringify({ seats: { ...Object.fromEntries(Object.keys(SEATS).map((s) => [s, { name: s, glyph: s.at(-1), color: '#7cc4a0' }])), board: { name: 'Board', glyph: 'o', color: '#8899aa', kind: 'system' } } }));
@@ -196,16 +199,18 @@ test('C1 a successful claim carries the card\'s links, and each first showing is
     { n: showIri(s.link, seatActor('seat-a')), to: seatActor('seat-a'), on: cardIriOf(card.id), via: 'claim' });
 });
 
-test('C2 the rules through REST: no dismissed link, one per source, at most two, confirmed first', T, async () => {
-  const card = await newCard(); const [one, two, three] = [await seedSource(), await seedSource(), await seedSource()];
+test('C2 the rules through REST: no dismissed link, one per source, at most two; a triage confirm ranks by score', T, async () => {
+  const card = await newCard(); const [one, two, three_] = [await seedSource(), await seedSource(), await seedSource()];
   await seedLink(card, { source: one, score: 0.99, status: 'dismissed' });
   const best = await seedLink(card, { source: one, score: 0.9 });
   await seedLink(card, { source: one, score: 0.8 });
   const confirmed = await seedLink(card, { source: two, score: 0.5, status: 'confirmed' });
-  await seedLink(card, { source: three, score: 0.6 });
+  const three = await seedLink(card, { source: three_, score: 0.6 });
   const r = await claim('seat-a', card);
   assert.equal(r.status, 200, r.text);
-  assert.deepEqual(r.json.roomHasRead.items.map((i) => [i.link, i.status]), [[confirmed.id, 'confirmed'], [best.id, 'proposed']]);
+  // #1901: `confirmed` was seeded with no decision and no showing: not delivery-born, so 0.5 sorts below `three`'s 0.6
+  assert.deepEqual(r.json.roomHasRead.items.map((i) => [i.link, i.status]), [[best.id, 'proposed'], [three.id, 'proposed']]);
+  assert.ok(confirmed.id, 'PRECONDITION: the confirmed link was seeded');
 });
 
 test('C3 a card with no links: the claim\'s answer is exactly what it was', T, async () => {
@@ -291,6 +296,26 @@ test('C8 #1901 a confirmed item names who confirmed it and when, and says whethe
   assert.deepEqual({ by: mine.confirmedBy, at: mine.confirmedAt, n: mine.confirmedByCount, yours: mine.yours, who: mine.whoConfirmed },
     { by: 'seat-b', at, n: 1, yours: true, who: `You (seat-b) confirmed this claim at ${at}: this verdict is yours.` });
   assert.equal((await release('seat-b', card)).status, 200);
+});
+
+test('C9 #1901 a delivery-born confirm leads the card\'s set; a confirm by a seat never shown the link does not', T, async () => {
+  const card = await newCard();
+  const top = await seedLink(card, { source: await seedSource(), score: 0.9 });
+  const shownThenConfirmed = await seedLink(card, { source: await seedSource(), score: 0.4 });
+  const triage = await seedLink(card, { source: await seedSource(), score: 0.3 });
+  // seat-b is shown the card's two (top, shownThenConfirmed) on her read, then confirms one of them
+  assert.deepEqual(await readLinks('seat-b', card), [top.id, shownThenConfirmed.id], 'PRECONDITION: seat-b was shown these two');
+  await untilShown(shownThenConfirmed.link);
+  assert.equal((await decide('seat-b', shownThenConfirmed, 'confirmed', card)).status, 200);
+  // seat-d confirms the third without ever being shown it: the shape of a link_list triage confirm
+  assert.equal((await decide('seat-d', triage, 'confirmed', card)).status, 200);
+  assert.equal((await showingsOf(triage.link)).length, 0, 'PRECONDITION: nobody was shown the triage-confirmed link');
+  const r = await claim('seat-a', card);
+  assert.equal(r.status, 200, r.text);
+  assert.equal((await release('seat-a', card)).status, 200);
+  assert.deepEqual(r.json.roomHasRead.items.map((i) => [i.link, i.status, i.confirmedBy ?? null]),
+    [[shownThenConfirmed.id, 'confirmed', 'seat-b'], [top.id, 'proposed', null]],
+    'the delivery-born confirm leads despite its 0.4; the triage confirm (0.3) falls to score order and out of the two');
 });
 
 test('G1 a read with no bearer carries no field, byte for byte, and records nothing', T, async () => {
