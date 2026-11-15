@@ -23,7 +23,13 @@
  *   G9  an offer whose claim did not come from the source it names (a real claim, a real source, not each other's) is refused
  *   G10 post.redact takes the post's recall records with it in the SAME update: its offers, their openings and its reads, in the
  *       default graph and their recordedBy in the bookkeeping graph; another post's records are untouched
- *   G11 a node that claims to belong to the post's recall but is not provably one refuses the whole redaction (never widens)
+ *   G11 a node that names the post's recall but is not provably one never refuses the redaction and is never deleted whole:
+ *       only its naming edge goes (offerOn the post, readOf the post, ofOffer one of the post's offers), so nothing left names
+ *       the post or one of its offer IRIs; a typed opening outside <offer>/opened/ is such a node
+ *       ... unless its IRI is the post's own derivation: a node at offerIri(P, its offeredSource), at readIri(P, its readBy), or under
+ *       such an offer's /opened/ carries a hash of the post in its IRI, so it is the post's, typed or not, and goes WHOLE (G13);
+ *       a typed node at an IRI that is NOT the derivation carries no hash of the post and keeps everything but its edge (G11 iv)
+ *   G12 an offer whose claim's run used the named source, but whose passage is under ANOTHER source's blocks, is refused
  */
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -212,17 +218,94 @@ test('G10 post.redact takes the post\'s offers, their openings and its reads wit
   assert.equal(await count(`<${a.post}> <${RDF}type> <${RS}RedactedPost>`), 1, 'and the post is a tombstone as before');
 });
 
-test('G11 a node that says it is the post\'s but cannot be proven so refuses the whole redaction', { skip: SKIP }, async () => {
-  for (const stray of [
-    (w) => `<https://scrumboard.local/recall/${'cd'.repeat(32)}> <${RS}offerOn> <${w.post}> .`,   // not typed an offer
-    (w) => `<https://scrumboard.local/elsewhere/${crypto.randomUUID()}> <${RDF}type> <${RS}RecallRead> ; <${RS}readOf> <${w.post}> .`,   // a read outside recall/read/
-  ]) {
+const NAME = `<${SC}name> "kept"`;
+const G11_CASES = [
+    // (i) not typed an offer, under recall/ — and a typed opening hanging off it, under ITS /opened/ (proven or not, the offer is the post's)
+    { what: 'an untyped node with offerOn the post', node: () => `https://scrumboard.local/recall/${crypto.randomBytes(32).toString('hex')}`,
+      stray: (w, n) => `<${n}> <${RS}offerOn> <${w.post}> ; ${NAME} . <${n}/opened/${'ef'.repeat(32)}> <${RDF}type> <${RS}RecallOpening> ; <${RS}ofOffer> <${n}> ; ${NAME} .`,
+      edge: (w, n) => `<${n}> <${RS}offerOn> <${w.post}>`, also: (w, n) => [[`${n}/opened/${'ef'.repeat(32)}`, `<${n}/opened/${'ef'.repeat(32)}> <${RS}ofOffer> <${n}>`]] },
+    // (ii) a read outside recall/read/
+    { what: 'a typed read with the wrong IRI shape', node: () => `https://scrumboard.local/elsewhere/${crypto.randomUUID()}`,
+      stray: (w, n) => `<${n}> <${RDF}type> <${RS}RecallRead> ; <${RS}readOf> <${w.post}> ; ${NAME} .`, edge: (w, n) => `<${n}> <${RS}readOf> <${w.post}>`, also: () => [] },
+    // (iii) a typed opening of the post's PROVEN offer, outside <offer>/opened/ (mutant M3's case)
+    { what: 'a typed opening of the post\'s offer outside <offer>/opened/', node: (w) => `${offerIri(w.post, w.src)}/elsewhere/${'ab'.repeat(32)}`,
+      stray: (w, n) => `<${n}> <${RDF}type> <${RS}RecallOpening> ; <${RS}ofOffer> <${offerIri(w.post, w.src)}> ; <${RS}openedVia> "seat" ; ${NAME} .`,
+      edge: (w, n) => `<${n}> <${RS}ofOffer> <${offerIri(w.post, w.src)}>`, also: () => [] },
+    // (iv) typed a RecallOffer, offerOn the post, under recall/ — but NOT at offerIri(post, its source): no hash of the post in it
+    { what: 'a typed offer at an IRI that is not the derivation', node: () => `https://scrumboard.local/recall/${crypto.randomBytes(32).toString('hex')}`,
+      stray: (w, n) => `<${n}> <${RDF}type> <${RS}RecallOffer> ; <${RS}offerOn> <${w.post}> ; <${RS}offeredSource> <${w.src}x> ; ${NAME} .`,
+      edge: (w, n) => `<${n}> <${RS}offerOn> <${w.post}>`, also: () => [] },
+];
+for (const [c, tag] of G11_CASES.map((c, k) => [c, ['i', 'ii', 'iii', 'iv'][k]])) test(`G11(${tag}) ${c.what}: cut loose (only its naming edge goes), never deleted whole, never a refusal`, { skip: SKIP }, async () => {
+  {
     const w = await world();
-    await client.update(offerIntention({ post: w.post, offers: [item(w)], actor: BOARD, at: at() }));
-    await raw(`INSERT DATA { ${stray(w)} }`);
+    assert.equal((await client.update(offerIntention({ post: w.post, offers: [item(w)], actor: BOARD, at: at() }))).outcome, 'APPLIED');
+    const n = c.node(w);
+    await raw(`INSERT DATA { ${c.stray(w, n)} }`);
+    const offer = offerIri(w.post, w.src);
+    const nodes = [[n, c.edge(w, n)], ...c.also(w, n)];
+    const before = []; for (const [x] of nodes) before.push(await count(`<${x}> ?p ?o`));
     const r = await redact(w);
-    assert.equal(r.outcome, 'PRECONDITION_FAILED', `ambiguity refuses, never widens: ${JSON.stringify(r)}`);
-    assert.equal(await count(`<${w.post}> <${RDF}type> <${SC}Comment>`), 1, 'the post is not redacted');
-    assert.equal(await count(`<${offerIri(w.post, w.src)}> ?p ?o`) > 0, true, 'and nothing was deleted');
+    assert.equal(r.outcome, 'APPLIED', `${c.what}: recall data never refuses a redaction: ${JSON.stringify(r)}`);
+    assert.equal(await count(`<${w.post}> <${RDF}type> <${RS}RedactedPost>`), 1, `${c.what}: the post is a tombstone`);
+    for (const [[x, edge], k] of nodes.map((e, k) => [e, k])) {
+      assert.equal(await count(edge), 0, `${c.what}: its naming edge is gone (${edge})`);
+      assert.equal(await count(`<${x}> ?p ?o`), before[k] - 1, `${c.what}: ${x} survives minus that one edge (never deleted whole)`);
+      assert.equal(await count(`<${x}> <${SC}name> "kept"`), 1, `${c.what}: nothing else of it is touched`);
+    }
+    assert.equal(await count(`?x ?p <${w.post}>`), 0, `${c.what}: nothing names the redacted post`);
+    assert.equal(await count(`<${offer}> ?p ?o`), 0, `${c.what}: the proven offer is gone`);
+    assert.equal(await count(`?x ?p <${offer}>`), 0, `${c.what}: nothing refers to the deleted offer IRI`);
   }
+});
+
+const anyTriple = async (iri) => count(`{ GRAPH ?g { <${iri}> ?p ?o } } UNION { GRAPH ?g { ?s ?p <${iri}> } } UNION { <${iri}> ?p ?o } UNION { ?s ?p <${iri}> }`);
+test('G13(a) a node at the post\'s DERIVED offer or read IRI, typed or not, goes whole (subject and object, both graphs)', { skip: SKIP }, async () => {
+  const w = await world();
+  assert.equal((await client.update(offerIntention({ post: w.post, offers: [item(w)], actor: BOARD, at: at() }))).outcome, 'APPLIED');
+  const s2 = `https://scrumboard.local/source/${crypto.randomBytes(32).toString('hex')}`;
+  const off = offerIri(w.post, s2), rd = readIri(w.post, OTHER);
+  await raw(`INSERT DATA { <${off}> <${RS}offerOn> <${w.post}> ; <${RS}offeredSource> <${s2}> ; ${NAME} .
+    <${rd}> <${RS}readOf> <${w.post}> ; <${RS}readBy> <${OTHER}> ; ${NAME} . }`);   // untyped, at the derived IRIs
+  assert.equal((await redact(w)).outcome, 'APPLIED');
+  for (const n of [off, rd, offerIri(w.post, w.src)]) assert.equal(await anyTriple(n), 0, `${n}: no triple with it as subject or object, in either graph`);
+});
+
+test('G13(c) a node under a derived offer\'s /opened/, typed or not, goes whole; one elsewhere pointing at the offer loses only its edge', { skip: SKIP }, async () => {
+  const w = await world();
+  assert.equal((await client.update(offerIntention({ post: w.post, offers: [item(w)], actor: BOARD, at: at() }))).outcome, 'APPLIED');
+  const offer = offerIri(w.post, w.src);
+  const under = `${offer}/opened/${'12'.repeat(32)}`, elsewhere = `https://scrumboard.local/elsewhere/${crypto.randomUUID()}`;
+  await raw(`INSERT DATA { <${under}> <${RS}ofOffer> <${offer}> ; ${NAME} . <${elsewhere}> <${RDF}type> <${RS}RecallOpening> ; <${RS}ofOffer> <${offer}> ; ${NAME} . }`);
+  assert.equal((await redact(w)).outcome, 'APPLIED');
+  assert.equal(await anyTriple(under), 0, 'the untyped node under /opened/ carries the offer\'s hash: gone');
+  assert.equal(await count(`<${elsewhere}> ?p ?o`), 2, 'the one elsewhere keeps its type and name');
+  assert.equal(await anyTriple(offer), 0, 'and nothing names the offer');
+});
+
+test('G13(d) the IRI SPARQL derives in the redaction is byte-identical to offerIri() and readIri() for real records', { skip: SKIP }, async () => {
+  const w = await world();
+  assert.equal((await client.update(offerIntention({ post: w.post, offers: [item(w)], actor: BOARD, at: at() }))).outcome, 'APPLIED');
+  assert.equal((await client.update(readIntention({ post: w.post, actor: SEAT, at: at() }))).outcome, 'APPLIED');
+  const rows = await q(`SELECT ?o ?d ?r ?dr WHERE { ?o <${RS}offerOn> <${w.post}> ; <${RS}offeredSource> ?src . ?r <${RS}readOf> <${w.post}> ; <${RS}readBy> ?a .
+    BIND(CONCAT("https://scrumboard.local/recall/", SHA256(CONCAT(STR(<${w.post}>), "\\n", STR(?src)))) AS ?d)
+    BIND(CONCAT("https://scrumboard.local/recall/read/", SHA256(CONCAT(STR(<${w.post}>), "\\n", STR(?a)))) AS ?dr) }`);
+  assert.equal(rows.length, 1);
+  assert.deepEqual([rows[0].d.value, rows[0].o.value], [offerIri(w.post, w.src), offerIri(w.post, w.src)]);
+  assert.deepEqual([rows[0].dr.value, rows[0].r.value], [readIri(w.post, SEAT), readIri(w.post, SEAT)]);
+});
+
+test('G12 a claim whose run used the named source but whose passage is under another source\'s blocks is refused, nothing written', { skip: SKIP }, async () => {
+  const w = await world();
+  const s2 = `https://scrumboard.local/source/${crypto.randomBytes(32).toString('hex')}`;
+  const claim = `https://scrumboard.local/assertion/${crypto.randomUUID()}`;
+  // ONE run that used BOTH sources; the claim is of that run, its passage under S2's blocks
+  await raw(`INSERT DATA { <${s2}> <${RDF}type> <${RS}SourceVersion> ; <${SC}name> "The second source" ; <${SC}url> "https://example.com/s2" .
+    <${w.run}> <${PROV}used> <${s2}> .
+    <${claim}> <${RDF}type> <${RS}Assertion> ; <${RS}ofRun> <${w.run}> ; <${RS}expressedIn> <${s2}/block/0> ; <${RS}gist> "g" ; <${RS}anchorText> "q" . }`);
+  const wrong = await client.update(offerIntention({ post: w.post, offers: [{ source: w.src, assertion: claim, score: 0.7, bar: 0.62 }], actor: BOARD, at: at() }));
+  assert.equal(wrong.outcome, 'PRECONDITION_FAILED', `the run used S, the passage is S2's: ${JSON.stringify(wrong)}`);
+  assert.equal(await count(`?o <${RS}offerOn> <${w.post}>`), 0, 'nothing written');
+  // CONTROL: the same claim offered with S2 is accepted
+  assert.equal((await client.update(offerIntention({ post: w.post, offers: [{ source: s2, assertion: claim, score: 0.7, bar: 0.62 }], actor: BOARD, at: at() }))).outcome, 'APPLIED');
 });

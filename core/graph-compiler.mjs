@@ -1148,6 +1148,7 @@ function planRecord(c) {
   const delAny = [];       // #1574 R4a [{s, keep:[predicate…]}]: every triple of s is removed except those predicates
   const delOwned = [];     // #1574 R4a [{owner, prefix}]: every triple of every node that is attachmentOf owner AND under prefix is removed
   const delLinked = [];    // #1582 [{link, owner, type, pred}]: every `pred` value on every node of `type` that `link`s to owner is removed
+  const delEdges = [];     // #1689 [{arms}]: ONE triple (?EDGE ?EP ?EO) per match — a node whose ownership is not proven loses only its edge
   const delMatched = [];   // #1689 [{patterns}]: every triple of every node ?NODE one of the patterns proves, and its recordedBy in the bk graph
   const condIns = [];      // #1582 [{s, p, o, unless:[node, type]}]: inserted only where `node` is NOT of `type` when the update runs
   const insAt = [];        // #1762 S2 [[s, p]]: s p ?n_at, the receipt's own NOW(), ok-guarded through its subject
@@ -1477,20 +1478,34 @@ function planRecord(c) {
     // `postedText` on a ModelCall whose producedPost is this post is deleted.
     delLinked.push({ link: TM.producedPost, owner: P, type: TM.ModelCall, pred: TM.postedText });
     // #1689 — the post's recall records go too. An offer holds no text, but "this post touched that source" says what the post
-    // was about, which is what a redaction exists to stop. Offer IRIs are hashes, never under the post's prefix, so a node goes
-    // only when its ownership is PROVEN by type, edge and IRI shape together: an offer (RecallOffer, offerOn P, under recall/);
-    // an opening of one (RecallOpening, ofOffer that offer, under <offer>/opened/); a read (RecallRead, readOf P, under
-    // recall/read/). A node that carries one of those edges to P without the rest refuses the whole redaction rather than
-    // widening it. Each node's recordedBy goes from the bookkeeping graph too: its IRI is a hash of the post and the source
-    // (or the seat), so a recordedBy left behind would still let someone check "did post P touch source S".
-    const REC = JSON.stringify('https://scrumboard.local/recall/'), REC_READ = JSON.stringify('https://scrumboard.local/recall/read/');
-    pre.push(`    FILTER NOT EXISTS { ?xr1 ${I(TM.offerOn)} ${I(P)} FILTER(NOT EXISTS { ?xr1 ${I(TM.type)} ${I(TM.RecallOffer)} } || !STRSTARTS(STR(?xr1), ${REC}) || STRSTARTS(STR(?xr1), ${REC_READ})) }`,
-      `    FILTER NOT EXISTS { ?xr2 ${I(TM.ofOffer)} ?xr2o . ?xr2o ${I(TM.offerOn)} ${I(P)} FILTER(NOT EXISTS { ?xr2 ${I(TM.type)} ${I(TM.RecallOpening)} } || !STRSTARTS(STR(?xr2), CONCAT(STR(?xr2o), "/opened/"))) }`,
-      `    FILTER NOT EXISTS { ?xr3 ${I(TM.readOf)} ${I(P)} FILTER(NOT EXISTS { ?xr3 ${I(TM.type)} ${I(TM.RecallRead)} } || !STRSTARTS(STR(?xr3), ${REC_READ})) }`);
-    delMatched.push({ patterns: [
-      `?NODE ${I(TM.type)} ${I(TM.RecallOffer)} ; ${I(TM.offerOn)} ${I(P)} .`,
-      `?NODEo ${I(TM.type)} ${I(TM.RecallOffer)} ; ${I(TM.offerOn)} ${I(P)} . ?NODE ${I(TM.type)} ${I(TM.RecallOpening)} ; ${I(TM.ofOffer)} ?NODEo .`,
-      `?NODE ${I(TM.type)} ${I(TM.RecallRead)} ; ${I(TM.readOf)} ${I(P)} .`,
+    // was about, which is what a redaction exists to stop. Offer and read IRIs are HASHES of the post (offerIri, readIri in
+    // core/knowledge-recall.mjs), so the proof that a node is the post's is its IRI's own derivation, recomputed here among the
+    // nodes that name the post by an edge, whatever their type:
+    //   an offer  — offerOn P, offeredSource ?s, and IRI = recall/ + sha256(P "\n" ?s);
+    //   a read    — readOf P, readBy ?a,         and IRI = recall/read/ + sha256(P "\n" ?a);
+    //   an opening — ofOffer such an offer, and IRI under <that offer>/opened/ (it carries the offer's hash in its own IRI).
+    // A proven node goes WHOLE, with its recordedBy in the bookkeeping graph: left anywhere, a derived IRI lets anyone confirm
+    // "did post P touch source S" by hashing a guess.
+    // A node that names the post through one of those edges WITHOUT the proof carries no hash of the post: it is never deleted
+    // whole (that would widen the delete to a node whose ownership is not proven) and never refuses the redaction; only its
+    // naming edge goes (offerOn P; readOf P; ofOffer one of P's offers, proven or not), so nothing left names the post or one
+    // of its offer IRIs, and it keeps its other triples.
+    // OUT OF SCOPE: a node sitting at a derived IRI that names the post by NO edge (or an /opened/ node with no ofOffer). Finding
+    // it would mean hashing every offer in the store on every redaction; making one takes a raw write plus a removed edge.
+    // WHY THIS DIFFERS FROM THE ATTACHMENT RULE ABOVE, which refuses on ambiguity: an attachment holds CONTENT, so an unproven
+    // one can be neither deleted (it may be someone else's) nor left (it may be this post's text), and refusing is the only
+    // safe answer. A recall node holds no text: cutting its edge to the post removes everything it said about the post,
+    // while refusing would leave the post's TEXT up because of a node with none. A privacy action must not fail on that side.
+    const derived = (n, base, other) => `FILTER(STR(${n}) = CONCAT(${JSON.stringify(base)}, SHA256(CONCAT(STR(${I(P)}), "\\n", STR(${other})))))`;
+    const offerProof = (n) => `${n} ${I(TM.offerOn)} ${I(P)} ; ${I(TM.offeredSource)} ${n}s . ${derived(n, 'https://scrumboard.local/recall/', `${n}s`)}`;
+    const openingProof = (n, o) => `${offerProof(o)} ${n} ${I(TM.ofOffer)} ${o} . FILTER(STRSTARTS(STR(${n}), CONCAT(STR(${o}), "/opened/")))`;
+    const readProof = (n) => `${n} ${I(TM.readOf)} ${I(P)} ; ${I(TM.readBy)} ${n}a . ${derived(n, 'https://scrumboard.local/recall/read/', `${n}a`)}`;
+    delMatched.push({ patterns: [offerProof('?NODE'), openingProof('?NODE', '?NODEo'), readProof('?NODE')] });
+    // the unproven: ONE edge each, ?EDGE ?EP ?EO; the proof is re-checked inside NOT EXISTS with its own variables
+    delEdges.push({ arms: [
+      `?EDGE ${I(TM.offerOn)} ${I(P)} . FILTER NOT EXISTS { ${offerProof('?EDGE')} } BIND(${I(TM.offerOn)} AS ?EP) BIND(${I(P)} AS ?EO)`,
+      `?EDGE ${I(TM.readOf)} ${I(P)} . FILTER NOT EXISTS { ${readProof('?EDGE')} } BIND(${I(TM.readOf)} AS ?EP) BIND(${I(P)} AS ?EO)`,
+      `?EO ${I(TM.offerOn)} ${I(P)} . ?EDGE ${I(TM.ofOffer)} ?EO . FILTER NOT EXISTS { ${openingProof('?EDGE', '?EO')} } BIND(${I(TM.ofOffer)} AS ?EP)`,
     ] });
     add(P, TM.type, I(TM.RedactedPost));
     add(P, TM.redactedBy, ref(c.opId));
@@ -1532,7 +1547,7 @@ function planRecord(c) {
     for (const a of P.aliases) add(P.iri, TM.aliases, L(a));
     add(P.iri, TM.recordedBy, ref(c.opId));
   }
-  return { target, pre, fresh, freshSubject, ins, delAll, delAny, delOwned, delLinked, delMatched, condIns, insAt, verGuard, dispatchHold };
+  return { target, pre, fresh, freshSubject, ins, delAll, delAny, delOwned, delLinked, delMatched, delEdges, condIns, insAt, verGuard, dispatchHold };
 }
 
 function compileRecord(c) {
@@ -1595,11 +1610,20 @@ function compileRecord(c) {
     // #1689 — ONE optional over a UNION of the proven node sets, so its rows are the SUM of their triples, never a product;
     // the bookkeeping recordedBy is read inside it, where ?xm is bound (a free read would bind every recordedBy in the store)
     const n = `?xm${k}`;
-    const arms = patterns.map((p) => `{ ${p.replaceAll('?NODEo', `?xmq${k}`).replaceAll('?NODE', n)} }`).join(' UNION ');
-    top.push(`  OPTIONAL { ${arms} ${n} ?xmp${k} ?xmo${k} OPTIONAL { GRAPH ${BK} { ${n} ${EX.recordedBy} ?xmr${k} } } }`);
+    // each arm reads the node's triples itself, where the node is bound by its proof (joined after the UNION, the engine
+    // reads every triple in the store first: measured 2026-11-14 with 20,000 other posts' recall records: ~1.3 s per redaction that way, ~0.35 s this way)
+    const arms = patterns.map((p) => `{ ${p.replaceAll('?NODEo', `?xmq${k}`).replaceAll('?NODE', n)} ${n} ?xmp${k} ?xmo${k} . }`).join(' UNION ');
+    top.push(`  OPTIONAL { ${arms} OPTIONAL { GRAPH ${BK} { ${n} ${EX.recordedBy} ?xmr${k} } } }`);
     dBinds.push(ok(n, `xm${k}`), ok(`?xmp${k}`, `xmp${k}`), ok(`?xmo${k}`, `xmo${k}`), ok(`?xmr${k}`, `xmr${k}`));
     del.push(`  ?d_xm${k} ?d_xmp${k} ?d_xmo${k} .`);
     bDel.push(`  ?d_xm${k} ${EX.recordedBy} ?d_xmr${k} .`);
+  });
+  (plan.delEdges || []).forEach(({ arms }, k) => {
+    // #1689 — ONE optional over a UNION, as above: the rows are the sum of the edges, never a product; nothing else of the node
+    const sub = (a) => a.replaceAll('?EDGE', `?xe${k}`).replaceAll('?EP', `?xep${k}`).replaceAll('?EO', `?xeo${k}`);
+    top.push(`  OPTIONAL { ${arms.map((a) => `{ ${sub(a)} }`).join(' UNION ')} }`);
+    dBinds.push(ok(`?xe${k}`, `xe${k}`), ok(`?xep${k}`, `xep${k}`), ok(`?xeo${k}`, `xeo${k}`));
+    del.push(`  ?d_xe${k} ?d_xep${k} ?d_xeo${k} .`);
   });
   (plan.condIns || []).forEach(({ s, p, o, unless }, k) => {
     // ?xcn is never bound, so IF(...) yields an UNBOUND ?xc (no triple) when the node IS of the type, else the literal
