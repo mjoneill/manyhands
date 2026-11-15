@@ -1,3 +1,4 @@
+import { claimIriOf } from './knowledge-linking.mjs';   // #1905 — one rule for what a claim address is, shared with the route
 /**
  * #1196 slice B — THE READ-ONLY SURFACE A COLLEAGUE MAY REACH.
  *
@@ -320,8 +321,8 @@ export function makeExecutor({ get, post, put = null, del = null, patch = null, 
       // #1905 - the seat's OWN attachment of a claim to a card. Built from the three allowed fields and `by`, the seat the runner
       // binds, as link_decide's body is; the server takes the actor from the credential and refuses a foreign onBehalfOf.
       case 'link_attach': {
-        const claim = typeof args?.claim === 'string' ? args.claim.trim() : '';
-        if (!/^https:\/\/scrumboard\.local\/assertion\/[^\s<>"]+$/.test(claim)) throw new Error('link_attach needs the claim\'s address exactly as you were given it: https://scrumboard.local/assertion/...');
+        const claim = claimIriOf(args?.claim);
+        if (!claim) throw new Error('link_attach needs the claim exactly as you were given it: its address (https://scrumboard.local/assertion/...) or its id');
         if (!Number.isInteger(args?.card)) throw new Error('link_attach card is the card\'s number, a whole number such as 1902');
         const reason = typeof args?.reason === 'string' ? args.reason.trim() : '';
         if (!reason) throw new Error('link_attach needs a reason: one line saying what this claim would add to the card');

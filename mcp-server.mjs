@@ -1745,11 +1745,11 @@ function buildMcpServer() {
   // session, as link_decide's does: an attachment records who made it, so the message must not be able to name another seat.
   mcp.registerTool('link_attach', {
     description: 'Attach a claim (from a source the room read) to a card it bears on, when no link was proposed. claim: the assertion IRI '
-      + '(from link_list or a delivered or recalled claim). card: the card\'s short id. reason: REQUIRED, one line, what this claim would add to the card. '
+      + '(from link_list or a recalled claim) or its bare id (the Reading page). card: the card\'s short id. reason: REQUIRED, one line, what this claim would add to the card. '
       + 'The link starts PROPOSED: attaching is not a confirm (not a use), and the use counts read machine links only. It is recorded under YOUR seat '
       + '(from this session) with your reason. A claim already linked to that card returns 409 LINK_EXISTS with that link\'s id.',
     inputSchema: {
-      claim: z.string().min(1).describe('The claim\'s assertion IRI, https://scrumboard.local/assertion/...'),
+      claim: z.string().min(1).describe('The claim: its assertion IRI (https://scrumboard.local/assertion/...) or its bare id, as the Reading page shows it'),
       card: z.number().int().describe('The short id of the card the claim bears on'),
       reason: z.string().min(1).describe('One line: what this claim would add to the card'),
     },

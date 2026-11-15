@@ -74,6 +74,15 @@ export function linkIntention({ proposals, minScore, model, at, actor, opId = `u
 
 export { ATTACH_REASON_MAX };
 /**
+ * #1905 — a claim's address from what a seat holds: the full assertion IRI (link_list, recall), or its bare id (the Reading
+ * page shows only the tail). Anything else is null, so a path segment or another kind of node is never taken for a claim.
+ */
+export function claimIriOf(given) {
+  const s = typeof given === 'string' ? given.trim() : '';
+  if (/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(s)) return `${ENTITY}assertion/${s}`;
+  return /^https:\/\/scrumboard\.local\/assertion\/[A-Za-z0-9][A-Za-z0-9_-]*$/.test(s) ? s : null;
+}
+/**
  * #1905 — ONE claim attached to ONE card by hand, with the attacher's one-line reason. The same node a machine proposal would
  * be (linkIri of the same span key), so the second of the two is refused as not fresh. No score, query or model: a person's
  * judgement is not a search result. `card` is the card's id, as a proposal carries it.

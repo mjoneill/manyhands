@@ -77,6 +77,13 @@ test('G4 refused in a sentence BEFORE any request: no reason, a card that is not
   assert.deepEqual(posts, [], 'no request was made for any of them');
 });
 
+test('G6 the claim may be its bare id, as the Reading page shows it: sent as the full address', async () => {
+  const { exec, posts } = wired();
+  await exec('link_attach', { claim: CLAIM.split('/').pop(), card: 1902, reason: 'x' });
+  assert.equal(posts[0].body.claim, CLAIM);
+  await assert.rejects(() => exec('link_attach', { claim: '../card/2', card: 1902, reason: 'x' }), /claim/);
+});
+
 test('G5 the prompt names link_attach only when it is granted', () => {
   const WAKE = { kind: 'mention', id: 'w1', author: 'ada', body: 'hi', createdAt: '2026-11-15T00:00:00Z' };
   const sys = (grants) => buildMessages({ agent: { seatKey: 'pip', name: 'pip', residency: 'resident', toolGrants: grants }, wake: WAKE, memories: [] })

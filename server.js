@@ -82,7 +82,7 @@ import { labelAliasRows, labelAliasEntity, labelAliasIri } from './core/label-al
 import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, auditOutbox, modeProblem, legacyProof, postMatchesEntry, opIdFor, announcePostId, postCreateIntention, obligationIdOf } from './core/announce-outbox.mjs';   // #1574 C3a/C3b/C3c
 import * as U3 from './core/unit3-graph.mjs';   // #1582 — deliveries and model calls in the graph
 import { createGraphClient, setExecutorMeter } from './core/graph-client.mjs';   // #1574 C3b — the conversations unit's executor door
-import { decideIntention as linkDecideIntention, attachIntention as linkAttachIntention, spanKey as linkSpanKey, linkIri as linkIriOf, linkCountsQuery, countLinkUse, linkDecisionsQuery, decisionsOfRows, retiringDecision, dismissalCount } from './core/knowledge-linking.mjs';   // #1851, #1850, #1852
+import { decideIntention as linkDecideIntention, attachIntention as linkAttachIntention, claimIriOf, spanKey as linkSpanKey, linkIri as linkIriOf, linkCountsQuery, countLinkUse, linkDecisionsQuery, decisionsOfRows, retiringDecision, dismissalCount } from './core/knowledge-linking.mjs';   // #1851, #1850, #1852
 import { deliveryQuery, linksOfDeliveryRows, selectDeliveries, firstShowings, deliverySourcesQuery, sourcesOfRows, deliveryBlock, showIntention, DELIVERY_DEADLINE_MS } from './core/knowledge-delivery.mjs';   // #1852
 import * as READING from './core/knowledge-reading.mjs';   // #1894
 import { readRecallConfig, createRecallEngine, createRecallQueue, createOfferProjection, createRecallHook, publicItem as recallPublicItem, RECALL_COUNTS_MEANS,
@@ -7132,8 +7132,8 @@ async function handleAttachLink(req, res) {
     const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
     const card = body.card == null || body.card === '' ? null : linkCardByShortId(Number(body.card));
     if (!card) return sendJSON(res, 400, { error: `card ${body.card} is not a card on this board` });
-    const claim = typeof body.claim === 'string' ? body.claim.trim() : '';
-    if (!/^https:\/\/scrumboard\.local\/assertion\/[^\s<>"]+$/.test(claim)) return sendJSON(res, 404, { error: `no claim ${claim}`, code: 'CLAIM_NOT_FOUND' });
+    const claim = claimIriOf(body.claim);   // the full address, or the bare id the Reading page shows
+    if (!claim) return sendJSON(res, 404, { error: `no claim ${JSON.stringify(body.claim ?? null)}: give its address or its id`, code: 'CLAIM_NOT_FOUND' });
     const RS = 'https://scrumboard.local/ns#';
     const spans = await LOGBORN.query(`SELECT ?span WHERE { <${claim}> a <${RS}Assertion> ; <${RS}anchorText> ?span }`);
     if (!spans.length) return sendJSON(res, 404, { error: `no claim ${claim}`, code: 'CLAIM_NOT_FOUND' });

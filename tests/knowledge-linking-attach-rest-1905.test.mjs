@@ -160,3 +160,13 @@ test('R7 OBSERVE mode, the shape prod runs (no SCRUM_AUTH): an attach on behalf 
     assert.deepEqual(by.rows.map((x) => x.by.value), [seatActor('ada')]);
   } finally { await o.stop(); }
 });
+
+test('R8 the claim may be given as the Reading page shows it, its bare id: the same link as its full address', T, async () => {
+  const c = await seedClaim();
+  const r = await call('POST', '/api/links/attach', { claim: c.assertion.split('/').pop(), card: 2, reason: 'from the reading page', by: 'ada' });
+  assert.equal(r.status, 201, r.text);
+  assert.equal(r.json.claim, c.assertion, 'the answer names the full address');
+  assert.equal(r.json.id, linkIri(spanKey(c.span, 'uuid-2')).split('/').pop());
+  const bad = await call('POST', '/api/links/attach', { claim: '../card/2', card: 2, reason: 'x', by: 'ada' });
+  assert.equal(bad.status, 404, `a value that is neither an id nor a claim address is no claim (${bad.text})`);
+});

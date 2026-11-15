@@ -18,7 +18,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { BOARD_TOOLS, toolsFor, makeExecutor } from '../core/board-tools.mjs';
 
-test('#1196B/#1383/#1470/#1558/#1574 the surface is seven reads plus the seat\'s OWN four writes (its declaration, its own memories, its verdict on a link), every tool named and described', () => {
+test('#1196B/#1383/#1470/#1558/#1574 the surface is seven reads plus the seat\'s OWN five writes (its declaration, its own memories, its verdict on a link, a claim it attaches to a card), every tool named and described', () => {
   const names = BOARD_TOOLS.map((t) => t.function.name).sort();
   // #1558 — graph_authority joins as a READ (the shared authority resolver), added on
   // purpose: this pinned list is how a new tool announces itself to review.
