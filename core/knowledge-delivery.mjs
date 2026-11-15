@@ -1,5 +1,7 @@
 import crypto from 'node:crypto';
 import { LOGBORN_TERMS as TM } from './graph-compiler.mjs';   // every term from the compiler's own table, never retyped (#1850)
+import { standingVerdicts } from './knowledge-linking.mjs';   // #1901 — a seat's standing verdict is #1852's rule, read once
+import { SEAT_NS } from './graph-auth.mjs';
 /**
  * #1852 (#1848 slice 3) — DELIVERY: the proposed links a seat is handed WITH a card, at the moment of work.
  *
@@ -20,7 +22,10 @@ export const QUOTE_MAX_CHARS = 300;
 export const DELIVERY_DEADLINE_MS = 1500;
 export const DELIVERY_MEANS = 'Claims from documents the room has read that a meaning search proposed as bearing on this card: MACHINE PROPOSALS, '
   + 'not endorsements, so read the quote before trusting the gist; a confirm means "this claim mattered to the work on this card", and a dismiss '
-  + 'hides it from you alone (a second seat\'s dismiss retires it for everyone); a claim keeps appearing on this card until you answer it.';
+  + 'hides it from you alone (a second seat\'s dismiss retires it for everyone); a claim keeps appearing on this card until you answer it. '
+  // #1901 — a small-model seat was shown another seat's confirm and posted "I accepted that claim". Said here AND per item.
+  + 'Status "confirmed" is ANOTHER seat\'s verdict unless `yours` is true: `confirmedBy` names the seat and `confirmedAt` when, and '
+  + '`whoConfirmed` says it in one sentence; never say you confirmed or accepted a claim whose `yours` is false.';
 
 const sha = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
 /** A passage is `<source>/block/<n>` (core/knowledge-extraction.mjs); the graph holds no other edge from a claim to its source. */
@@ -73,7 +78,7 @@ export const firstShowings = (set) => (set ?? []).filter((l) => !l.shown);
  * The block as the seat reads it. The gist sits beside the quote; the subject-verb-object triple is never rendered
  * (measured 2026-11-14: the triple loses the context the gist keeps). A page is not known from the graph, so none is given.
  */
-export function deliveryBlock({ items, shortId, sources = new Map(), recorded } = {}) {
+export function deliveryBlock({ items, shortId, sources = new Map(), recorded, reader = null } = {}) {
   if (!items || items.length === 0) return null;
   return {
     means: DELIVERY_MEANS,
@@ -81,7 +86,8 @@ export function deliveryBlock({ items, shortId, sources = new Map(), recorded } 
       const { quote, truncated } = quoteOf(l.span || l.gist);
       const src = sources.get(l.source) ?? {};
       return {
-        link: l.id, status: l.status, gist: l.gist || quote, quote, ...(truncated ? { quoteTruncated: true } : {}),
+        link: l.id, status: l.status, ...(l.status === 'confirmed' ? decider(l, reader) : {}),
+        gist: l.gist || quote, quote, ...(truncated ? { quoteTruncated: true } : {}),
         source: { title: src.title ?? null, url: src.url ?? null },
         score: Number.isFinite(l.score) ? l.score : null,
         answer: {
@@ -95,6 +101,27 @@ export function deliveryBlock({ items, shortId, sources = new Map(), recorded } 
   };
 }
 
+/** A seat's key from her actor IRI; an actor that is not a seat keeps its whole IRI, never cut to something that reads as a seat. */
+export const seatKeyOf = (actor) => (typeof actor === 'string' && actor.startsWith(SEAT_NS) ? actor.slice(SEAT_NS.length) : actor ?? null);
+/**
+ * #1901 — WHO confirmed a delivered claim, beside its status, in fields AND in one sentence. The sentence is for the reader that
+ * reads only the block: it names the deciding seat, and names the READER, saying whether the verdict is hers. Before this a
+ * confirmed item said `status: "confirmed"` and nothing else, and a seat shown another seat's confirm reported it as her own.
+ */
+function decider(l, reader) {
+  const by = l.confirmedBy ?? null; const at = l.confirmedAt ?? null; const n = l.confirmedByCount ?? 0; const yours = l.yours === true;
+  const me = seatKeyOf(reader);
+  let who;
+  if (by == null) who = 'No seat\'s confirm of this claim stands now (every seat that confirmed it has since dismissed it), so it is not your verdict.';
+  else if (yours) who = `You (${me}) confirmed this claim at ${at}: this verdict is yours.${n > 1 ? ` ${n - 1} other seat${n - 1 === 1 ? '\'s confirm stands' : 's\' confirms stand'} too.` : ''}`;
+  else {
+    const head = `${by} confirmed this claim at ${at}${n > 1 ? ` (${n} seats' confirms stand; ${by}'s is the latest)` : ''}.`;
+    who = me ? `${head} It is ${by}'s verdict, NOT yours: you (${me}) have given no verdict on this claim.`
+      : `${head} It is ${by}'s verdict: this read carried no seat credential, so it is not a verdict of yours.`;
+  }
+  return { confirmedBy: by, confirmedAt: at, confirmedByCount: n, yours, whoConfirmed: who };
+}
+
 /** The ONE node a (seat, link) showing lives at: a second showing names the same node, and the compiler's freshness guard refuses it. */
 export const showIri = (link, actor) => `${link}/shown/${sha(actor)}`;
 
@@ -105,31 +132,43 @@ export function showIntention({ links, card, how, actor, at = new Date().toISOSt
 
 /**
  * The delivery read for one card: ONE query that starts from the card, so a card with no links costs one indexed miss.
- * With a seat it also says which links that seat has been shown, and every verdict she gave on them.
+ * It carries every seat's verdicts on each link (#1901: who confirmed it, and the reader's own verdict among them), and with a
+ * seat, which links that seat has been shown. One row per decision; a link nobody decided gives one row.
  */
 export function deliveryQuery({ card, actor = null } = {}) {
-  return `SELECT ?l ?st ?sc ?span ?gist ?pass ?sh ?md ?mv ?mat WHERE { ?l <${TM.bearsOnCard}> <${card}> ; a <${TM.BearsOn}> ; <${TM.status}> ?st ; <${TM.fromAssertion}> ?a `
+  return `SELECT ?l ?st ?sc ?span ?gist ?pass ?sh ?d ?dby ?dv ?dat WHERE { ?l <${TM.bearsOnCard}> <${card}> ; a <${TM.BearsOn}> ; <${TM.status}> ?st ; <${TM.fromAssertion}> ?a `
     + `FILTER(?st != "dismissed") OPTIONAL { ?l <${TM.score}> ?sc } OPTIONAL { ?a <${TM.anchorText}> ?span } OPTIONAL { ?a <${TM.gist}> ?gist } `
-    + `OPTIONAL { ?a <${TM.expressedIn}> ?pass } ${actor ? `OPTIONAL { ?sh a <${TM.LinkShowing}> ; <${TM.ofLink}> ?l ; <${TM.shownTo}> <${actor}> } `
-    + `OPTIONAL { ?md a <${TM.LinkDecision}> ; <${TM.ofLink}> ?l ; <${TM.decidedBy}> <${actor}> ; <${TM.linkVerdict}> ?mv ; <${TM.dateCreated}> ?mat } ` : ''}}`;
+    + `OPTIONAL { ?a <${TM.expressedIn}> ?pass } ${actor ? `OPTIONAL { ?sh a <${TM.LinkShowing}> ; <${TM.ofLink}> ?l ; <${TM.shownTo}> <${actor}> } ` : ''}`
+    + `OPTIONAL { ?d a <${TM.LinkDecision}> ; <${TM.ofLink}> ?l ; <${TM.decidedBy}> ?dby ; <${TM.linkVerdict}> ?dv ; <${TM.dateCreated}> ?dat } }`;
 }
-/** The delivery query's bindings as the links selectDeliveries reads, one per link. `mine` is the seat's own standing verdict. */
-export function linksOfDeliveryRows(rows) {
+/**
+ * The delivery query's bindings as the links selectDeliveries reads, one per link. From each seat's STANDING verdict (her latest
+ * decision, #1852's rule): `mine`, the reader's own; and, #1901, who confirmed the link. `confirmedBy` is the reader herself when
+ * her confirm stands (so it never disagrees with `yours`), otherwise the seat whose standing confirm is the most recent;
+ * `confirmedByCount` counts SEATS whose confirm stands. A confirm later replaced by that seat's dismiss is no one's confirm.
+ */
+export function linksOfDeliveryRows(rows, { actor = null } = {}) {
   const byId = new Map();
   for (const r of rows ?? []) {
     const iri = r.l.value;
     if (!byId.has(iri)) {
       const sc = r.sc ? Number(r.sc.value) : null;
       byId.set(iri, { iri, id: iri.split('/').pop(), status: r.st.value, score: Number.isFinite(sc) ? sc : null,
-        span: r.span?.value ?? null, gist: r.gist?.value ?? null, source: sourceOfPassage(r.pass?.value), shown: !!r.sh, mine: null, mineAt: null });
+        span: r.span?.value ?? null, gist: r.gist?.value ?? null, source: sourceOfPassage(r.pass?.value), shown: false, decisions: new Map() });
     }
-    // a seat that decided a link more than once gives one row per verdict: the latest is the one that stands
     const l = byId.get(iri);
-    if (r.md && (l.mineAt === null || r.mat.value > l.mineAt.at || (r.mat.value === l.mineAt.at && r.md.value > l.mineAt.d))) {
-      l.mine = r.mv.value; l.mineAt = { at: r.mat.value, d: r.md.value };
-    }
+    if (r.sh) l.shown = true;
+    if (r.d) l.decisions.set(r.d.value, { decision: r.d.value, by: r.dby.value, verdict: r.dv.value, at: r.dat.value });
   }
-  return [...byId.values()].map(({ mineAt, ...l }) => l);
+  return [...byId.values()].map(({ decisions, ...l }) => {
+    const standing = standingVerdicts([...decisions.values()]);
+    const confirms = [...standing.values()].filter((d) => d.verdict === 'confirmed')
+      .sort((a, b) => (a.at > b.at ? -1 : a.at < b.at ? 1 : a.decision > b.decision ? -1 : 1));
+    const own = actor ? standing.get(actor) ?? null : null;
+    const named = own?.verdict === 'confirmed' ? own : confirms[0] ?? null;
+    return { ...l, mine: own?.verdict ?? null, confirmedBy: named ? seatKeyOf(named.by) : null, confirmedAt: named?.at ?? null,
+      confirmedByCount: confirms.length, yours: own?.verdict === 'confirmed' };
+  });
 }
 const IRI_SAFE = /^[^\s<>"{}|\\^`]+$/;
 /** The title and address of the delivered items' sources: a second read, made only when something is delivered. */

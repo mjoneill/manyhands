@@ -7472,11 +7472,11 @@ async function readDelivery(card, actor, how) {
   const cardIri = `https://scrumboard.local/entity/${card.id}`;
   // a claim shows the card's set every time; a read shows what this seat has not ANSWERED, so an unanswered claim is still
   // there when she reopens the card. Only a first showing is recorded (below); a repeat says shownBefore.
-  const items = selectDeliveries(linksOfDeliveryRows(await LOGBORN.query(deliveryQuery({ card: cardIri, actor }))), { unanswered: how === 'get' });
+  const items = selectDeliveries(linksOfDeliveryRows(await LOGBORN.query(deliveryQuery({ card: cardIri, actor })), { actor }), { unanswered: how === 'get' });
   if (items.length === 0) return {};
   const sq = deliverySourcesQuery([...new Set(items.map((l) => l.source).filter(Boolean))]);
   const sources = sq ? sourcesOfRows(await LOGBORN.query(sq)) : new Map();
-  return { block: deliveryBlock({ items, shortId: card.shortId, sources, recorded: actor ? undefined : false }),
+  return { block: deliveryBlock({ items, shortId: card.shortId, sources, recorded: actor ? undefined : false, reader: actor }),   // #1901 — the reader is named beside a confirm
     show: actor ? { links: firstShowings(items).map((l) => l.iri), card: cardIri, how, actor } : null };
 }
 /** `{ block?, show? }` for one answer. Never throws and never waits past the deadline. */

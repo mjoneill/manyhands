@@ -6,7 +6,8 @@
  *
  * INTERFACE PINNED HERE:
  *   POST /api/cards/:id/claim (200 only) and GET /api/cards/:id[?outline=1] (a seat only) may carry
- *     roomHasRead: { means, items: [{ link, status, gist, quote, quoteTruncated?, source: { title, url }, score,
+ *     roomHasRead: { means, items: [{ link, status, [confirmedBy, confirmedAt, confirmedByCount, yours, whoConfirmed: when
+ *                    status is confirmed (#1901)], gist, quote, quoteTruncated?, source: { title, url }, score,
  *                    answer: { confirm, dismiss }, shownBefore?: true }], recorded?: false }
  *                | { unavailable: <reason> }
  *   absent when there is nothing to deliver. A seat is the request's own credential (LOGBORN.actorFor), never the body's `by`.
@@ -19,6 +20,8 @@
  *   C5  a second claim delivers the same set again (now flagged shownBefore), and the graph still holds ONE showing per link
  *   C6  a claim with no bearer: the block arrives with recorded:false, and nothing is written
  *   C7  the bearer is another seat's than the body's `by`: the showing is the bearer's
+ *   C8  #1901 a confirmed item names the seat that confirmed it and when, read from the graph: to another seat it is not
+ *       hers (on her claim and on her read), to the confirming seat it is
  *   G1  a read with no bearer carries no field, byte for byte what a card with no links answers, and records nothing
  *   G2  a seat's first read carries the block (full and outline) and is recorded via "get"; while she has not answered, the
  *       next read carries the same link with shownBefore:true, and no second showing is recorded
@@ -259,6 +262,35 @@ test('C7 the bearer is another seat\'s than the body\'s `by`: the showing is the
   assert.equal(r.status, 200, r.text);
   assert.equal('recorded' in r.json.roomHasRead, false);
   assert.deepEqual((await untilShown(s.link)).map((x) => x.to.value), [seatActor('seat-b')]);
+});
+
+test('C8 #1901 a confirmed item names who confirmed it and when, and says whether it was this seat', T, async () => {
+  const card = await newCard(); const src = await seedSource();
+  const s = await seedLink(card, { source: src, score: 0.64 });
+  assert.equal((await decide('seat-b', s, 'confirmed', card)).status, 200, 'PRECONDITION: seat-b confirmed it');
+  const [dec] = await q(`SELECT ?at WHERE { ?d <${RDF}type> <${RS}LinkDecision> ; <${RS}ofLink> <${s.link}> ; <${RS}decidedBy> <${seatActor('seat-b')}> ; <${SC}dateCreated> ?at }`);
+  const at = dec.at.value;
+  const r = await claim('seat-a', card);
+  assert.equal(r.status, 200, r.text);
+  assert.equal((await release('seat-a', card)).status, 200);
+  assert.deepEqual(r.json.roomHasRead.items, [{
+    link: s.id, status: 'confirmed', confirmedBy: 'seat-b', confirmedAt: at, confirmedByCount: 1, yours: false,
+    whoConfirmed: `seat-b confirmed this claim at ${at}. It is seat-b's verdict, NOT yours: you (seat-a) have given no verdict on this claim.`,
+    gist: 'the gist', quote: s.span, source: { title: src.title, url: src.url }, score: 0.64,
+    answer: {
+      confirm: { tool: 'link_decide', args: { link: s.id, verdict: 'confirmed', workingOn: card.shortId } },
+      dismiss: { tool: 'link_decide', args: { link: s.id, verdict: 'dismissed' } },
+    },
+  }]);
+  console.log(`# C8 roomHasRead to seat-a: ${JSON.stringify(r.json.roomHasRead.items[0])}`);
+  const read = await call('seat-a', 'GET', `/api/cards/${card.shortId}`);
+  assert.deepEqual(read.json.roomHasRead.items.map((i) => [i.confirmedBy, i.yours]), [['seat-b', false]], 'her read, too: another seat\'s confirm is not her answer');
+  const own = await claim('seat-b', card);
+  assert.equal(own.status, 200, own.text);
+  const [mine] = own.json.roomHasRead.items;
+  assert.deepEqual({ by: mine.confirmedBy, at: mine.confirmedAt, n: mine.confirmedByCount, yours: mine.yours, who: mine.whoConfirmed },
+    { by: 'seat-b', at, n: 1, yours: true, who: `You (seat-b) confirmed this claim at ${at}: this verdict is yours.` });
+  assert.equal((await release('seat-b', card)).status, 200);
 });
 
 test('G1 a read with no bearer carries no field, byte for byte, and records nothing', T, async () => {
