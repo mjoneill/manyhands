@@ -310,7 +310,7 @@ export async function startRestServer({ board, boardFile: sharedBoardFile, stati
     try { fs.rmSync(attachmentsDir, { recursive: true, force: true }); } catch { /* already gone */ }
     if (ownConfigFile) { try { fs.unlinkSync(configFile); } catch { /* never written */ } }
   };
-  const { proc, stderr, baseUrl } = await startOnPort({
+  const { proc, stderr, stdout, baseUrl } = await startOnPort({
     port: explicitPort,
     allocatePort,
     readyPath: '/api/board',
@@ -323,7 +323,10 @@ export async function startRestServer({ board, boardFile: sharedBoardFile, stati
       });
       const err = [];
       child.stderr.on('data', (d) => err.push(d.toString()));
-      return { proc: child, stderr: err };
+      // #1906 — stdout kept too (it was piped and never read): a row that says "no secret in a log line" must read both.
+      const out = [];
+      child.stdout.on('data', (d) => out.push(d.toString()));
+      return { proc: child, stderr: err, stdout: out };
     },
   }).catch((e) => { cleanupOnRefusal(); throw e; });
   void port;
@@ -342,6 +345,8 @@ export async function startRestServer({ board, boardFile: sharedBoardFile, stati
     /** #657 — the card-query miss log is part of the wire contract; tests
      * assert on it here rather than parsing raw process pipes themselves. */
     stderr: () => stderr.join(''),
+    /** #1906 — the server's stdout, as stderr() above. */
+    stdout: () => (stdout || []).join(''),
     async waitForStderr(re, timeoutMs = 3000) {
       const t0 = Date.now();
       while (!re.test(stderr.join(''))) {
