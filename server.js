@@ -7229,17 +7229,17 @@ function recallUnit() {
 /**
  * A redaction (post.redact, #1574 R4a) deletes the post's recall RECORDS in the graph, in its own update; the two files are
  * projections and must not keep the post's id either. The redaction is the executor's, with no route here to hook, so the
- * files are RECONCILED: one query asks which of the posts they hold are now tombstones, and those ids are dropped from both
+ * files are RECONCILED: one query reads the tombstones themselves (REDACTED_IDS_QUERY, the change feed's own, so its size
+ * tracks the number of redactions, never the number of posts), and the ids the files hold among them are dropped from both
  * (a rebuilt cache agrees, since the graph holds no offer for them). Run before the hook decides a post, before an opening
  * and before the counts; a read of a tombstone drops its id with no query. A failed query leaves the files as they were
  * (logged): the graph is the record, and the next reconcile catches up.
  */
 async function recallReconcile(queue, projection) {
-  const ids = [...new Set([...queue.ids(), ...projection.ids()])].filter((id) => RECALL_POST_ID_RE.test(id));
-  if (!ids.length) return;
+  if (!queue.ids().length && !projection.ids().length) return;   // nothing held, nothing to ask
   try {
-    const rows = await LOGBORN.query(`SELECT ?p WHERE { VALUES ?p { ${ids.map((id) => `<${RECALL_POST_IRI(id)}>`).join(' ')} } ?p a <https://scrumboard.local/ns#RedactedPost> }`);
-    const gone = rows.map((r) => String(r.p.value).slice(RECALL_POST_IRI('').length)).filter((id) => ids.includes(id));
+    const redacted = redactedIdsFrom(await LOGBORN.query(REDACTED_IDS_QUERY));
+    const gone = [...new Set([...queue.ids(), ...projection.ids()])].filter((id) => redacted.has(id));
     if (gone.length) recallForget(gone, queue, projection);
   } catch (e) { console.error(`[#1689] redacted posts not yet dropped from the recall files: ${e?.message ?? e}`); }
 }
