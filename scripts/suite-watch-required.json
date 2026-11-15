@@ -106,6 +106,8 @@
   "tests/knowledge-extraction-1810.test.mjs",
   "tests/knowledge-linking-write-1851.test.mjs",
   "tests/knowledge-linking-run-1851.test.mjs",
+  "tests/knowledge-linking-attach-1905.test.mjs",
+  "tests/knowledge-linking-attach-rest-1905.test.mjs",
   "tests/knowledge-linking-decide-1851.test.mjs",
   "tests/knowledge-linking-rest-1851.test.mjs",
   "tests/knowledge-linking-supply-1852.test.mjs",

@@ -2773,6 +2773,8 @@ export const EXECUTOR_ONLY_VOCABULARY = new Set([
   'scrum:proposedPredicate', 'scrum:gist', 'scrum:proposals', 'scrum:spanInventions', 'scrum:providerFailures', 'scrum:publishedCount',
   // #1851 — a machine-proposed link from an extracted claim to a card it bears on (core/knowledge-linking.mjs, kind link.propose)
   'scrum:BearsOn', 'scrum:fromAssertion', 'scrum:bearsOnCard', 'scrum:score', 'scrum:minScore', 'scrum:searchQuery', 'scrum:spanKey',
+  // #1905 — a link attached by hand: who attached it and the one line why (kind link.attach); a machine link has neither
+  'scrum:attachedBy', 'scrum:attachReason',
   'scrum:LinkDecision', 'scrum:ofLink', 'scrum:linkVerdict', 'scrum:workingOn',
   // #1852 — the first time a link was delivered to a seat (core/knowledge-delivery.mjs, kind link.show)
   'scrum:LinkShowing', 'scrum:shownTo', 'scrum:shownOn', 'scrum:shownVia',

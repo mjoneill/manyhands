@@ -35,6 +35,7 @@ const ARGS = {
   seat_clear: {},
   // #1895 — a well-formed link id no board holds: with no graph unit the route answers 503 (it EXISTS), which is all this test asks
   link_decide: { link: 'b'.repeat(64), verdict: 'dismissed' },
+  link_attach: { claim: '0b6f6f4e-6a43-4d1e-9a51-2c1f0e1d2a3b', card: 1, reason: 'the seam row' },   // #1905
 };
 
 test('#1196B SEAM: every declared tool reaches a real route — no tool 404s', async () => {
