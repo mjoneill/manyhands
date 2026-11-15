@@ -108,6 +108,9 @@ const NOT_HISTORY = ['person.import', 'post.import', 'delivery.import', 'origin.
   // #1902: delivery.retrieved is a mark ON a delivery row (what the seat's own credential retrieved), beside its steps; seat.latestFetched
   // is one small per-seat value replaced upward. Neither changes a card, column or collection, so there is no ChangeActivity to describe
   'delivery.retrieved', 'seat.latestFetched',
+  // #1902: delivery.received is a receipt ON a delivery row (its own seat's side holds the post), beside its steps; it changes no card,
+  // column or collection, so there is no ChangeActivity to describe
+  'delivery.received',
   'extraction.publish', 'link.propose', 'link.attach', 'link.decide'];   // #1905: link.attach is a HAND link carrying its own provenance (attachedBy, attachReason, dateCreated, op) on the BearsOn node, as link.propose carries its own; #1851: link.propose is a MACHINE proposal carrying its own provenance (actor, op, model, query) like extraction.publish; link.decide appends its own scrum:LinkDecision node (seat, verdict, workingOn, time), which IS that link's history, so no ChangeActivity duplicates it. Then: migrations (the projected past), the two-phase prepare (the origin COMMIT's activity is its card.write's), and a refusal's audit record (S2: content-free, never a ChangeActivity; its rows are in refusal-record-s2-1762)
 
 const UNITS = { SCRUM_GRAPH_UNIT_CARDS: '1', SCRUM_GRAPH_UNIT_COLUMNS: '1', SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_GRAPH_UNIT_LOGBORN: '1', SCRUM_GRAPH_UNIT_SMALLKINDS: '1', SCRUM_GRAPH_UNIT_DELIVERIES: '1' };
