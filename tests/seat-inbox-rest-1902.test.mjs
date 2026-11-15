@@ -97,6 +97,9 @@ const ENV = (extra = {}) => ({
   SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_GRAPH_UNIT_DELIVERIES: '1', SCRUM_GRAPH_UNIT_LOGBORN: '1',
   SCRUM_SEAT_INBOX_TICK_MS: '300', SCRUM_LATEST_FETCHED_MIN_MS: String(MIN_MS), SCRUM_ATTENTION_MIN_MS: '0', ...extra,
 });
+// A crash-and-restart keeps the board file (rest.stop() would delete it), so the kill is ours; the server's own
+// attachments folder is not reused by the next boot, so remove it here or every restart leaks one (#1672 tmp ratchet).
+function down() { rest.kill(); try { fs.rmSync(rest.attachmentsDir, { recursive: true, force: true }); } catch { /* already gone */ } }
 async function boot(extra) {
   rest = await startRestServer({ ...(boardFile ? { boardFile } : { board: makeBoardFixture() }), env: ENV(extra) });
   boardFile = rest.boardFile;
@@ -150,11 +153,11 @@ test('I1 a mention by key, by display name or by alias yields exactly one row fo
 });
 
 test('I2 a post committed while the reconciler was stopped gets its row after it restarts, once', T, async () => {
-  rest.kill(); await boot({ SCRUM_SEAT_INBOX: '0' });
+  down(); await boot({ SCRUM_SEAT_INBOX: '0' });
   const missed = await say('ada', '@gizmo this one lands while the reconciler is off');
   await sleep(1500);
   assert.deepEqual(await rowsFor(missed.id), [], 'PRECONDITION: no row while it is off');
-  rest.kill(); await boot();
+  down(); await boot();
   const rows = await until(async () => { const r = await rowsFor(missed.id); return r.length ? r : null; }, 20000, 'the missed post\'s row');
   assert.deepEqual(rows.map((d) => d.to), ['gizmo']);
   await barrier(); await barrier();
@@ -312,7 +315,7 @@ test('I9 PO rule: a bare name makes a row; ashtray is not ash; two seats one eac
 test('I10 an epoch change: the report shows the resync, a new observingSince, and says the gap got no rows', T, async () => {
   const before = (await call('GET', '/api/seats/attention')).json;
   assert.ok(before.observingSince, 'PRECONDITION: observing');
-  rest.kill();
+  down();
   const file = path.join(DATA, 'seat-inbox-cursor.json');
   const st = JSON.parse(fs.readFileSync(file, 'utf8'));
   assert.match(st.cursor, /^gc1\./, 'PRECONDITION: a live cursor');
