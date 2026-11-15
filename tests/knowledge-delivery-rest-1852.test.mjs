@@ -360,6 +360,36 @@ test('C11 #1905 a claim attached by hand is delivered with who attached it and w
   assert.equal('attachedBy' in items[0], false, 'the machine item carries no attacher');
 });
 
+// #1905 decision ee188cd5 — claims from ONE source, attached by hand: the seat's read shows every one, beside the machine lane
+async function attachFromSource(card, source, n, by = 'seat-b') {
+  const assertion = `https://scrumboard.local/assertion/${crypto.randomUUID()}`;
+  await raw(w.exec.baseUrl, `INSERT DATA { <${assertion}> <${RDF}type> <${RS}Assertion> ; <${RS}anchorText> ${JSON.stringify(`a span ${assertion}`)} ; <${RS}gist> "a gist" ; <${RS}expressedIn> <${source.iri}/block/${n}> . }`);
+  const a = await call(by, 'POST', '/api/links/attach', { claim: assertion, card: card.shortId, reason: `reason ${n}`, by });
+  assert.equal(a.status, 201, `PRECONDITION: ${by} attached claim ${n} (${a.text})`);
+  return a.json.id;
+}
+
+test('C12 #1905 three hand links from one source are all on a seat\'s read, beside the machine link from that same source', T, async () => {
+  const card = await newCard(); const source = await seedSource();
+  const machine = await seedLink(card, { source, score: 0.9 });
+  const hand = [];
+  for (const n of [1, 2, 3]) hand.push(await attachFromSource(card, source, n));
+  const r = await call('seat-a', 'GET', `/api/cards/${card.shortId}`);
+  assert.equal(r.status, 200, r.text);
+  assert.deepEqual(r.json.roomHasRead.items.map((i) => i.link), [machine.id, ...hand], 'the machine link, then all three hand links, oldest attach first');
+  assert.equal('moreAttached' in r.json.roomHasRead, false, 'none past the bound');
+});
+
+test('C13 #1905 nine hand links: a read shows eight, oldest first, and says one more, naming link_list', T, async () => {
+  const card = await newCard(); const source = await seedSource();
+  const hand = [];
+  for (let n = 1; n <= 9; n++) hand.push(await attachFromSource(card, source, n));
+  const r = await call('seat-a', 'GET', `/api/cards/${card.shortId}`);
+  assert.equal(r.status, 200, r.text);
+  assert.deepEqual(r.json.roomHasRead.items.map((i) => i.link), hand.slice(0, 8));
+  assert.deepEqual({ count: r.json.roomHasRead.moreAttached.count, read: r.json.roomHasRead.moreAttached.read }, { count: 1, read: { tool: 'link_list', args: { card: card.shortId } } });
+});
+
 test('G1 a read with no bearer carries no field, byte for byte, and records nothing', T, async () => {
   const card = await newCard(); const bare = await newCard();
   const s = await seedLink(card, { source: await seedSource() });

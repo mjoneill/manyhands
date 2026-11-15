@@ -12,12 +12,20 @@ import { SEAT_NS } from './graph-auth.mjs';
  * A delivery is small on purpose: it rides on card_get, the most-called read on the board, and a seat that is shown ten
  * machine proposals reads none of them. So a card has at most DELIVERY_MAX, never two from one source, never a link the
  * room retired (status dismissed) and never one this seat dismissed herself: a dismiss is one seat's, and hides it from her.
+ * Those two caps are for MACHINE proposals. A link a seat attached by hand (#1905) has its own lane, bounded by HAND_MAX.
  *
  * Each first showing is recorded as its own node (kind `link.show`), one per seat and link, so #1850 can count what a seat
  * was SHOWN beside what she USED. A repeat is shown again but never recorded again, and says `shownBefore`.
  */
 export const DELIVERY_MAX = 2;
 export const QUOTE_MAX_CHARS = 300;
+/**
+ * #1905 decision ee188cd5 — a link attached BY HAND is a person saying "read this, and here's why". The two caps above exist to
+ * protect a reader from machine proposals she never asked for, so a hand link spends neither: it has its own lane, bounded
+ * only so attaching cannot flood a reader. 8 is the PO's guess, not a measurement. reopensIf: a real card collects more than
+ * 8 deliberate hand links, and a reader is shown "N more" where she needed them.
+ */
+export const HAND_MAX = 8;
 /** The longest a delivery read may hold a claim or a card read: past it the answer goes out saying UNAVAILABLE. */
 export const DELIVERY_DEADLINE_MS = 1500;
 export const DELIVERY_MEANS = 'Claims from documents the room has read that a meaning search proposed as bearing on this card: MACHINE PROPOSALS, '
@@ -56,7 +64,16 @@ export function quoteOf(span) {
  * first block), or the claim is counted as shown and can never be used. The filter comes BEFORE the cap, so answering one
  * claim lets the next one surface. A claim keeps the plain rule: it shows the card's two, one she confirmed among them.
  */
-export function selectDeliveries(links, { max = DELIVERY_MAX, unanswered = false } = {}) {
+export function selectDeliveries(links, opts = {}) {
+  return selectDeliverySet(links, opts).items;
+}
+/**
+ * The card's delivery set AND how many hand links did not fit (`moreAttached`). Two lanes: the MACHINE lane (every link with no
+ * `attachedBy`) under the rules above, then the HAND lane: every deliverable hand link, oldest attach first, at most HAND_MAX.
+ * The same filters (dismissed, dismissed by her, answered on a read) come BEFORE either bound, so an answered link frees a place.
+ * The machine lane comes first: an attached link does not outrank machine links (#1905 design 7).
+ */
+export function selectDeliverySet(links, { max = DELIVERY_MAX, unanswered = false, handMax = HAND_MAX } = {}) {
   // #1901 — a confirm leads ONLY when it is delivery-born (linksOfDeliveryRows): a seat whose confirm stands had been SHOWN the
   // link before she gave it. The nine triage confirms of 11-13 (#1850/#1851: seats confirming from link_list, ruled not real
   // uses) predate every showing, so they fall back to score order with the proposed links; no history is rewritten.
@@ -65,8 +82,11 @@ export function selectDeliveries(links, { max = DELIVERY_MAX, unanswered = false
   // showing is the wrong witness: record the surface a confirm came from on the decision, and rank by that instead.
   const rank = (l) => (l.status === 'confirmed' && l.deliveryBorn === true ? 0 : 1);
   const score = (l) => (Number.isFinite(l.score) ? l.score : -Infinity);
-  const ordered = (links ?? [])
-    .filter((l) => l && l.status !== 'dismissed' && l.mine !== 'dismissed' && (l.span || l.gist) && !(unanswered && l.mine != null))
+  const deliverable = (links ?? [])
+    .filter((l) => l && l.status !== 'dismissed' && l.mine !== 'dismissed' && (l.span || l.gist) && !(unanswered && l.mine != null));
+  const handLane = deliverable.filter((l) => l.attachedBy != null)
+    .sort((a, b) => String(a.attachedAt ?? '').localeCompare(String(b.attachedAt ?? '')) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const ordered = deliverable.filter((l) => l.attachedBy == null)
     .sort((a, b) => rank(a) - rank(b) || score(b) - score(a) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const taken = new Set();
   const out = [];
@@ -77,7 +97,7 @@ export function selectDeliveries(links, { max = DELIVERY_MAX, unanswered = false
     taken.add(source);
     out.push(l);
   }
-  return out;
+  return { items: [...out, ...handLane.slice(0, handMax)], moreAttached: Math.max(0, handLane.length - handMax) };
 }
 
 /** The part of a set this seat has not been shown: what a showing is RECORDED for. A repeat is delivered, never recorded twice. */
@@ -87,7 +107,7 @@ export const firstShowings = (set) => (set ?? []).filter((l) => !l.shown);
  * The block as the seat reads it. The gist sits beside the quote; the subject-verb-object triple is never rendered
  * (measured 2026-11-14: the triple loses the context the gist keeps). A page is not known from the graph, so none is given.
  */
-export function deliveryBlock({ items, shortId, sources = new Map(), recorded, reader = null } = {}) {
+export function deliveryBlock({ items, shortId, sources = new Map(), recorded, reader = null, moreAttached = 0 } = {}) {
   if (!items || items.length === 0) return null;
   return {
     means: DELIVERY_MEANS,
@@ -107,6 +127,10 @@ export function deliveryBlock({ items, shortId, sources = new Map(), recorded, r
       };
     }),
     ...(recorded === false ? { recorded: false } : {}),
+    // #1905 decision ee188cd5 — hand links past HAND_MAX are counted, never silently dropped; the read that lists them all
+    ...(moreAttached > 0 ? { moreAttached: { count: moreAttached,
+      says: `${moreAttached} more claim${moreAttached === 1 ? ' was' : 's were'} attached to this card by hand than one read shows; list them all with link_list.`,
+      read: { tool: 'link_list', args: { card: shortId } } } } : {}),
   };
 }
 
