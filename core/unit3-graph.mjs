@@ -52,6 +52,18 @@ const DELIVERY_IRI_RE = /^https:\/\/scrumboard\.local\/delivery\/[A-Za-z0-9-]{1,
 export const deliverySuffix = (iri) => (typeof iri === 'string' && DELIVERY_IRI_RE.test(iri) ? iri.slice(DELIVERY_PREFIX.length) : null);
 export const deliveryCreateOp = (iri) => `urn:ex:op/delivery/${deliverySuffix(iri)}/create`;
 export const deliveryStepOp = (iri, requestId) => `urn:ex:op/delivery/${deliverySuffix(iri)}/req/${requestId}`;
+
+// ── #1902 — what a seat's own credential retrieved ─────────────────────────────────────────────────────────────────────
+/** The opId of a row's read mark: derived from the row alone, so a second mark is the same intention (once per row). */
+export const deliveryRetrievedOp = (iri) => `urn:ex:op/delivery/${deliverySuffix(iri)}/retrieved`;
+/** `delivery.retrieved`: the seat whose row it is, as its credential's actor, retrieved the row's post at `at`. */
+export const retrievedIntention = ({ delivery, seat, actor, at }) => ({ kind: 'delivery.retrieved', opId: deliveryRetrievedOp(delivery), actor, target: delivery, seat, at });
+export const LATEST_FETCHED_PREFIX = 'https://scrumboard.local/latest-fetched/';
+export const latestFetchedIri = (seat) => `${LATEST_FETCHED_PREFIX}${seat}`;
+/** `seat.latestFetched`: one write per move. The opId names the seat and the sequence, so a retry of the same move is one op. */
+export const latestFetchedIntention = ({ seat, actor, post, seq, postAt = null, at }) => ({
+  kind: 'seat.latestFetched', opId: `urn:ex:op/latest-fetched/${seat}/${seq}`, actor, node: latestFetchedIri(seat), seat, post, seq, postAt, at,
+});
 export const stepIri = (iri, index) => `${iri}/step/${index}`;
 
 export const modelCallIdOf = (agent, requestId) => uuidV5(MODEL_CALL_NAMESPACE, `${agent}\u0000${requestId}`);
@@ -156,6 +168,8 @@ export function deliveryFromRows(iri, nodeRows, stepRows) {
     else if (p === TM.ofConversation) e['scrum:ofConversation'] = o.startsWith(ENTITY_PREFIX) ? o.slice(ENTITY_PREFIX.length) : o;
     else if (p === TM.offeredAt) e['scrum:offeredAt'] = o;
     else if (p === TM.source) e['scrum:source'] = o;
+    else if (p === TM.retrievedAt) e['scrum:retrievedAt'] = o;   // #1902 — a mark beside the steps, never one of them
+    else if (p === TM.retrievedBy) e['scrum:retrievedBy'] = o;
   }
   if (ver == null || !e['scrum:deliveredTo']) return null;   // not a delivery node
   const steps = new Map();
