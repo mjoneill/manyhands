@@ -235,8 +235,14 @@ const G11_CASES = [
     { what: 'a typed offer at an IRI that is not the derivation', node: () => `https://scrumboard.local/recall/${crypto.randomBytes(32).toString('hex')}`,
       stray: (w, n) => `<${n}> <${RDF}type> <${RS}RecallOffer> ; <${RS}offerOn> <${w.post}> ; <${RS}offeredSource> <${w.src}x> ; ${NAME} .`,
       edge: (w, n) => `<${n}> <${RS}offerOn> <${w.post}>`, also: () => [] },
+    // (v) (iv)'s twin for reads: typed a RecallRead, readOf the post AND readBy a seat, under recall/read/ — but NOT at
+    // readIri(post, that seat). (ii)'s stray has no readBy, so it fails the proof with or without the hash; this one fails it
+    // ONLY on the hash, so a proof reduced to "readOf P ; readBy ?a" deletes it whole (the reviewer's surviving mutant).
+    { what: 'a typed read with readBy at an IRI that is not the derivation', node: () => `https://scrumboard.local/recall/read/${crypto.randomBytes(32).toString('hex')}`,
+      stray: (w, n) => `<${n}> <${RDF}type> <${RS}RecallRead> ; <${RS}readOf> <${w.post}> ; <${RS}readBy> <${SEAT}> ; ${NAME} .`,
+      edge: (w, n) => `<${n}> <${RS}readOf> <${w.post}>`, also: () => [] },
 ];
-for (const [c, tag] of G11_CASES.map((c, k) => [c, ['i', 'ii', 'iii', 'iv'][k]])) test(`G11(${tag}) ${c.what}: cut loose (only its naming edge goes), never deleted whole, never a refusal`, { skip: SKIP }, async () => {
+for (const [c, tag] of G11_CASES.map((c, k) => [c, ['i', 'ii', 'iii', 'iv', 'v'][k]])) test(`G11(${tag}) ${c.what}: cut loose (only its naming edge goes), never deleted whole, never a refusal`, { skip: SKIP }, async () => {
   {
     const w = await world();
     assert.equal((await client.update(offerIntention({ post: w.post, offers: [item(w)], actor: BOARD, at: at() }))).outcome, 'APPLIED');
