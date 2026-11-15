@@ -52,6 +52,12 @@ async function clickChip(page, name) {
   await page.evaluate((n) => [...document.querySelectorAll('.constellation .mind')].find((m) => m.title === n).click(), name);
 }
 const feedText = (page) => page.$eval('.cv-feed', (e) => e.textContent);
+/** the solo's answer has landed: the count line exists and has left its pending text ("Looking for …"). Reading it sooner reads the pending
+ *  line (C2, review 53954). */
+const soloSettled = (page, ms = 5000) => page.waitForFunction(() => { const l = document.querySelector('.cv-solo-count'); return l && !/^Looking for /.test(l.textContent); }, { timeout: ms });
+/** clear the solo in ONE page-side step. The feed re-renders when the answer lands and on a live poll while soloed, which replaces the banner, so
+ *  a handle taken by a separate query can be detached by the time it is clicked (#1726's check-then-click; C5, review 53954). */
+const clearSolo = (page) => page.evaluate(() => { const b = document.querySelector('.cv-solo-clear'); if (!b) throw new Error('no clear control'); b.click(); });
 const shownIds = (page) => page.$$eval('.cv-feed .cv-msg', (els) => els.map((e) => e.dataset.id));
 
 test('C1 a quiet seat whose only post is 55 back: its chip shows that post and counts its posts on the board', async () => {
@@ -71,8 +77,7 @@ test('C2 a seat that never posted: the empty state is the board\'s zero, never "
   await withBrowserServer(async ({ server, browser }) => {
     const page = await openCommons(server, browser);
     await clickChip(page, 'Quill');
-    await page.waitForFunction(() => document.querySelector('.cv-solo-count'), { timeout: 5000 })
-      .catch(async () => assert.fail(`no board-wide count was shown; the feed says: ${await feedText(page)}`));
+    await soloSettled(page).catch(async () => assert.fail(`no board-wide count was shown; the feed says: ${await feedText(page)}`));
     const head = await page.$eval('.cv-solo-count', (e) => e.textContent);
     assert.match(head, /no posts/i, head);
     assert.doesNotMatch(await feedText(page), /Nothing from them yet/);
@@ -118,8 +123,8 @@ test('C5 clearing the solo returns the whole room', async () => {
     const page = await openCommons(server, browser);
     const before = await shownIds(page);
     await clickChip(page, 'Marmalade');
-    await page.waitForSelector('.cv-solo-clear', { timeout: 5000 });
-    await page.click('.cv-solo-clear');
+    await soloSettled(page);
+    await clearSolo(page);
     await page.waitForFunction((n) => document.querySelectorAll('.cv-feed .cv-msg').length === n, { timeout: 5000 }, before.length);
     assert.deepEqual(await shownIds(page), before);
   }, { server: { board: boardOf(buried(55)), env }, launch: { headless: 'new' } });
@@ -144,7 +149,7 @@ test('C6 unit ON: a seat whose only post is 55 back is found by its chip (with i
       await page.waitForFunction((id) => [...document.querySelectorAll('.cv-feed .cv-msg')].some((e) => e.dataset.id === id), { timeout: 8000 }, song.id)
         .catch(async () => assert.fail(`unit on: the seat's post never appeared; the feed says: ${await feedText(page)}`));
       assert.match(await page.$eval('.cv-solo-count', (e) => e.textContent), /\b1 post\b/);
-      await page.click('.cv-solo-clear');
+      await clearSolo(page);
       await page.type('.cv-search', 'marmalade');
       await page.waitForFunction(() => document.querySelector('.cv-search-head') && !/Searching/.test(document.querySelector('.cv-search-head').textContent), { timeout: 8000 });
       assert.deepEqual(await page.$$eval('.cv-result .cv-msg', (els) => els.map((e) => e.dataset.id)), [song.id], await page.$eval('.cv-search-head', (e) => e.textContent));
