@@ -528,7 +528,9 @@ export function staticCheck(sparql, opId) {
 // =====================================================================================
 
 export const RECORD_V = 2;   // 2: memory.revise records the identity it replaces (a MemoryRevision node)
-export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create', 'card.write', 'entity.put', 'origin.prepare', 'refusal.record', 'extraction.publish', 'link.propose', 'link.decide', 'link.show', 'recall.offer', 'recall.open', 'recall.read']);
+/** #1905 — a hand link's reason is one line: the line the claim would add to the card. */
+export const ATTACH_REASON_MAX = 300;
+export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create', 'card.write', 'entity.put', 'origin.prepare', 'refusal.record', 'extraction.publish', 'link.propose', 'link.attach', 'link.decide', 'link.show', 'recall.offer', 'recall.open', 'recall.read']);
 
 const RS = 'https://scrumboard.local/ns#';
 const RSC = 'https://schema.org/';
@@ -586,6 +588,9 @@ export const LOGBORN_TERMS = Object.freeze({
   // #1851 — a machine-proposed "this claim bears on this card" link (core/knowledge-linking.mjs), at link/<sha256(spanKey)>
   BearsOn: `${RS}BearsOn`, fromAssertion: `${RS}fromAssertion`, bearsOnCard: `${RS}bearsOnCard`, score: `${RS}score`, minScore: `${RS}minScore`,
   searchQuery: `${RS}searchQuery`, spanKey: `${RS}spanKey`, Card: `${RS}Card`,
+  // #1905 — a link attached BY HAND (core/knowledge-linking.mjs attachIntention): the same BearsOn node, plus who attached it
+  // and why. A link with attachedBy is a hand link; one without is the machine's, so no existing link needed a migration.
+  attachedBy: `${RS}attachedBy`, attachReason: `${RS}attachReason`,
   LinkDecision: `${RS}LinkDecision`, ofLink: `${RS}ofLink`, linkVerdict: `${RS}linkVerdict`, workingOn: `${RS}workingOn`,
   // #1852 — the first time a link was put in front of a seat (core/knowledge-delivery.mjs), at <link>/shown/<sha256(actor)>
   LinkShowing: `${RS}LinkShowing`, shownTo: `${RS}shownTo`, shownOn: `${RS}shownOn`, shownVia: `${RS}shownVia`,
@@ -621,6 +626,7 @@ const RECORD_FIELDS = {
   'refusal.record': ['refusal'],            // #1762 S2 — one content-free refusal, fresh at the IRI its opId derives; never history
   'extraction.publish': ['run', 'source', 'assertions', 'rejected', 'report'],   // #1810 — one run's whole output (source, reifiers, rejected, report) in ONE guarded update
   'link.propose': ['links', 'at'],          // #1851 — one linking run's proposed BearsOn links, every claim and card checked, in ONE update
+  'link.attach': ['link', 'at'],            // #1905 — one claim attached to one card BY HAND: the same BearsOn node, with who and why, and no search fields
   'link.decide': ['link', 'verdict', 'decision', 'workingOn', 'retiresWith', 'at'],   // #1851 — a seat's verdict on one link: one LinkDecision appended; #1852 — the status replaced by a confirm, or by a dismiss that names another seat's
   'link.show': ['showings', 'card', 'how', 'at'],   // #1852 — the links one answer showed a seat for the first time, one LinkShowing each, in ONE update
   'recall.offer': ['post', 'offers', 'at'],   // #1689 — the readings one room post was offered, one RecallOffer per source, in ONE update
@@ -854,6 +860,25 @@ function canonicalizeRecord(i) {
     if (links.length === 0) fail('a link.propose carries at least one link');
     if (new Set(links.map((l) => l.iri)).size !== links.length) fail('a link.propose names each link once');
     record = { links, at: rStr(i.at, 'at') };
+  } else if (i.kind === 'link.attach') {
+    // #1905 — a hand link carries no score, minScore, query or model: it was not found by a search, and inventing those to
+    // pass link.propose's validator would be fabricating a measurement. It carries a REASON instead, required: the line this
+    // claim would add to the card (#1899's rule as a field). The IRI is derived from the span key exactly as link.propose's
+    // is, so a hand link and a machine link for the same claim and card are ONE node, and whichever comes second is refused.
+    // Stricter than link.propose: the span key must name the card the link names, so a key minted for another card cannot
+    // carry this one.
+    const l = obj(i.link, ['iri', 'assertion', 'card', 'spanKey', 'reason'], 'link');
+    const key = rStr(l.spanKey, 'link.spanKey');
+    const iri = checkIri(l.iri, 'link.iri');
+    if (iri !== `https://scrumboard.local/link/${createHash('sha256').update(key).digest('hex')}`) fail('link.iri must be link/<sha256(spanKey)>');
+    const card = checkIri(l.card, 'link.card');
+    const k = /^span:[0-9a-f]{64}\|([^|\s]+)$/.exec(key);
+    if (!k || card !== `https://scrumboard.local/entity/${k[1]}`) fail('link.spanKey must be span:<sha256>|<card id> for the card the link names');
+    const reason = typeof l.reason === 'string' ? l.reason.trim() : '';
+    if (!reason) fail('link.reason is required: the one line this claim would add to the card. A link nobody can say why about is a guess');
+    if (/[\r\n]/.test(reason)) fail('link.reason is one line');
+    if (reason.length > ATTACH_REASON_MAX) fail(`link.reason is at most ${ATTACH_REASON_MAX} characters: one line, not a note`);
+    record = { link: { iri, assertion: checkIri(l.assertion, 'link.assertion'), card, spanKey: key, reason }, at: rStr(i.at, 'at') };
   } else if (i.kind === 'link.decide') {
     // #1851 — a confirm names the card the seat was working on (steward 52709): it is the moment #1850's "used" count reads,
     // so it is never unattributed. A dismiss needs none. The decision node is fresh and lives under its link.
@@ -1259,6 +1284,18 @@ function planRecord(c) {
       add(l.iri, TM.spanKey, L(l.spanKey)); add(l.iri, TM.model, L(l.model)); add(l.iri, TM.status, L('proposed'));
       add(l.iri, TM.dateCreated, L(R.at)); add(l.iri, TM.wasAssociatedWith, I(c.actor)); add(l.iri, TM.recordedBy, ref(c.opId));
     }
+  } else if (c.kind === 'link.attach') {
+    // #1905 — one fresh BearsOn node (so a pair the machine already linked, or someone already attached, is refused), from a
+    // published claim to a real card. Status "proposed", as a machine link is born: the attach is the attacher's judgement that
+    // the claim bears on the card, not a use of it, so no LinkDecision is written and nothing is counted as used.
+    target = null;
+    const l = R.link;
+    fresh.push(l.iri);
+    pre.push(`    ${I(l.assertion)} ${I(TM.type)} ${I(TM.Assertion)} .`, `    ${I(l.card)} ${I(TM.type)} ${I(TM.Card)} .`);
+    add(l.iri, TM.type, I(TM.BearsOn)); add(l.iri, TM.fromAssertion, I(l.assertion)); add(l.iri, TM.bearsOnCard, I(l.card));
+    add(l.iri, TM.spanKey, L(l.spanKey)); add(l.iri, TM.status, L('proposed')); add(l.iri, TM.dateCreated, L(R.at));
+    add(l.iri, TM.attachedBy, I(c.actor)); add(l.iri, TM.attachReason, L(l.reason));
+    add(l.iri, TM.wasAssociatedWith, I(c.actor)); add(l.iri, TM.recordedBy, ref(c.opId));
   } else if (c.kind === 'link.decide') {
     // #1851 — the link must be a BearsOn and a named card a Card; the decision is APPENDED
     target = null;

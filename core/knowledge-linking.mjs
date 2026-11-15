@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { LOGBORN_TERMS as TM } from './graph-compiler.mjs';   // #1850 — the counts read exactly the terms link.decide writes
+import { LOGBORN_TERMS as TM, ATTACH_REASON_MAX } from './graph-compiler.mjs';   // #1850 — the counts read exactly the terms link.decide writes
 /**
  * #1851 (#1848 slice 2) — which of our cards does an extracted claim bear on.
  *
@@ -70,6 +70,26 @@ export function linkIntention({ proposals, minScore, model, at, actor, opId = `u
       score: p.score, minScore, query: p.query, spanKey: p.spanKey, model })),
     at,
   };
+}
+
+export { ATTACH_REASON_MAX };
+/**
+ * #1905 — a claim's address from what a seat holds: the full assertion IRI (link_list, recall), or its bare id (the Reading
+ * page shows only the tail). Anything else is null, so a path segment or another kind of node is never taken for a claim.
+ */
+export function claimIriOf(given) {
+  const s = typeof given === 'string' ? given.trim() : '';
+  if (/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(s)) return `${ENTITY}assertion/${s}`;
+  return /^https:\/\/scrumboard\.local\/assertion\/[A-Za-z0-9][A-Za-z0-9_-]*$/.test(s) ? s : null;
+}
+/**
+ * #1905 — ONE claim attached to ONE card by hand, with the attacher's one-line reason. The same node a machine proposal would
+ * be (linkIri of the same span key), so the second of the two is refused as not fresh. No score, query or model: a person's
+ * judgement is not a search result. `card` is the card's id, as a proposal carries it.
+ */
+export function attachIntention({ assertion, card, span, reason, actor, at = new Date().toISOString(), opId = `urn:ex:op/${crypto.randomUUID()}` } = {}) {
+  const key = spanKey(span, card);
+  return { kind: 'link.attach', opId, actor, link: { iri: linkIri(key), assertion, card: `${ENTITY}entity/${card}`, spanKey: key, reason }, at };
 }
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
@@ -183,7 +203,10 @@ export function linkCountsQuery(since) {
   // matches nothing returns a clean zero, which would read as "nobody used anything". A showing has no verdict: ?v stays unbound.
   return `SELECT ?by ?l ?v WHERE { { ?d a <${TM.LinkDecision}> ; <${TM.ofLink}> ?l ; <${TM.linkVerdict}> ?v ; <${TM.decidedBy}> ?by ; <${TM.dateCreated}> ?at } `
     + `UNION { ?d a <${TM.LinkShowing}> ; <${TM.ofLink}> ?l ; <${TM.shownTo}> ?by ; <${TM.dateCreated}> ?at } `
-    + `FILTER(?at >= ${JSON.stringify(since)}) }`;
+    + `FILTER(?at >= ${JSON.stringify(since)}) `
+    // #1905 — these counts measure the MATCHER: a hand-attached link (it carries attachedBy) is a person's judgement, and a
+    // confirm or a showing of one must never read as the machine having found something useful
+    + `FILTER NOT EXISTS { ?l <${TM.attachedBy}> ?attacher } }`;
 }
 /** rows: a decision `{ by, link, verdict }` or a delivery `{ by, link, delivered: true }`. */
 export function countLinkUse(rows, { seatNs = 'urn:ex:seat/' } = {}) {

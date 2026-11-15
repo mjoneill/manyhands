@@ -35,7 +35,7 @@ POST_NODE_UNREADABLE POST_REDACTED POST_SEQ_ALLOCATOR_REFUSED POST_SEQ_BEHIND_GR
 POST_SEQ_RESERVATION_INVALID POST_SEQ_STATE_CORRUPT READ_ONLY READY_SOURCE_UNAVAILABLE REPLICA_RETIRED REQUEST_ID_CONFLICT
 REQUEST_ID_INVALID REQUEST_ID_REQUIRED ROW_CAP SCOPE_INSUFFICIENT SEAT_MISMATCH SEAT_NOT_SELF SEAT_STATE_TRUNCATED SERVICE_REFUSED
 SINGLE_SEAT SOURCE_UNAVAILABLE TALK_CLOSED TOKEN_EXPIRED TOKEN_REVOKED TOKEN_UNKNOWN UNBOUNDED_PATH UNKNOWN_CURSOR UNKNOWN_LANE
-UNKNOWN_NODE UNKNOWN_PREFIX UNKNOWN_ROLE UNKNOWN_SEAT UNKNOWN_TERM UNSUPPORTED_RETURN_SHAPE WRITE_CONFLICT LINKS_UNAVAILABLE LINK_NOT_FOUND
+UNKNOWN_NODE UNKNOWN_PREFIX UNKNOWN_ROLE UNKNOWN_SEAT UNKNOWN_TERM UNSUPPORTED_RETURN_SHAPE WRITE_CONFLICT LINKS_UNAVAILABLE LINK_NOT_FOUND LINK_EXISTS CLAIM_NOT_FOUND
 BAD_LIMIT BAD_RUN_ID READINGS_UNAVAILABLE READING_NOT_FOUND
 BAD_TEXT BAD_K BAD_POST_ID BAD_SINCE RECALL_UNAVAILABLE RECALL_POST_NOT_FOUND RECALL_OFFER_NOT_FOUND
 AUTH_AMBIGUOUS CODE_MISSING CSRF_CONTENT_TYPE CSRF_ORIGIN`.split(/\s+/)));
@@ -54,7 +54,7 @@ export const ROUTE_TEMPLATES = Object.freeze(new Set([
   'POST /api/agents/:p/prompt', 'POST /api/artifacts', 'POST /api/assert', 'POST /api/attachments', 'POST /api/cards',
   'POST /api/cards/:p/claim', 'POST /api/cards/:p/move-fence', 'POST /api/columns', 'POST /api/config',
   'POST /api/conversations', 'POST /api/cursors/ack', 'POST /api/cursors/inbound', 'POST /api/cursors/register',
-  'POST /api/cursors/served', 'POST /api/decisions', 'POST /api/decisions/:p/relations', 'POST /api/links/:p/decide', 'POST /api/deliveries',
+  'POST /api/cursors/served', 'POST /api/decisions', 'POST /api/decisions/:p/relations', 'POST /api/links/attach', 'POST /api/links/:p/decide', 'POST /api/deliveries',
   'POST /api/deliveries/:p/events', 'POST /api/deliveries/events', 'POST /api/export', 'POST /api/export/preview',
   'POST /api/graph', 'POST /api/kinds', 'POST /api/labels/aliases', 'POST /api/memories', 'POST /api/model-calls',
   'POST /api/models', 'POST /api/models/:p/probe', 'POST /api/nodes', 'POST /api/obligations',

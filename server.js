@@ -82,7 +82,7 @@ import { labelAliasRows, labelAliasEntity, labelAliasIri } from './core/label-al
 import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, auditOutbox, modeProblem, legacyProof, postMatchesEntry, opIdFor, announcePostId, postCreateIntention, obligationIdOf } from './core/announce-outbox.mjs';   // #1574 C3a/C3b/C3c
 import * as U3 from './core/unit3-graph.mjs';   // #1582 — deliveries and model calls in the graph
 import { createGraphClient, setExecutorMeter } from './core/graph-client.mjs';   // #1574 C3b — the conversations unit's executor door
-import { decideIntention as linkDecideIntention, linkCountsQuery, countLinkUse, linkDecisionsQuery, decisionsOfRows, retiringDecision, dismissalCount } from './core/knowledge-linking.mjs';   // #1851, #1850, #1852
+import { decideIntention as linkDecideIntention, attachIntention as linkAttachIntention, claimIriOf, spanKey as linkSpanKey, linkIri as linkIriOf, linkCountsQuery, countLinkUse, linkDecisionsQuery, decisionsOfRows, retiringDecision, dismissalCount } from './core/knowledge-linking.mjs';   // #1851, #1850, #1852
 import { deliveryQuery, linksOfDeliveryRows, selectDeliveries, firstShowings, deliverySourcesQuery, sourcesOfRows, deliveryBlock, showIntention, DELIVERY_DEADLINE_MS } from './core/knowledge-delivery.mjs';   // #1852
 import * as READING from './core/knowledge-reading.mjs';   // #1894
 import { readRecallConfig, createRecallEngine, createRecallQueue, createOfferProjection, createRecallHook, publicItem as recallPublicItem, RECALL_COUNTS_MEANS,
@@ -7105,8 +7105,8 @@ async function handleListLinks(req, res) {
     const limit = qs.limit == null ? LINKS_MAX : Number(qs.limit);
     if (!Number.isInteger(limit) || limit < 1 || limit > LINKS_MAX) return sendJSON(res, 400, { error: `limit is an integer from 1 to ${LINKS_MAX}` });
     const RS = 'https://scrumboard.local/ns#';
-    const got = await LOGBORN.query(`SELECT ?l ?st ?sc ?c ?a ?span ?gist WHERE { ?l a <${RS}BearsOn> ; <${RS}status> ?st ; <${RS}bearsOnCard> ?c ; <${RS}fromAssertion> ?a `
-      + `OPTIONAL { ?l <${RS}score> ?sc } OPTIONAL { ?a <${RS}anchorText> ?span } OPTIONAL { ?a <${RS}gist> ?gist } `
+    const got = await LOGBORN.query(`SELECT ?l ?st ?sc ?c ?a ?span ?gist ?by ?why WHERE { ?l a <${RS}BearsOn> ; <${RS}status> ?st ; <${RS}bearsOnCard> ?c ; <${RS}fromAssertion> ?a `
+      + `OPTIONAL { ?l <${RS}score> ?sc } OPTIONAL { ?a <${RS}anchorText> ?span } OPTIONAL { ?a <${RS}gist> ?gist } OPTIONAL { ?l <${RS}attachedBy> ?by } OPTIONAL { ?l <${RS}attachReason> ?why } `
       + `${status ? `FILTER(?st = ${JSON.stringify(status)}) ` : ''}${cardFilter ? `FILTER(?c = <${cardFilter}>) ` : ''}} ORDER BY DESC(?sc) ?l LIMIT ${limit + 1}`);   // one past the page: its presence is the truncation signal
     const truncated = got.length > limit;
     const rows = got.slice(0, limit);
@@ -7118,13 +7118,53 @@ async function handleListLinks(req, res) {
       const card = byId.get(r.c.value);
       return { id: r.l.value.split('/').pop(), status: r.st.value, dismissals: dismissalCount(decided.get(r.l.value)), score: r.sc ? Number(r.sc.value) : null,
         card: { shortId: card?.shortId ?? null, title: card?.title ?? null },
-        claim: { iri: r.a.value, span: r.span?.value ?? null, gist: r.gist?.value ?? null } };
+        claim: { iri: r.a.value, span: r.span?.value ?? null, gist: r.gist?.value ?? null },
+        // #1905 — a hand link names who attached it and why; a machine link has neither, and its score says how it was found
+        origin: r.by ? 'hand' : 'machine', attachedBy: r.by ? r.by.value.replace(/^urn:ex:seat\//, '') : null, reason: r.why?.value ?? null };
     });
-    sendJSON(res, 200, { links, truncated, means: 'A link is a MACHINE PROPOSAL that a claim the room read bears on a card, found by meaning search. Answer it with POST /api/links/:id/decide (MCP link_decide): confirm names the card you were working on; '
+    sendJSON(res, 200, { links, truncated, means: 'A link proposes that a claim the room read bears on a card. origin machine: found by meaning search (score). origin hand: a seat attached it with POST /api/links/attach (MCP link_attach), and attachedBy and reason say who and why. Answer it with POST /api/links/:id/decide (MCP link_decide): confirm names the card you were working on; '
       + 'dismiss hides it from you, and a link two different seats have dismissed is retired for everyone (status dismissed; `dismissals` counts the seats so far). Either way that claim is never proposed for that card again.' });
   } catch (e) {
     if (executorRefused(res, e)) return;
     console.error('GET /api/links:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+// #1905 — A SEAT ATTACHES A CLAIM TO A CARD BY HAND, when meaning search missed a pair she can see. The link is the same BearsOn
+// a machine run writes (same IRI from the claim's span and the card, so neither can duplicate the other) and starts proposed:
+// attaching is not a verdict. It carries who attached it and why, and the use counts read machine links only (#1850).
+async function handleAttachLink(req, res) {
+  try {
+    if (!LOGBORN) return sendJSON(res, 503, { error: LINK_UNIT_OFF, code: 'LINKS_UNAVAILABLE' });
+    const body = JSON.parse((await readBody(req)) || '{}');
+    const by = body.by;
+    if (typeof by !== 'string' || !by.trim()) return sendJSON(res, 400, { error: 'by is required: an attachment nobody made cannot say who made it' });
+    if (typeof body.onBehalfOf === 'string' && body.onBehalfOf && body.onBehalfOf !== by) {
+      return sendJSON(res, 403, { error: `seat '${by}' may attach only as itself, not as '${body.onBehalfOf}'`, code: 'SEAT_NOT_SELF' });
+    }
+    // the reason's rules (required, one line, ATTACH_REASON_MAX) live in the compiler (link.attach), and reach here as a 400
+    const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
+    const card = body.card == null || body.card === '' ? null : linkCardByShortId(Number(body.card));
+    if (!card) return sendJSON(res, 400, { error: `card ${body.card} is not a card on this board` });
+    const claim = claimIriOf(body.claim);   // the full address, or the bare id the Reading page shows
+    if (!claim) return sendJSON(res, 404, { error: `no claim ${JSON.stringify(body.claim ?? null)}: give its address or its id`, code: 'CLAIM_NOT_FOUND' });
+    const RS = 'https://scrumboard.local/ns#';
+    const spans = await LOGBORN.query(`SELECT ?span WHERE { <${claim}> a <${RS}Assertion> ; <${RS}anchorText> ?span }`);
+    if (!spans.length) return sendJSON(res, 404, { error: `no claim ${claim}`, code: 'CLAIM_NOT_FOUND' });
+    const span = spans[0].span.value;
+    const iri = linkIriOf(linkSpanKey(span, card.id));
+    const id = iri.split('/').pop();
+    if ((await LOGBORN.query(`SELECT ?t WHERE { <${iri}> a <${RS}BearsOn> }`)).length) {
+      return sendJSON(res, 409, { error: `this claim is already linked to card ${card.shortId}, as link ${id}: view it there`, code: 'LINK_EXISTS', id });
+    }
+    const actor = logbornActor(req, res, 'link.attach');
+    if (!actor) return;
+    const r = await LOGBORN.write(linkAttachIntention({ assertion: claim, card: card.id, span, reason, actor }));
+    if (r.outcome !== 'APPLIED') return logbornWriteFailed(res, r);
+    sendJSON(res, 201, { id, card: card.shortId, claim, reason, by: String(actor).replace(/^urn:ex:seat\//, '') });
+  } catch (e) {
+    if (executorRefused(res, e)) return;
+    console.error('POST /api/links/attach:', e.message);
     sendJSON(res, 500, { error: e.message });
   }
 }
@@ -14556,6 +14596,7 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/decisions\/([^\/]+)\/relations$/, fn: (req, res, m) => handleRelateDecision(req, res, m[1]) },   // #1322
   { method: 'GET',    re: /^\/api\/links$/,                fn: (req, res) => handleListLinks(req, res) },   // #1851
   { method: 'GET',    re: /^\/api\/links\/counts$/,         fn: (req, res) => handleLinkCounts(req, res) },   // #1850
+  { method: 'POST',   re: /^\/api\/links\/attach$/,          fn: (req, res) => handleAttachLink(req, res) },   // #1905
   { method: 'POST',   re: /^\/api\/links\/([^\/]+)\/decide$/, fn: (req, res, m) => handleDecideLink(req, res, m[1]) },   // #1851
   { method: 'POST',   re: /^\/api\/recall$/,               fn: (req, res) => handleRecall(req, res) },   // #1689
   { method: 'POST',   re: /^\/api\/recall\/opened$/,        fn: (req, res) => handleRecallOpened(req, res) },   // #1689

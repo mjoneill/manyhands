@@ -341,6 +341,25 @@ test('C10 #1901 delivery-born means the CONFIRMING seat was shown the link: anot
     'seat-d was never shown x, so her confirm is not delivery-born: x stays in score order behind the 0.9 proposal');
 });
 
+test('C11 #1905 a claim attached by hand is delivered with who attached it and why, read from the graph', T, async () => {
+  const card = await newCard();
+  const machine = await seedLink(card, { source: await seedSource(), score: 0.9 });
+  const assertion = `https://scrumboard.local/assertion/${crypto.randomUUID()}`;
+  await raw(w.exec.baseUrl, `INSERT DATA { <${assertion}> <${RDF}type> <${RS}Assertion> ; <${RS}anchorText> ${JSON.stringify(`a span ${assertion}`)} ; <${RS}gist> "a gist" . }`);
+  const a = await call('seat-b', 'POST', '/api/links/attach', { claim: assertion, card: card.shortId, reason: 'the line this adds to the card', by: 'seat-b' });
+  assert.equal(a.status, 201, `PRECONDITION: seat-b attached it (${a.text})`);
+  const r = await claim('seat-a', card);
+  assert.equal(r.status, 200, r.text);
+  assert.equal((await release('seat-a', card)).status, 200);
+  const items = r.json.roomHasRead.items;
+  assert.deepEqual(items.map((i) => i.link), [machine.id, a.json.id], 'both are delivered; the hand link, with no score, comes after the machine one');
+  const hand = items[1];
+  assert.deepEqual({ by: hand.attachedBy, why: hand.attachReason, status: hand.status }, { by: 'seat-b', why: 'the line this adds to the card', status: 'proposed' });
+  assert.match(hand.attachedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.match(hand.whoAttached, /^seat-b attached this claim to the card by hand at .*, because: the line this adds to the card\./);
+  assert.equal('attachedBy' in items[0], false, 'the machine item carries no attacher');
+});
+
 test('G1 a read with no bearer carries no field, byte for byte, and records nothing', T, async () => {
   const card = await newCard(); const bare = await newCard();
   const s = await seedLink(card, { source: await seedSource() });

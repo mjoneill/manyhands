@@ -293,3 +293,33 @@ test('P1 the source of a passage', () => {
   assert.equal(sourceOfPassage('https://scrumboard.local/source/abc'), null);
   assert.equal(sourceOfPassage(null), null);
 });
+
+// ── #1905 — a claim attached BY HAND says so, with who, when and why; a machine link's item is unchanged ──
+test('HD1 #1905 the delivery rows carry a hand link\'s attacher, time and reason; a machine link has none', () => {
+  const hand = { ...row(5, { st: 'proposed' }), sc: undefined, ab: v('urn:ex:seat/seat-x'), ar: v('the inbox the card asks for'), lat: v(T2) };
+  const [h, m] = linksOfDeliveryRows([hand, row(6, { st: 'proposed' })], { actor: Y });
+  assert.deepEqual({ attachedBy: h.attachedBy, attachedAt: h.attachedAt, attachReason: h.attachReason }, { attachedBy: 'seat-x', attachedAt: T2, attachReason: 'the inbox the card asks for' });
+  assert.deepEqual({ attachedBy: m.attachedBy, attachedAt: m.attachedAt, attachReason: m.attachReason }, { attachedBy: null, attachedAt: null, attachReason: null });
+});
+
+test('HD2 #1905 a hand-attached item names who attached it, when and why, says it is not a confirm, and tells the attacher it is hers; a machine item is byte-for-byte unchanged', () => {
+  const hand = link(7, { score: null, attachedBy: 'seat-x', attachedAt: T2, attachReason: 'the inbox the card asks for' });
+  const toY = deliveryBlock({ items: [hand], shortId: 1902, sources: new Map(), reader: Y }).items[0];
+  assert.deepEqual({ by: toY.attachedBy, at: toY.attachedAt, why: toY.attachReason }, { by: 'seat-x', at: T2, why: 'the inbox the card asks for' });
+  assert.match(toY.whoAttached, /^seat-x attached this claim to the card by hand at 2026-11-14T09:00:00\.000Z, because: the inbox the card asks for\./);
+  assert.match(toY.whoAttached, /not a confirm/i);
+  assert.doesNotMatch(toY.whoAttached, /You \(/);
+  const toX = deliveryBlock({ items: [hand], shortId: 1902, sources: new Map(), reader: X }).items[0];
+  assert.match(toX.whoAttached, /^You \(seat-x\) attached this claim to the card by hand at /);
+  const machine = link(8);
+  const plain = deliveryBlock({ items: [machine], shortId: 1902, sources: new Map(), reader: Y }).items[0];
+  const before = deliveryBlock({ items: [{ ...machine, attachedBy: null, attachedAt: null, attachReason: null }], shortId: 1902, sources: new Map(), reader: Y }).items[0];
+  assert.equal(JSON.stringify(before), JSON.stringify(plain), 'null attach fields render nothing');
+  for (const k of ['attachedBy', 'attachedAt', 'attachReason', 'whoAttached']) assert.equal(k in plain, false, `a machine item has no ${k}`);
+});
+
+test('HD3 #1905 `means` says an item with attachedBy was attached by hand, and that attaching is not a confirm', () => {
+  const { means } = deliveryBlock({ items: [link(1)], shortId: 7, sources: new Map() });
+  assert.match(means, /`attachedBy`.*by hand/i);
+  assert.match(means, /not a confirm/i);
+});
