@@ -15228,7 +15228,7 @@ function handleRequest(req, res) {
     req.auth = strict;
   }
 
-  // #1906 — a cookie write's body is read here, once, so a `by`/`author` naming another seat is refused before any handler
+  // #1906 — a cookie write's body is read here, once, so a `by`/`author`/`createdBy`/`owner` naming another seat is refused before any handler
   // runs (403 SEAT_NOT_SELF: a browser is one person, it relays for nobody). The handler's readBody is answered from the buffer.
   if (cookieWrite && method !== 'DELETE') {
     const cap = urlPath === '/api/attachments' ? MAX_ATTACHMENT_BODY_BYTES : MAX_BODY_BYTES;
@@ -15236,7 +15236,7 @@ function handleRequest(req, res) {
       let parsed = null;
       try { parsed = JSON.parse(buf.toString('utf8')); } catch { /* not JSON: the handler's own 400 */ }
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        for (const f of ['by', 'author']) {
+        for (const f of ['by', 'author', 'createdBy', 'owner']) {   // every field a handler would record as the writer or owner
           const v = parsed[f];
           if (typeof v === 'string' && v.trim() && v.trim().toLowerCase() !== session.seat) {
             return sendJSON(res, 403, { error: `this browser is signed in as ${session.seat}; the body names '${v}' as ${f}. A browser writes only as its own seat.`, code: 'SEAT_NOT_SELF' });

@@ -174,6 +174,20 @@ test('R3 a write with the cookie is recorded as the human seat; another seat\'s 
   assert.ok(!t.includes('r3-as-ada') && !t.includes('r3-both'), 'nothing stored for the refused writes');
 });
 
+test('R3b a cookie write naming another seat as `owner` or `createdBy` is 403 SEAT_NOT_SELF, nothing written', T, async () => {
+  const s = await signIn(mint(['--seat', 'hu']).code);
+  assert.equal(s.status, 201, JSON.stringify(s.body));
+  const owned = await write('POST', '/api/memories', memory('r3b-owner-ada', { owner: 'ada' }), { cookie: s.value });
+  assert.equal(owned.status, 403, `a memory owned by another seat: ${JSON.stringify(owned.body)}`);
+  assert.equal(owned.body.code, 'SEAT_NOT_SELF');
+  const card = await write('POST', '/api/cards', { title: 'r3b-createdBy-ada', createdBy: 'ada' }, { cookie: s.value });
+  assert.equal(card.status, 403, `a card credited to another seat: ${JSON.stringify(card.body)}`);
+  assert.equal(card.body.code, 'SEAT_NOT_SELF');
+  const mine = await write('POST', '/api/cards', { title: 'r3b-createdBy-self', createdBy: 'hu' }, { cookie: s.value });
+  assert.ok(mine.status === 200 || mine.status === 201, `CONTROL: crediting itself is accepted: ${JSON.stringify(mine.body)}`);
+  assert.ok(!(await titles()).includes('r3b-owner-ada'), 'the refused memory was not stored');
+});
+
 test('R4 a cookie write with a foreign, wrong-port or missing Origin is refused, with nothing written', T, async () => {
   const s = await signIn(mint(['--seat', 'hu']).code);
   assert.equal(s.status, 201, JSON.stringify(s.body));
@@ -302,6 +316,8 @@ test('R7 the mint script refuses a seat the roster does not mark as a human pers
 test('R8 the honest limit is written on the settings page and in the script\'s --help', () => {
   const sentence = /Anyone with a shell on this machine can run the mint script, and that includes the AI seats\./;
   assert.match(fs.readFileSync(path.join(ROOT, 'settings.html'), 'utf8'), sentence);
+  // the page also says what signing in is NOT: it proves who writes; it is not a protected board (#1343's boundary is separate)
+  assert.match(fs.readFileSync(path.join(ROOT, 'settings.html'), 'utf8'), /it does not password-protect the board or disable anonymous REST\/MCP access/);
   const h = spawnSync(process.execPath, [SCRIPT, '--help'], { encoding: 'utf8' });
   assert.equal(h.status, 0, h.stderr);
   assert.match(h.stdout, sentence);
