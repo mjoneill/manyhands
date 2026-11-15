@@ -121,8 +121,24 @@
   .recall-out .rtitle a:hover { text-decoration-color: var(--link); }
   .recall-out .gist { font-size: 1.0625rem; }
   .recall-out .score { font-variant-numeric: tabular-nums; opacity: .8; }
+  /* #1905 — attach a claim to a card by hand. Quiet until opened: one small pill under the claim, then an inline form. */
+  .attach { margin: 10px 0 0; font-size: .875rem; }
+  .attach-toggle { font: inherit; font-size: .8125rem; color: var(--link); background: transparent; border: 1px solid var(--line); border-radius: 99px; padding: 4px 12px; min-height: 32px; cursor: pointer; }
+  .attach-toggle:hover, .attach-toggle[aria-expanded="true"] { color: var(--ink); border-color: var(--violet); }
+  .attach-form { display: grid; gap: 8px; margin: 10px 0 0; padding: 12px 14px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); max-width: 32rem; }
+  .attach-form label { font: 600 .75rem/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .attach-form input { font: inherit; font-size: 1rem; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: var(--r); padding: 8px 10px; min-width: 0; width: 100%; }
+  .attach-form input.card-in { width: 9rem; font-variant-numeric: tabular-nums; }
+  .attach-go { justify-self: start; font: inherit; font-size: .9375rem; color: var(--ink); background: var(--panel-2); border: 1px solid var(--violet); border-radius: var(--r); padding: 7px 16px; min-height: 38px; cursor: pointer; }
+  .attach-go:hover { background: var(--bg); }
+  .attach-go:disabled { opacity: .6; cursor: progress; }
+  .attach-msg { margin: 8px 0 0; }
+  .attach-msg:empty { display: none; }
+  .attach-msg.bad { color: var(--ember); }
+  .attach-msg.good { color: var(--ink); }
+  .bears .by { color: var(--muted); font-size: .8125rem; }
   @media (prefers-reduced-motion: no-preference) { .chip { transition: border-color .12s, color .12s; } }
-  @media print { .tools, .recall, .shell-head { display: none; } }
+  @media print { .tools, .recall, .shell-head, .attach { display: none; } }
 </style>
 </head>
 <body>
@@ -140,6 +156,8 @@
 <script type="module">
 // #1689 — a module now, so the run-id and reading-link rules are the ones the room line uses (core/recall-line.mjs).
 import { RUN_ID_RE, runOfReadingPage } from './core/recall-line.mjs';
+// #1905 — attaching a claim to a card by hand: the request and the words for each answer (tested in tests/reading-attach-page-1905.test.mjs).
+import { ATTACH_REASON_MAX, attachRequest, checkAttachInput, attachOutcome } from './core/reading-attach.mjs';
 // #1894 — EVERYTHING that came from the graph is text from a web page, passed through a model: it is untrusted. So it is only
 // ever set with textContent. There is no innerHTML anywhere on this page, and a source url becomes a link only when it is
 // http: or https: (a urn: source is an uploaded file and is shown as text).
@@ -376,7 +394,89 @@ import { RUN_ID_RE, runOfReadingPage } from './core/recall-line.mjs';
       }
       li.append(ul);
     }
+    if (typeof c.id === 'string' && c.id) li.append(attachControl(c, li));
     return li;
+  }
+
+  // ── #1905: attach this claim to a card ─────────────────────────────────────────────────────────────────────────────────
+  // The request carries no identity: a browser signed in on the Settings page holds a session cookie, and the board records
+  // the link as that seat. What is shown afterwards is the seat the board says it recorded. Every answer is shown in words.
+  let attachSeq = 0;
+  function attachControl(c, li) {
+    const id = 'attach-' + (++attachSeq);
+    const box = el('div', 'attach');
+    const toggle = el('button', 'attach-toggle', 'Attach to a card');
+    toggle.type = 'button';
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.setAttribute('aria-controls', id);
+    const form = el('form', 'attach-form');
+    form.id = id; form.hidden = true; form.noValidate = true;
+    form.setAttribute('aria-label', 'Attach this claim to a card');
+    const cardLabel = el('label', null, 'Card number');
+    const cardIn = el('input', 'card-in');
+    cardIn.id = id + '-card'; cardLabel.htmlFor = cardIn.id;
+    cardIn.type = 'text'; cardIn.inputMode = 'numeric'; cardIn.autocomplete = 'off'; cardIn.placeholder = 'e.g. 1905'; cardIn.required = true;
+    const whyLabel = el('label', null, 'Why it bears on that card (one line)');
+    const whyIn = el('input');
+    whyIn.id = id + '-why'; whyLabel.htmlFor = whyIn.id;
+    whyIn.type = 'text'; whyIn.autocomplete = 'off'; whyIn.required = true;
+    whyIn.maxLength = ATTACH_REASON_MAX;
+    const go = el('button', 'attach-go', 'Attach');
+    go.type = 'submit';
+    form.append(cardLabel, cardIn, whyLabel, whyIn, go);
+    const msg = el('p', 'attach-msg');
+    msg.setAttribute('role', 'status');
+    msg.setAttribute('aria-live', 'polite');
+    box.append(toggle, form, msg);
+
+    const open = (yes) => {
+      form.hidden = !yes;
+      toggle.setAttribute('aria-expanded', String(yes));
+      if (yes) cardIn.focus();
+    };
+    toggle.addEventListener('click', () => open(form.hidden));
+    form.addEventListener('keydown', (e) => { if (e.key === 'Escape') { open(false); toggle.focus(); } });
+    const say = (shown) => {
+      msg.className = 'attach-msg ' + (shown.ok ? 'good' : 'bad');
+      const text = String(shown.text);
+      const at = shown.signIn ? text.indexOf('Settings page') : -1;
+      if (at < 0) { msg.replaceChildren(document.createTextNode(text)); return; }
+      const a = el('a', null, 'Settings page');
+      a.href = 'settings.html#signin-panel';
+      msg.replaceChildren(document.createTextNode(text.slice(0, at)), a, document.createTextNode(text.slice(at + 'Settings page'.length)));
+    };
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const input = { claim: c.id, card: cardIn.value, reason: whyIn.value };
+      const wrong = checkAttachInput(input);
+      if (wrong) { say({ ok: false, text: wrong }); (/card/i.test(wrong) ? cardIn : whyIn).focus(); return; }
+      const { url, init } = attachRequest(input);
+      go.disabled = true; go.textContent = 'Attaching…';
+      msg.replaceChildren();
+      let shown;
+      try {
+        const res = await fetch(url, init);
+        let body = null;
+        try { body = await res.json(); } catch (err) { /* not json: attachOutcome says what the board answered */ }
+        shown = attachOutcome(res.status, body);
+        if (shown.ok) { addAttached(li, box, body); form.reset(); open(false); toggle.focus(); }
+      } catch (err) {
+        shown = { ok: false, text: `The board could not be reached (${err && err.message ? err.message : err}). Nothing was attached.` };
+      } finally {
+        go.disabled = false; go.textContent = 'Attach';
+      }
+      say(shown);
+    });
+    return box;
+  }
+  // the new link joins the claim's "may bear on" list, as the board recorded it: proposed, with who attached it
+  function addAttached(li, box, body) {
+    let ul = li.querySelector(':scope > .bears');
+    if (!ul) { ul = el('ul', 'bears'); li.insertBefore(ul, box); }
+    const b = el('li');
+    b.append(el('span', 'lead', 'may bear on'), el('span', 'ref', '#' + body.card), el('span', 'st proposed', 'proposed'));
+    if (typeof body.by === 'string' && body.by) b.append(el('span', 'by', 'attached by ' + body.by));
+    ul.append(b);
   }
 
   async function showRun(id) {
