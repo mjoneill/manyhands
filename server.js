@@ -140,6 +140,7 @@ import { setCursorsDataDir, setCursorsOwnedFile, cursorsPath, loadCursors, CURSO
 import { lanePageFromHistory } from './core/history-lane.mjs';   // #1762 S4 — the proven lane log half past F   // #1762 S4 — the relocated lane state
 import { configureIdentities, usingDefaultRoster } from './core/identity.mjs';
 import { hostAllowed, parseAllowedHosts, refuseHost } from './core/host-guard.mjs';
+import { createSessionReader, cookieValue, originAllowed, updateStore as updateSessionStore, redeemCode, addSession, endSession, findSession, listSessions, readSessionEvents, appendSessionEvent, isHumanSeat, sessionCookie, clearedCookie, HONEST_LIMIT } from './core/browser-sessions.mjs';   // #1906
 import { agentConstraints, unseenLayers } from './core/agent-constraints.mjs';   // #1350
 import { assembleMemories } from './core/memory-assemble.mjs';   // #1406
 import { appliedUnconfirmed } from './core/applied-read-back.mjs';   // #1868
@@ -287,6 +288,10 @@ const BOARD_STEM = path.basename(BOARD_DATA_FILE).replace(/\.json$/, '')
 // rather than running open (core/credentials.mjs readAuthMode).
 const SEAT_TOKENS_PATH = process.env.SCRUM_SEAT_TOKENS || path.join(DATA_DIR, 'seat-tokens.json');   // #1788
 const AUTH_MODE = readAuthMode(process.env.SCRUM_AUTH);
+// #1906 — a human's browser session: codes and sessions as hashes, beside the seat credentials (core/browser-sessions.mjs).
+// Re-read when it changes on disk, so a sign-out elsewhere or the script's --revoke-all is live at the next request.
+const BROWSER_SESSIONS_PATH = process.env.SCRUM_BROWSER_SESSIONS || path.join(DATA_DIR, 'browser-sessions.json');
+const BROWSER_SESSIONS = createSessionReader(BROWSER_SESSIONS_PATH);
 const authStats = { refused: 0, unknownBearers: 0, expiredBearers: 0, mismatched: 0 };
 let _creds = null, _credsMtime = -1, _credsCheckedAt = 0;
 /**
@@ -877,17 +882,26 @@ function readBody(req, maxBytes = MAX_BODY_BYTES) {
     let chunks = [];
     let size = 0;
     let tooBig = false;
-    req.on('data', (chunk) => {
-      if (tooBig) return;
-      size += chunk.length;
-      if (size > maxBytes) {
-        tooBig = true;
-        chunks = [];
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on('end', () => {
+    // #1906 — a cookie-authenticated write was buffered at the front door (to hold its `by` to the session's seat before
+    // routing). The stream is spent, so the handler's read is answered from that buffer, through the same steps below.
+    const pre = req._prebuffered;
+    if (pre !== undefined) {
+      req._prebuffered = undefined;
+      if (pre.length > maxBytes) { tooBig = true; } else { chunks = [pre]; }
+      setImmediate(() => req.emit('_prebufferedEnd'));
+    } else {
+      req.on('data', (chunk) => {
+        if (tooBig) return;
+        size += chunk.length;
+        if (size > maxBytes) {
+          tooBig = true;
+          chunks = [];
+          return;
+        }
+        chunks.push(chunk);
+      });
+    }
+    req.once(pre !== undefined ? '_prebufferedEnd' : 'end', () => {
       if (tooBig) reject(Object.assign(new Error('Request body too large'), { statusCode: 413 }));
       else {
         const raw = Buffer.concat(chunks).toString('utf8');
@@ -14426,7 +14440,88 @@ async function handleCursorServed(req, res) {
 }
 
 // ── Router: regex-based match against API_ROUTES ──
+// ── #1906 — a human's browser signs in with a one-time code from the terminal ─────────────────────────────────────────
+// The code is minted by scripts/browser-signin-code.mjs and typed into the settings page, which POSTs it here in a JSON body.
+// Nothing on these routes ever writes a code or a session id anywhere but the Set-Cookie header: not a log line, not an
+// event, not a refusal record (the body is dropped before a refusal can be logged), not a response body.
+const sessionRefusal = {
+  CODE_UNKNOWN: 'that code is not one this board issued',
+  CODE_USED: 'that code has already been used; mint a new one at the terminal',
+  CODE_EXPIRED: 'that code has expired (codes last 10 minutes); mint a new one at the terminal',
+  SEAT_NOT_HUMAN: 'that code was minted for a seat the roster does not mark as a human person (kind: "human")',
+};
+async function handleSessionStart(req, res) {
+  try {
+    if (!originAllowed(req.headers, { port: BOUND_PORT, extra: ALLOWED_HOSTS })) {
+      req.resume();
+      return sendJSON(res, 403, { error: 'sign in from this board\'s own settings page (the Origin names another site or port, or is missing)', code: 'CSRF_ORIGIN' });
+    }
+    const raw = await readBody(req);
+    delete req._rawBody;   // the code must not reach a refusal's record (#1217 logRefused keeps a refused body)
+    let body = null;
+    try { body = JSON.parse(raw || '{}'); } catch { /* answered below, without echoing the input */ }
+    if (!body || typeof body !== 'object' || typeof body.code !== 'string') return sendJSON(res, 400, { error: 'send { "code": "<the code from the terminal>" } as JSON', code: 'CODE_MISSING' });
+    const now = Date.now();
+    const roster = currentRoster();
+    const prior = cookieValue(req.headers.cookie);
+    const out = updateSessionStore(BROWSER_SESSIONS_PATH, (doc) => {
+      const r = redeemCode(doc, body.code, { now });
+      if (!r.ok) return r;
+      if (!isHumanSeat(roster, r.seat)) return { ok: false, reason: 'SEAT_NOT_HUMAN', seat: r.seat };
+      const was = prior ? findSession(doc, prior, { now }) : null;   // one browser, one session: a sign-in replaces this browser's last
+      if (was) endSession(doc, was.sessionHash, 'replaced', { now });
+      const { id, row } = addSession(doc, r.seat, { now });
+      return { ok: true, id, seat: r.seat, createdAt: row.createdAt, expiresAt: row.expiresAt, replaced: was ? was.seat : null };
+    }, { now });
+    if (!out.ok) {
+      appendSessionEvent(BROWSER_SESSIONS_PATH, { op: 'code-refused', seat: out.seat ?? null, reason: out.reason });
+      return sendJSON(res, out.reason === 'SEAT_NOT_HUMAN' ? 403 : 401, { error: sessionRefusal[out.reason], code: out.reason });
+    }
+    if (out.replaced) appendSessionEvent(BROWSER_SESSIONS_PATH, { op: 'session-ended', seat: out.replaced, via: 'replaced' });
+    appendSessionEvent(BROWSER_SESSIONS_PATH, { op: 'session-started', seat: out.seat, expiresAt: out.expiresAt, via: 'code' });
+    res.setHeader('Set-Cookie', sessionCookie(out.id));
+    res.setHeader('Cache-Control', 'no-store');
+    return sendJSON(res, 201, { seat: out.seat, createdAt: out.createdAt, expiresAt: out.expiresAt });
+  } catch (e) {
+    if (e?.statusCode === 413) return sendJSON(res, 413, { error: 'Request body too large' });
+    console.error('POST /api/session: the session store could not be written');
+    return sendJSON(res, 500, { error: 'could not start a session; nothing was signed in' });
+  }
+}
+function handleSessionEnd(req, res) {
+  req.resume();
+  res.setHeader('Set-Cookie', clearedCookie());
+  res.setHeader('Cache-Control', 'no-store');
+  const b = req.authBinding;
+  if (!(b && b.via === 'session')) return sendJSON(res, 200, { ended: false, note: 'this browser was not signed in' });
+  try {
+    const row = updateSessionStore(BROWSER_SESSIONS_PATH, (doc) => endSession(doc, b.sessionHash, 'sign-out'));
+    if (row) appendSessionEvent(BROWSER_SESSIONS_PATH, { op: 'session-ended', seat: row.seat, via: 'sign-out' });
+    return sendJSON(res, 200, { ended: !!row, seat: b.seat });
+  } catch {
+    console.error('DELETE /api/session: the session store could not be written');
+    return sendJSON(res, 500, { error: 'the session could not be ended; the cookie was cleared on this browser, and the script\'s --revoke-all ends it on the board' });
+  }
+}
+function handleSessionList(req, res) {
+  try {
+    const doc = BROWSER_SESSIONS.current();
+    const b = req.authBinding;
+    return sendJSON(res, 200, {
+      sessions: listSessions(doc),
+      thisBrowser: b && b.via === 'session' ? { seat: b.seat, createdAt: b.createdAt, expiresAt: b.expiresAt } : null,
+      events: readSessionEvents(BROWSER_SESSIONS_PATH, { limit: 20 }),
+      honestLimit: HONEST_LIMIT,
+    });
+  } catch {
+    return sendJSON(res, 500, { error: 'the session store could not be read' });
+  }
+}
+
 const API_ROUTES = [
+  { method: 'POST',   re: /^\/api\/session$/,              fn: (req, res) => handleSessionStart(req, res) },   // #1906
+  { method: 'DELETE', re: /^\/api\/session$/,              fn: (req, res) => handleSessionEnd(req, res) },     // #1906
+  { method: 'GET',    re: /^\/api\/sessions$/,             fn: (req, res) => handleSessionList(req, res) },    // #1906
   { method: 'GET',    re: /^\/api\/changes$/,              fn: (req, res) => handleChanges(req, res) },
   { method: 'GET',    re: /^\/api\/cursors$/,              fn: (req, res) => handleCursorReport(req, res) },
   { method: 'POST',   re: /^\/api\/cursors\/register$/,    fn: (req, res) => handleCursorRegister(req, res) },
@@ -15078,8 +15173,41 @@ function handleRequest(req, res) {
   // counts the rest; `required` refuses with a status, a code and a sentence
   // naming the seat when it can. /api/health needs nothing in either mode: a
   // liveness probe carries no board content and a proxy must reach it blind.
-  const binding = resolveBearer(req.headers.authorization, seatCredentials());
+  let binding = resolveBearer(req.headers.authorization, seatCredentials());
   if (binding && !binding.seat) { authStats.unknownBearers++; if (binding.reason === 'expired') authStats.expiredBearers++; }
+  // #1906 — A HUMAN'S BROWSER SESSION. A live `mh_session` cookie binds the request to that human seat with the act scope,
+  // exactly as a seat's bearer binds it, so the log-born unit's actorFor records the write from proof. An unknown, ended or
+  // expired cookie binds nothing: the request is anonymous, as before. Two rules close the doors a cookie opens:
+  //   AMBIGUOUS  a cookie and an Authorization header on one request must name the same seat, or the request is refused.
+  //              (Same seat: the bearer's binding stands and the request is not cookie-authenticated.)
+  //   CSRF       a write authenticated by the cookie must be application/json (DELETE included) and carry an Origin, or failing
+  //              that a Referer, naming this board (#1338's hosts, this port). SameSite=Strict is the first wall; SameSite does
+  //              not separate PORTS (a page on another loopback port is the same site), so the origin's port is the second.
+  const sessionId = cookieValue(req.headers.cookie);
+  const session = sessionId ? BROWSER_SESSIONS.resolve(sessionId) : null;
+  let cookieWrite = false;
+  if (session) {
+    if (req.headers.authorization !== undefined) {
+      if (!(binding && binding.seat === session.seat)) {
+        authStats.refused++;
+        req.resume();
+        return sendJSON(res, 401, { error: 'this request carries a browser session and an Authorization header that do not name the same seat; send one or the other', code: 'AUTH_AMBIGUOUS' });
+      }
+    } else {
+      binding = session;
+      cookieWrite = WRITE_METHODS.has(method);
+      setImmediate(() => BROWSER_SESSIONS.touch(session.sessionHash));
+    }
+  }
+  if (cookieWrite) {
+    const ct = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    if (ct !== 'application/json') { req.resume(); return sendJSON(res, 415, { error: 'a write from a signed-in browser must be Content-Type: application/json', code: 'CSRF_CONTENT_TYPE' }); }
+    if (!originAllowed(req.headers, { port: BOUND_PORT, extra: ALLOWED_HOSTS })) {
+      authStats.refused++;
+      req.resume();
+      return sendJSON(res, 403, { error: 'a write from a signed-in browser must come from this board\'s own pages (its Origin, or Referer, names another site or port, or is missing)', code: 'CSRF_ORIGIN' });
+    }
+  }
   const decision = authDecision({ binding, mode: AUTH_MODE, need: needFor(method, urlPath) });
   if (!decision.ok) {
     authStats.refused++;
@@ -15100,6 +15228,40 @@ function handleRequest(req, res) {
     req.auth = strict;
   }
 
+  // #1906 — a cookie write's body is read here, once, so a `by`/`author` naming another seat is refused before any handler
+  // runs (403 SEAT_NOT_SELF: a browser is one person, it relays for nobody). The handler's readBody is answered from the buffer.
+  if (cookieWrite && method !== 'DELETE') {
+    const cap = urlPath === '/api/attachments' ? MAX_ATTACHMENT_BODY_BYTES : MAX_BODY_BYTES;
+    return bufferBody(req, cap).then((buf) => {
+      let parsed = null;
+      try { parsed = JSON.parse(buf.toString('utf8')); } catch { /* not JSON: the handler's own 400 */ }
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        for (const f of ['by', 'author']) {
+          const v = parsed[f];
+          if (typeof v === 'string' && v.trim() && v.trim().toLowerCase() !== session.seat) {
+            return sendJSON(res, 403, { error: `this browser is signed in as ${session.seat}; the body names '${v}' as ${f}. A browser writes only as its own seat.`, code: 'SEAT_NOT_SELF' });
+          }
+        }
+      }
+      req._prebuffered = buf;
+      return routeOnward(method, urlPath, req, res);
+    }, (e) => sendJSON(res, e.statusCode === 413 ? 413 : 400, { error: e.statusCode === 413 ? 'Request body too large' : 'the request body could not be read' }));
+  }
+  return routeOnward(method, urlPath, req, res);
+}
+
+/** #1906 — the whole body, capped, as one Buffer. Past the cap it drains and rejects 413-tagged, as readBody does. */
+function bufferBody(req, cap) {
+  return new Promise((resolve, reject) => {
+    let chunks = [], size = 0, tooBig = false;
+    req.on('data', (c) => { if (tooBig) return; size += c.length; if (size > cap) { tooBig = true; chunks = []; return; } chunks.push(c); });
+    req.on('end', () => (tooBig ? reject(Object.assign(new Error('Request body too large'), { statusCode: 413 })) : resolve(Buffer.concat(chunks))));
+    req.on('error', reject);
+  });
+}
+
+/** The routing below the credential door (split out by #1906 so a buffered cookie write rejoins it). */
+function routeOnward(method, urlPath, req, res) {
   // Granular API (#90) — regex router
   if (routeApi(method, urlPath, req, res)) return;
 

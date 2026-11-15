@@ -255,7 +255,8 @@ test('R6 no code, session id or hash appears in a URL, a log line, a board recor
   const files = walk(dataDir);
   assert.ok(files.includes(store), 'the store is in the data folder');
   for (const f of files) {
-    const text = fs.readFileSync(f, 'latin1');
+    let text;
+    try { text = fs.readFileSync(f, 'latin1'); } catch (e) { if (e.code === 'ENOENT') continue; throw e; }   // a writer's transient lock or temp file
     if (f === store) { found.push(...needles.filter((n) => !/^[0-9a-f]{64}$/.test(n) && text.includes(n)).map(() => 'the store (a value)')); continue; }
     found.push(...hits(path.relative(dataDir, f), text));
   }
