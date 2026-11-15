@@ -53,6 +53,12 @@ export const deliverySuffix = (iri) => (typeof iri === 'string' && DELIVERY_IRI_
 export const deliveryCreateOp = (iri) => `urn:ex:op/delivery/${deliverySuffix(iri)}/create`;
 export const deliveryStepOp = (iri, requestId) => `urn:ex:op/delivery/${deliverySuffix(iri)}/req/${requestId}`;
 export const stepIri = (iri, index) => `${iri}/step/${index}`;
+/**
+ * #1902 — the row's own seat's receipt (`delivery.received`). Its opId names the caller's requestId, as a step's does, under its
+ * own path so the same requestId sent as a step can never read the receipt's outcome as its own.
+ */
+export const deliveryReceivedOp = (iri, requestId) => `urn:ex:op/delivery/${deliverySuffix(iri)}/received/${requestId}`;
+export const receivedIntention = ({ delivery, seat, actor, at, requestId }) => ({ kind: 'delivery.received', opId: deliveryReceivedOp(delivery, requestId), actor, target: delivery, seat, at });
 
 export const modelCallIdOf = (agent, requestId) => uuidV5(MODEL_CALL_NAMESPACE, `${agent}\u0000${requestId}`);
 export const modelCallIriOf = (agent, requestId) => `${MODEL_CALL_PREFIX}${modelCallIdOf(agent, requestId)}`;
@@ -156,6 +162,8 @@ export function deliveryFromRows(iri, nodeRows, stepRows) {
     else if (p === TM.ofConversation) e['scrum:ofConversation'] = o.startsWith(ENTITY_PREFIX) ? o.slice(ENTITY_PREFIX.length) : o;
     else if (p === TM.offeredAt) e['scrum:offeredAt'] = o;
     else if (p === TM.source) e['scrum:source'] = o;
+    else if (p === TM.receivedAt) e['scrum:receivedAt'] = o;   // #1902 — a receipt beside the steps, never one of them
+    else if (p === TM.receivedBy) e['scrum:receivedBy'] = o;
   }
   if (ver == null || !e['scrum:deliveredTo']) return null;   // not a delivery node
   const steps = new Map();

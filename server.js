@@ -5026,8 +5026,11 @@ function deliveryToWire(e) {
       ...(ev['scrum:traceId'] ? { traceId: ev['scrum:traceId'] } : {}),
       ...(ev['scrum:ofModelCall'] ? { modelCall: ev['scrum:ofModelCall'] } : {}),
     })),
+    // #1902 — the row's own seat's receipt: a fact beside the steps, never one of them (not in `events`, not `state`)
+    ...(e['scrum:receivedAt'] ? { received: { by: deliverySeatKey(e['scrum:receivedBy']), at: e['scrum:receivedAt'] } } : {}),
   };
 }
+const deliverySeatKey = (actor) => (typeof actor === 'string' && actor.startsWith('urn:ex:seat/') ? actor.slice('urn:ex:seat/'.length) : actor ?? null);
 
 // ── #1197 — THE MODEL REGISTRY: a model the board can call, as a NODE ────────
 // Every field below is sourced to a failure that happened (the card lists
@@ -6529,7 +6532,9 @@ function deliveryNextEvent(cur, input, modelCall) {
 
 async function handleCreateDeliveryEvent(req, res, id) {
   try {
-    const input = deliveryEventInput(JSON.parse(await readBody(req)));
+    const body = JSON.parse(await readBody(req));
+    if (body && typeof body === 'object' && body.state === 'received') { const r = await deliveryReceived(req, id, body); return sendJSON(res, r.status, r.wire); }
+    const input = deliveryEventInput(body);
     if (!input.ok) return sendJSON(res, input.status, input.wire);
     if (DELIVERIES_UNIT) { const r = await graphDeliveryStep(id, input); return sendJSON(res, r.status, r.wire); }
     const result = await withWriteLock(async () => {
@@ -6559,6 +6564,7 @@ async function handleBatchDeliveryEvents(req, res) {
     const prepared = entries.map((e) => {
       const id = e && typeof e === 'object' && typeof e.id === 'string' && e.id ? e.id : null;
       if (!id) return { id: e?.id ?? null, refused: { status: 400, wire: { error: 'each step names its delivery: id is required' } } };
+      if (e.state === 'received') return { id, refused: { status: 400, wire: { error: RECEIVED_ONE_ROW } } };   // #1902
       const input = deliveryEventInput(e);
       return input.ok ? { id, input } : { id, refused: input };
     });
@@ -6714,6 +6720,59 @@ async function graphDeliveryStep(id, input) {
   }
   if (r.outcome === 'REJECTED') return { status: 500, wire: { error: `the graph refused the step: ${r.reason ?? 'rejected'}` } };
   // UNKNOWN / UNAVAILABLE: it may or may not have landed. The same requestId, resent, reads the outcome back.
+  return deliveryGraphDown(`${String(r.outcome).toLowerCase()}: ${r.reason ?? ''}`.trim() + '; resend with the SAME requestId', { requestId: rid });
+}
+
+/**
+ * #1902 — THE SEAT'S OWN RECEIPT, `{state: 'received', requestId}` on POST /api/deliveries/:id/events, written by the side of
+ * the seat the row is for (its connector) once its runtime holds the post. It is a FACT BESIDE THE STEPS, like the read mark, and
+ * not a step. It is two triples on the delivery node (`delivery.received`), with no step node and no version bump, so it cannot
+ * race the resident runner. A receipt landing between the runner's claimed and its turn-started leaves the version that the
+ * turn-started is guarded on where the claim put it (a step would bump it, and that turn-started would be refused DELIVERY_CHANGED).
+ * It may come at any point of the row's life (before the claim, as the connector sends it, or after, as a retried receipt would),
+ * and makes no step legal or illegal.
+ *
+ * The writer is the request's own credential, judged as a graph write is (LOGBORN.actorFor, so in observe mode the key is judged
+ * as required mode would judge it, and req.auth.enforced never decides), never the body's `by`. Only the row's own seat
+ * (`deliveredTo`) may write it, and another seat is 403 SEAT_NOT_SELF. Once per row, so the same requestId reads its stored
+ * outcome back, and a new one on a row that already holds a receipt answers 200 with the first receipt unchanged. It carries ids
+ * and times only, never text.
+ */
+const RECEIVED_ONE_ROW = 'received is written one row at a time, on POST /api/deliveries/:id/events, with the seat\'s own key';
+async function deliveryReceived(req, id, body) {
+  if (!DELIVERIES_UNIT) return { status: 400, wire: { error: 'received is recorded only where deliveries live in the graph (SCRUM_GRAPH_UNIT_DELIVERIES=1); nothing was written' } };
+  if (!LOGBORN) return deliveryGraphDown('the credential that writes received is judged by the log-born unit (SCRUM_GRAPH_UNIT_LOGBORN), which is off here');
+  const who = LOGBORN.actorFor(req, 'delivery.received');
+  if (who.refused) return { status: who.status ?? 401, wire: { error: `graph write refused: ${who.refused}`, code: who.status === 403 ? 'GRAPH_WRITE_SCOPE' : 'GRAPH_WRITE_UNAUTHENTICATED' } };
+  const seat = typeof who.actor === 'string' && who.actor.startsWith('urn:ex:seat/') ? who.actor.slice('urn:ex:seat/'.length) : null;
+  const rid = body.requestId;
+  if (rid == null) return { status: 400, wire: { error: 'requestId is required: 8-64 of [A-Za-z0-9-], one per intent. A retry of the same receipt sends the same requestId.', code: 'REQUEST_ID_REQUIRED' } };
+  if (typeof rid !== 'string' || !U3.REQUEST_ID_RE.test(rid)) return { status: 400, wire: { error: `requestId must be 8-64 of [A-Za-z0-9-] (got ${JSON.stringify(rid)})`, code: 'REQUEST_ID_INVALID' } };
+  const iri = deliveryIriFromId(id);
+  if (!iri) return { status: 404, wire: { error: `no delivery ${id}` } };
+  const opId = U3.deliveryReceivedOp(iri, rid);
+  const rec = await POSTS_READER.query(U3.receiptQuery(opId));
+  if (!rec.ok) return deliveryGraphDown(rec.reason || 'unreadable', { requestId: rid });
+  const cur = await graphDelivery(iri);
+  if (cur.unavailable) return deliveryGraphDown(cur.unavailable, { requestId: rid });
+  if (!cur.entity) return { status: 404, wire: { error: `no delivery ${id}` } };
+  const to = cur.entity['scrum:deliveredTo'];
+  if (seat !== to) return { status: 403, wire: { error: `this delivery is ${to}'s: only ${to}'s own key records that ${to} received it (the request's key is ${seat ?? 'bound to no seat'})`, code: 'SEAT_NOT_SELF' } };
+  // a retry of this requestId, or a row that already holds a receipt: the first receipt stands
+  if (rec.rows.length || cur.entity['scrum:receivedAt']) {
+    if (cur.entity['scrum:receivedAt']) return { status: 200, wire: deliveryToWire(cur.entity) };
+    return deliveryGraphDown('this requestId has a stored outcome but the row holds no receipt', { requestId: rid });
+  }
+  const at = new Date().toISOString();
+  const r = await ANNOUNCE_EXECUTOR.update(U3.receivedIntention({ delivery: iri, seat, actor: who.actor, at, requestId: rid }));
+  if (r.outcome === 'APPLIED') return { status: 201, wire: deliveryToWire({ ...cur.entity, 'scrum:receivedAt': at, 'scrum:receivedBy': who.actor }) };
+  if (r.outcome === 'PRECONDITION_FAILED' || r.reason === 'intent-collision') {
+    // another receipt for this row landed between the read and this write, or a concurrent copy of this request did: read it back
+    const again = await graphDelivery(iri);
+    if (again.entity?.['scrum:receivedAt']) return { status: 200, wire: deliveryToWire(again.entity) };
+    return deliveryGraphDown(again.unavailable || `the receipt was refused (${r.outcome}) and the row holds none`, { requestId: rid });
+  }
+  if (r.outcome === 'REJECTED') return { status: 500, wire: { error: `the graph refused the receipt: ${r.reason ?? 'rejected'}` } };
   return deliveryGraphDown(`${String(r.outcome).toLowerCase()}: ${r.reason ?? ''}`.trim() + '; resend with the SAME requestId', { requestId: rid });
 }
 

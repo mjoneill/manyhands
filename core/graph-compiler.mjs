@@ -528,7 +528,7 @@ export function staticCheck(sparql, opId) {
 // =====================================================================================
 
 export const RECORD_V = 2;   // 2: memory.revise records the identity it replaces (a MemoryRevision node)
-export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create', 'card.write', 'entity.put', 'origin.prepare', 'refusal.record', 'extraction.publish', 'link.propose', 'link.decide', 'link.show', 'recall.offer', 'recall.open', 'recall.read']);
+export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create', 'card.write', 'entity.put', 'origin.prepare', 'refusal.record', 'extraction.publish', 'link.propose', 'link.decide', 'link.show', 'recall.offer', 'recall.open', 'recall.read', 'delivery.received']);
 
 const RS = 'https://scrumboard.local/ns#';
 const RSC = 'https://schema.org/';
@@ -594,6 +594,9 @@ export const LOGBORN_TERMS = Object.freeze({
   RecallOffer: `${RS}RecallOffer`, offerOn: `${RS}offerOn`, offeredSource: `${RS}offeredSource`,
   RecallOpening: `${RS}RecallOpening`, ofOffer: `${RS}ofOffer`, openedBy: `${RS}openedBy`, openedVia: `${RS}openedVia`,
   RecallRead: `${RS}RecallRead`, readOf: `${RS}readOf`, readBy: `${RS}readBy`,
+  // #1902 — the seat's own receipt for its delivery row: two triples ON the delivery node, beside its steps and never one of them
+  // (no step node, no version bump), so the runner's next legal step and its expected version are unaffected
+  receivedAt: `${RS}receivedAt`, receivedBy: `${RS}receivedBy`,
   // the run activity's input (written by the research verbs, not a record kind): recall.offer binds a claim to its source through it
   used: 'http://www.w3.org/ns/prov#used',
 });
@@ -626,6 +629,7 @@ const RECORD_FIELDS = {
   'recall.offer': ['post', 'offers', 'at'],   // #1689 — the readings one room post was offered, one RecallOffer per source, in ONE update
   'recall.open': ['opening', 'offer', 'via', 'at'],   // #1689 — one offer opened, by a seat or by a browser with no seat
   'recall.read': ['read', 'post', 'at'],      // #1689 — a seat read a post that carried an offer
+  'delivery.received': ['target', 'seat', 'at'],   // #1902 — the row's own seat says its runtime holds the post: a mark ON the row, once
 };
 
 // #1762 S1b — the record kinds whose write records ONE ChangeActivity (part 0) when the intention carries `history`. The
@@ -925,6 +929,14 @@ function canonicalizeRecord(i) {
     const read = checkIri(i.read, 'read');
     if (read !== `https://scrumboard.local/recall/read/${createHash('sha256').update(`${post}\n${actor}`).digest('hex')}`) fail('read must be recall/read/<sha256(post "\\n" actor)>');
     record = { read, post, at: rStr(i.at, 'at') };
+  } else if (i.kind === 'delivery.received') {
+    // #1902 — the actor IS the seat whose row it is: a receipt records what that seat's own side did, never a claim about it
+    const target = checkIri(i.target, 'target');
+    if (!/^https:\/\/scrumboard\.local\/delivery\/[A-Za-z0-9-]{1,64}$/.test(target)) fail('target must be a delivery IRI');
+    const seat = rStr(i.seat, 'seat');
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(seat)) fail('seat must be a seat key');   // core/unit3-graph.mjs SEAT_RE
+    if (actor !== `urn:ex:seat/${seat}`) fail(`actor must be the seat's own (urn:ex:seat/${seat}): a receipt is the seat's act`);
+    record = { target, seat, at: rStr(i.at, 'at') };
   } else if (i.kind === 'post.create') {
     // #1574 C3c — every field comes from the outbox entry's frozen payload plus the two values the server fixed once
     // at the first publish attempt (publicationAt, postSeq). All of it is in `record`, so all of it is digest-covered.
@@ -1328,6 +1340,12 @@ function planRecord(c) {
     fresh.push(R.read);
     add(R.read, TM.type, I(TM.RecallRead)); add(R.read, TM.readOf, I(R.post)); add(R.read, TM.readBy, I(c.actor));
     add(R.read, TM.dateCreated, L(R.at)); add(R.read, TM.recordedBy, ref(c.opId));
+  } else if (c.kind === 'delivery.received') {
+    // #1902 — two triples ON the delivery node, guarded: it is a delivery, it is THIS seat's, and it holds no receipt yet. No
+    // version bump and no step node: the steps the runner drives (offered … published) and their expected version read as before.
+    const D = R.target; target = null;
+    pre.push(`    ${I(D)} ${I(TM.type)} ${I(TM.Delivery)} ; ${I(TM.deliveredTo)} ${L(R.seat)} .`, `    FILTER NOT EXISTS { ${I(D)} ${I(TM.receivedAt)} ?xrc }`);
+    add(D, TM.receivedAt, L(R.at)); add(D, TM.receivedBy, I(c.actor));
   } else if (c.kind === 'post.create') {
     const P = R.post; target = null;   // a create: the post IRI must be fresh
     dispatchHold = `${P.mutationId}:${P.slot}`;   // #1749 A8: the announcement is a dispatch of this obligation
