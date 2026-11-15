@@ -309,6 +309,26 @@ test('I9 PO rule: a bare name makes a row; ashtray is not ash; two seats one eac
   assert.deepEqual(await rowsFor(human.id), [], 'a seat the roster marks kind: human gets no row');
 });
 
+test('I10 an epoch change: the report shows the resync, a new observingSince, and says the gap got no rows', T, async () => {
+  const before = (await call('GET', '/api/seats/attention')).json;
+  assert.ok(before.observingSince, 'PRECONDITION: observing');
+  rest.kill();
+  const file = path.join(DATA, 'seat-inbox-cursor.json');
+  const st = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.match(st.cursor, /^gc1\./, 'PRECONDITION: a live cursor');
+  const parts = st.cursor.split('.'); parts[2] = String(Number(parts[2]) + 7);   // the same store's cursor, under another epoch
+  fs.writeFileSync(file, JSON.stringify({ ...st, cursor: parts.join('.') }));
+  await boot();
+  const r = await until(async () => { const x = await call('GET', '/api/seats/attention'); return x.json?.resyncs?.length ? x : null; }, 20000, 'the resync in the report');
+  const last = r.json.resyncs.at(-1);
+  assert.equal(last.reason, 'POST_CURSOR_EPOCH_CHANGED');
+  assert.equal(r.json.observingSince, last.at, 'observingSince is the time of the resync');
+  assert.ok(Date.parse(r.json.observingSince) > Date.parse(before.observingSince), 'the window moved');
+  assert.match(r.json.resyncsMeans, /no row from this path/);
+  const p = await say('ada', '@gizmo after the resync');
+  await until(() => rowOf('gizmo', p.id), 20000, 'rows resume after the resync');
+});
+
 test('L1 latency of a credentialed single-post GET (printed)', T, async () => {
   const p = await say('ada', '@gizmo latency');
   await until(() => rowOf('gizmo', p.id), 20000, 'the row');

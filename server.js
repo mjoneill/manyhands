@@ -81,7 +81,7 @@ import { moveFenceIds, moveFenceEntity } from './core/move-fences.mjs';   // #17
 import { labelAliasRows, labelAliasEntity, labelAliasIri } from './core/label-aliases.mjs';   // #1640
 import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, auditOutbox, modeProblem, legacyProof, postMatchesEntry, opIdFor, announcePostId, postCreateIntention, obligationIdOf } from './core/announce-outbox.mjs';   // #1574 C3a/C3b/C3c
 import * as U3 from './core/unit3-graph.mjs';   // #1582 — deliveries and model calls in the graph
-import { seatIndex as seatInboxIndex, concernedSeats, createSeatInboxReconciler } from './core/seat-inbox.mjs';   // #1902 — every seat's inbox
+import { seatIndex as seatInboxIndex, concernedSeats, createSeatInboxReconciler, createRetrievalMarker } from './core/seat-inbox.mjs';   // #1902 — every seat's inbox
 import { createGraphClient, setExecutorMeter } from './core/graph-client.mjs';   // #1574 C3b — the conversations unit's executor door
 import { decideIntention as linkDecideIntention, linkCountsQuery, countLinkUse, linkDecisionsQuery, decisionsOfRows, retiringDecision, dismissalCount } from './core/knowledge-linking.mjs';   // #1851, #1850, #1852
 import { deliveryQuery, linksOfDeliveryRows, selectDeliveries, firstShowings, deliverySourcesQuery, sourcesOfRows, deliveryBlock, showIntention, DELIVERY_DEADLINE_MS } from './core/knowledge-delivery.mjs';   // #1852
@@ -6821,9 +6821,17 @@ function startSeatInbox() {
 // mark is evidence the post was RETRIEVED by that seat's key: not that she attended to it, not that a hint ever arrived.
 const LATEST_FETCHED_MIN_MS = Number(process.env.SCRUM_LATEST_FETCHED_MIN_MS ?? 60_000);
 const SEAT_RS = 'https://scrumboard.local/ns#';
-const seatMarksDone = new Set();          // `${post}\0${seat}`: marked, or found marked, in this process (a restart forgets; the graph refuses a repeat)
-const seatFetchesEarly = new Map();       // `${post}\0${seat}` → { at, actor }: a fetch made before its row existed (bounded)
-const SEAT_FETCH_EARLY_MAX = 2000, SEAT_FETCH_EARLY_MS = 15 * 60_000;
+// The read mark's bookkeeping (one attempt per row at a time; retryable unless stored) is core/seat-inbox.mjs's
+// createRetrievalMarker; here are its two graph calls.
+const RETRIEVAL = createRetrievalMarker({
+  rowState: async (seat, postId) => {
+    const iri = U3.deliveryIriOf(seat, postId);
+    const q = await POSTS_READER.query(`SELECT ?ra WHERE { <${iri}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <${SEAT_RS}Delivery> ; <${SEAT_RS}deliveredTo> ${JSON.stringify(seat)} . OPTIONAL { <${iri}> <${SEAT_RS}retrievedAt> ?ra } }`);
+    if (!q.ok) throw new Error(`whether ${seat} has a row for ${postId} could not be read: ${q.reason}`);
+    return !q.rows.length ? 'none' : q.rows.some((r) => r.ra) ? 'marked' : 'unmarked';
+  },
+  write: (seat, actor, postId, at) => LOGBORN.write(U3.retrievedIntention({ delivery: U3.deliveryIriOf(seat, postId), seat, actor, at })),
+});
 const latestFetchedState = new Map();     // seat → { loaded, sentSeq, lastWriteAt, pending, timer }
 const seatKeyOfActor = (actor) => (typeof actor === 'string' && actor.startsWith('urn:ex:seat/') ? actor.slice('urn:ex:seat/'.length) : null);
 function seatFetchCounts(seat) {
@@ -6842,41 +6850,13 @@ function noteSeatFetch(req, shown) {
   if (!DELIVERIES_UNIT) return;
   setImmediate(() => {
     noteLatestFetched(seat, actor, shown, at);
-    if (U3.POST_ID_RE.test(shown.id)) markRetrieved(seat, actor, shown.id, at).catch((e) => console.error(`[#1902] the read mark for ${shown.id} by ${seat} was not recorded: ${e?.message ?? e}`));
+    if (U3.POST_ID_RE.test(shown.id)) RETRIEVAL.fetched(seat, actor, shown.id, at).catch((e) => console.error(`[#1902] the read mark for ${shown.id} by ${seat} was not recorded: ${e?.message ?? e}`));
   });
-}
-/** One READ to learn whether the seat has an unmarked row for the post; a write only when it does. */
-async function markRetrieved(seat, actor, postId, at) {
-  const key = `${postId}\u0000${seat}`;
-  if (seatMarksDone.has(key)) return;
-  const iri = U3.deliveryIriOf(seat, postId);
-  const q = await POSTS_READER.query(`SELECT ?ra WHERE { <${iri}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <${SEAT_RS}Delivery> ; <${SEAT_RS}deliveredTo> ${JSON.stringify(seat)} . OPTIONAL { <${iri}> <${SEAT_RS}retrievedAt> ?ra } }`);
-  if (!q.ok) { console.error(`[#1902] whether ${seat} has a row for ${postId} could not be read; no mark: ${q.reason}`); return; }
-  if (!q.rows.length) {   // no row yet: remembered, so a row the reconciler makes in the next moments still gets this fetch's mark
-    if (seatFetchesEarly.size >= SEAT_FETCH_EARLY_MAX) seatFetchesEarly.delete(seatFetchesEarly.keys().next().value);
-    seatFetchesEarly.set(key, { at, actor });
-    return;
-  }
-  if (q.rows.some((r) => r.ra)) { seatMarksDone.add(key); return; }
-  await writeRetrieved(seat, actor, postId, at);
-}
-async function writeRetrieved(seat, actor, postId, at) {
-  const key = `${postId}\u0000${seat}`;
-  seatMarksDone.add(key);
-  const r = await LOGBORN.write(U3.retrievedIntention({ delivery: U3.deliveryIriOf(seat, postId), seat, actor, at }));
-  // PRECONDITION_FAILED: already marked (or the row is gone); an intent collision: this row's mark was sent before with another time
-  if (r.outcome === 'APPLIED' || r.outcome === 'PRECONDITION_FAILED' || r.reason === 'intent-collision') return;
-  seatMarksDone.delete(key);
-  console.error(`[#1902] the read mark for ${postId} by ${seat} was not recorded: ${r.outcome}${r.reason ? ` ${r.reason}` : ''}`);
 }
 /** The reconciler made a row: if its seat had already fetched the post, the row gets that fetch's mark (its time, its actor). */
 function seatFetchAfterOffer(seat, postId) {
-  const key = `${postId}\u0000${seat}`;
-  const f = seatFetchesEarly.get(key);
-  if (!f) return;
-  seatFetchesEarly.delete(key);
-  if (Date.now() - Date.parse(f.at) > SEAT_FETCH_EARLY_MS || !LOGBORN) return;
-  writeRetrieved(seat, f.actor, postId, f.at).catch((e) => console.error(`[#1902] the read mark for ${postId} by ${seat} was not recorded: ${e?.message ?? e}`));
+  if (!LOGBORN) return;
+  RETRIEVAL.offered(seat, postId).catch((e) => console.error(`[#1902] the read mark for ${postId} by ${seat} was not recorded: ${e?.message ?? e}`));
 }
 /**
  * latestFetched: the newest ROOM post (not a card thread's) this seat's credential has fetched. A MAXIMUM, never coverage.
@@ -7001,6 +6981,8 @@ async function attentionReport() {
   return {
     at: new Date(now).toISOString(), observingSince,
     window: observingSince ? 'rows offered since observingSince, when this board began recording retrievals' : 'the seat inbox reconciler is not running here: rows offered in the last 24 hours',
+    resyncs: SEAT_INBOX?.state()?.resyncs ?? [],
+    resyncsMeans: 'Each time the reconciler\'s cursor belonged to another store or epoch (reason), it restarted at the feed\'s tip at that time: posts committed between the old cursor and the new tip got no row from this path, and observingSince restarted there.',
     observingSinceMeans: 'When the reconciler began reading the commit feed from its saved cursor. If seat-inbox-cursor.json is lost, it restarts at the feed\'s tip and this time moves to that restart: posts committed in the gap get no row from this path.',
     room: roomLatest ? { latestSeq: roomLatest.seq, latestAt: roomLatest.at, latestPost: roomLatest.id } : { latestSeq: null, latestAt: null },
     seats: out,

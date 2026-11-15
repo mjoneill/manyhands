@@ -89,7 +89,7 @@ export function concernedSeats(post, { index, talk = null } = {}) {
  * A cursor from another store or epoch (409 POST_CURSOR_EPOCH_CHANGED) also restarts at the tip, and says so in the state.
  */
 export function createSeatInboxReconciler({ readPage, concerns, offer, store, onOffered = () => {}, tickMs = 10_000, maxPagesPerTick = 20, log = (m) => console.error(m), now = () => new Date().toISOString() }) {
-  let state = null;      // { v, cursor, observingSince, resyncs: [{at, why}] }
+  let state = null;      // { v, cursor, observingSince, resyncs: [{at, reason}] }
   let running = null;    // the tick in flight
   let again = false;     // a kick arrived while a tick ran
   let timer = null;
@@ -101,7 +101,7 @@ export function createSeatInboxReconciler({ readPage, concerns, offer, store, on
     let s = null;
     try { s = store.read(); } catch (e) { log(`[#1902] seat inbox cursor unreadable, starting at the tip: ${e?.message ?? e}`); }
     state = s && typeof s === 'object' && s.v === 1
-      ? { v: 1, cursor: typeof s.cursor === 'string' ? s.cursor : null, observingSince: typeof s.observingSince === 'string' ? s.observingSince : now(), resyncs: Array.isArray(s.resyncs) ? s.resyncs.slice(-10) : [] }
+      ? { v: 1, cursor: typeof s.cursor === 'string' ? s.cursor : null, observingSince: typeof s.observingSince === 'string' ? s.observingSince : now(), resyncs: Array.isArray(s.resyncs) ? s.resyncs.slice(-10).map((x) => ({ at: x?.at ?? null, reason: x?.reason ?? x?.why ?? null })) : [] }
       : { v: 1, cursor: null, observingSince: now(), resyncs: [] };
   }
 
@@ -118,7 +118,13 @@ export function createSeatInboxReconciler({ readPage, concerns, offer, store, on
       try { page = await readPage(state.cursor); } catch (e) {
         if (e?.body?.code === 'POST_CURSOR_EPOCH_CHANGED') {
           log(`[#1902] seat inbox cursor belongs to another store or epoch; restarting at the tip (posts committed in between are NOT offered by this path): ${e.body.error ?? ''}`);
-          state.resyncs = [...state.resyncs, { at: now(), why: e.body.code }].slice(-10); state.cursor = null; save();
+          // review: the OBSERVATION WINDOW restarts too. Posts between the old cursor and the new tip get no row from this
+          // path, so a window that kept its old start would claim coverage it does not have.
+          const at = now();
+          state.resyncs = [...state.resyncs, { at, reason: e.body.code }].slice(-10); state.observingSince = at;
+          // the new tip is read NOW, in this tick, so the gap ends at the resync and not at the next tick
+          const tip = await readPage('tip');
+          state.cursor = tip.nextAfterCommit; save();
           return;
         }
         throw e;
@@ -158,4 +164,57 @@ export function createSeatInboxReconciler({ readPage, concerns, offer, store, on
     state: () => (state ? { ...state } : null),
     stats: () => ({ ...stats }),
   };
+}
+
+/**
+ * #1902 — THE READ MARK's bookkeeping, with its storage injected so its failure paths can be tested:
+ *   rowState(seat, postId) → 'none' | 'unmarked' | 'marked'   (one READ; throws when the graph cannot answer)
+ *   write(seat, actor, postId, at) → { outcome, reason? }       (the delivery.retrieved write)
+ * fetched(): after a seat's credentialed fetch. A row that is unmarked gets ONE write; no row → the fetch is remembered
+ * (bounded) so offered() can mark the row the reconciler makes a moment later.
+ */
+export function createRetrievalMarker({ rowState, write, log = (m) => console.error(m), earlyMax = 2000, earlyMs = 15 * 60_000, nowMs = Date.now }) {
+  const done = new Set();         // marked, or found marked: nothing more to do in this process
+  const inFlight = new Map();     // key → the one attempt running now (its read and its write), joined by a concurrent fetch
+  const early = new Map();
+  const keyOf = (seat, postId) => `${postId}\u0000${seat}`;
+  /** One attempt per key at a time. `done` is set only on a terminal outcome, so a write that throws or is not stored
+   *  leaves the row retryable by the next fetch (review: a thrown write used to suppress every later attempt). */
+  function once(key, fn) {
+    if (done.has(key)) return Promise.resolve();
+    const running = inFlight.get(key);
+    if (running) return running;
+    const p = (async () => { try { await fn(); } finally { inFlight.delete(key); } })();
+    inFlight.set(key, p);
+    return p;
+  }
+  async function writeMark(key, seat, actor, postId, at) {
+    const r = await write(seat, actor, postId, at);
+    // PRECONDITION_FAILED: already marked (or the row is gone); an intent collision: this row's mark was sent before
+    if (r?.outcome === 'APPLIED' || r?.outcome === 'PRECONDITION_FAILED' || r?.reason === 'intent-collision') { done.add(key); return; }
+    log(`[#1902] the read mark for ${postId} by ${seat} was not recorded: ${r?.outcome}${r?.reason ? ` ${r.reason}` : ''}`);
+  }
+  function fetched(seat, actor, postId, at) {
+    const key = keyOf(seat, postId);
+    return once(key, () => fetchedOnce(key, seat, actor, postId, at));
+  }
+  async function fetchedOnce(key, seat, actor, postId, at) {
+    const st = await rowState(seat, postId);
+    if (st === 'none') {
+      if (early.size >= earlyMax) early.delete(early.keys().next().value);
+      early.set(key, { at, actor, atMs: nowMs() });
+      return;
+    }
+    if (st === 'marked') { done.add(key); return; }
+    await writeMark(key, seat, actor, postId, at);
+  }
+  function offered(seat, postId) {
+    const key = keyOf(seat, postId);
+    const f = early.get(key);
+    if (!f) return Promise.resolve();
+    early.delete(key);
+    if (nowMs() - f.atMs > earlyMs) return Promise.resolve();
+    return once(key, () => writeMark(key, seat, f.actor, postId, f.at));
+  }
+  return { fetched, offered };
 }

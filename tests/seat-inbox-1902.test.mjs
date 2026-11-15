@@ -26,7 +26,7 @@ import fs from 'node:fs';
 import { createGraphClient, WRITE_PROTOCOL, WRITE_PROTOCOL_HEADER } from '../core/graph-client.mjs';
 import { compile } from '../core/graph-compiler.mjs';
 import { HAVE_PY, PY, startExecutor, killExecutor, tmpStore } from './helpers/graph-executor-proc.mjs';
-import { seatIndex, mentionedSeats, concernedSeats } from '../core/seat-inbox.mjs';
+import { seatIndex, mentionedSeats, concernedSeats, createSeatInboxReconciler, createRetrievalMarker } from '../core/seat-inbox.mjs';
 import { deliveryIriOf, deliveryQuery, splitDeliveryRows, deliveryFromRows, retrievedIntention, latestFetchedIntention, latestFetchedIri } from '../core/unit3-graph.mjs';
 
 const SKIP = HAVE_PY ? false : `UNAVAILABLE: no python with pyoxigraph at ${PY} (a skip is not a pass)`;
@@ -85,6 +85,61 @@ test('C3 a talk\'s participants other than the author; a redacted post concerns 
   assert.deepEqual(concernedSeats(post('reply', { author: 'gizmo', conversation: 't1' }), { index: IX, talk }), ['ada']);
   assert.deepEqual(concernedSeats(post('room post', { conversation: null }), { index: IX, talk }), [], 'a talk is used only for a post in it');
   assert.deepEqual(concernedSeats({ id: 'x', redacted: true, body: null, author: 'redacted' }, { index: IX }), []);
+});
+
+// ── review fixes: a failed mark write is retried; an epoch reset restarts the observation window ──────────────────────────
+test('M1 a retrieval write that THROWS does not suppress the next attempt; the row ends up marked', async () => {
+  let calls = 0; let marked = false;
+  const m = createRetrievalMarker({
+    rowState: async () => (marked ? 'marked' : 'unmarked'),
+    write: async () => { calls += 1; if (calls === 1) throw new Error('injected: the write threw'); marked = true; return { outcome: 'APPLIED' }; },
+    log: () => {},
+  });
+  await assert.rejects(m.fetched('gizmo', 'urn:ex:seat/gizmo', 'p1', '2026-11-15T03:00:00.000Z'), /injected/, 'the caller sees the throw (and logs it)');
+  assert.equal(calls, 1, 'PRECONDITION: the first write was attempted and threw');
+  assert.equal(marked, false);
+  await m.fetched('gizmo', 'urn:ex:seat/gizmo', 'p1', '2026-11-15T03:00:01.000Z');
+  assert.equal(calls, 2, 'the second fetch makes a second write call');
+  assert.equal(marked, true, 'and the row ends up marked');
+  await m.fetched('gizmo', 'urn:ex:seat/gizmo', 'p1', '2026-11-15T03:00:02.000Z');
+  assert.equal(calls, 2, 'once marked, a further fetch writes nothing');
+});
+
+test('M2 two concurrent fetches of one unmarked row make ONE write; a refused (non-terminal) outcome is retried too', async () => {
+  let calls = 0; let release; const gate = new Promise((r) => { release = r; });
+  const m = createRetrievalMarker({ rowState: async () => 'unmarked', write: async () => { calls += 1; await gate; return calls === 1 ? { outcome: 'UNAVAILABLE' } : { outcome: 'APPLIED' }; }, log: () => {} });
+  const a = m.fetched('gizmo', 'urn:ex:seat/gizmo', 'p2', 't1'); const b = m.fetched('gizmo', 'urn:ex:seat/gizmo', 'p2', 't2');
+  await new Promise((r) => setImmediate(r)); release(); await Promise.all([a, b]);
+  assert.equal(calls, 1, 'one write for two concurrent fetches');
+  await m.fetched('gizmo', 'urn:ex:seat/gizmo', 'p2', 't3');
+  assert.equal(calls, 2, 'an UNAVAILABLE outcome leaves the row retryable');
+});
+
+test('M3 a fetch before the row exists marks the row when it is offered; with no row nothing is written', async () => {
+  let calls = 0; let exists = false;
+  const m = createRetrievalMarker({ rowState: async () => (exists ? 'unmarked' : 'none'), write: async (seat, actor, post, at) => { calls += 1; assert.equal(at, 'early'); return { outcome: 'APPLIED' }; }, log: () => {} });
+  await m.fetched('gizmo', 'urn:ex:seat/gizmo', 'p3', 'early');
+  assert.equal(calls, 0, 'no row, no write');
+  exists = true; await m.offered('gizmo', 'p3');
+  assert.equal(calls, 1, 'the row made later carries the earlier fetch\'s mark');
+});
+
+test('R1 an epoch change restarts at the tip AND restarts the observation window; the resync is recorded', async () => {
+  let saved = { v: 1, cursor: 'gc1.old', observingSince: '2026-11-01T00:00:00.000Z', resyncs: [] };
+  let t = 0; const now = () => `2026-11-15T03:00:0${t++}.000Z`;
+  const r = createSeatInboxReconciler({
+    readPage: async (after) => {
+      if (after === 'gc1.old') throw Object.assign(new Error('epoch'), { status: 409, body: { code: 'POST_CURSOR_EPOCH_CHANGED', error: 'another store' } });
+      if (after === 'tip') return { conversations: [], nextAfterCommit: 'gc1.new' };
+      return { conversations: [], nextAfterCommit: after };
+    },
+    concerns: () => [], offer: async () => ({ ok: true }), store: { read: () => saved, write: (s) => { saved = JSON.parse(JSON.stringify(s)); } }, log: () => {}, now,
+  });
+  await r.tick(); await r.tick();
+  assert.equal(saved.cursor, 'gc1.new', 'jumped to the new tip');
+  assert.notEqual(saved.observingSince, '2026-11-01T00:00:00.000Z', 'the old window is not kept');
+  assert.equal(saved.observingSince, saved.resyncs.at(-1).at, 'observingSince is the time of the resync');
+  assert.equal(saved.resyncs.length, 1); assert.equal(saved.resyncs[0].reason, 'POST_CURSOR_EPOCH_CHANGED');
 });
 
 // ── the two record kinds ──────────────────────────────────────────────────────────────────────────────────────────────
