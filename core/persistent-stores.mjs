@@ -84,6 +84,8 @@ export const PERSISTENT_STORES = [
     why: 'Ambient recall\'s read cache of the graph\'s scrum:RecallOffer nodes, keyed by post (#1689), so a post read adds no executor query. Rebuilt from the graph with one query when it is missing; added to when an offer write is APPLIED.' },
   { match: 'knowledge-recall.json', kind: 'CONFIG', env: null,
     why: 'Ambient recall\'s settings (#1689): the bar, how many items, the quiet window, the shortest post and the deadline. A tracked file at the repo root, strict like knowledge-linking.json: a missing or invalid file turns recall off and says why.' },
+  { match: 'seat-inbox-cursor.json', kind: 'PROJECTION', env: null,
+    why: 'The seat inbox reconciler\'s place in the commit-ordered post feed (#1902), and the time it began observing. The rows it writes are graph nodes (scrum:Delivery, derived per seat and post), so a re-read of the feed makes the same rows, never a second one. Losing it restarts the reconciler at the feed\'s TIP: posts committed while it was missing are not offered by this path (the MCP hint still offers a channel resident\'s), and the report\'s observingSince moves to the restart.' },
   { match: 'tending-provenance.json', kind: 'PROJECTION', env: 'SCRUM_TENDING_PROVENANCE_FILE',
     why: 'What the tending loop has already said, so it does not repeat itself. Derived from tending state.' },
   { match: 'roster.json', kind: 'CONFIG', env: 'SCRUM_ROSTER_FILE',

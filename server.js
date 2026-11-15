@@ -35,7 +35,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { isOpenDelivery } from './core/delivery.mjs';   // #1346
+import { isOpenDelivery, classifyDeliveries } from './core/delivery.mjs';   // #1346; classifyDeliveries: #1902's report
 import { exportableSpaces, resolveSpaces, describeExportSet } from './core/export-spaces.mjs';   // #1321
 import { loadDomain, loadDomainShared, saveDomain } from './core/store.mjs';
 import { validateCompare, evaluateCompareAsync } from './core/check-compare.mjs';   // #1610; #1643 one async form serves both sources
@@ -81,6 +81,7 @@ import { moveFenceIds, moveFenceEntity } from './core/move-fences.mjs';   // #17
 import { labelAliasRows, labelAliasEntity, labelAliasIri } from './core/label-aliases.mjs';   // #1640
 import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, auditOutbox, modeProblem, legacyProof, postMatchesEntry, opIdFor, announcePostId, postCreateIntention, obligationIdOf } from './core/announce-outbox.mjs';   // #1574 C3a/C3b/C3c
 import * as U3 from './core/unit3-graph.mjs';   // #1582 — deliveries and model calls in the graph
+import { seatIndex as seatInboxIndex, concernedSeats, createSeatInboxReconciler } from './core/seat-inbox.mjs';   // #1902 — every seat's inbox
 import { createGraphClient, setExecutorMeter } from './core/graph-client.mjs';   // #1574 C3b — the conversations unit's executor door
 import { decideIntention as linkDecideIntention, linkCountsQuery, countLinkUse, linkDecisionsQuery, decisionsOfRows, retiringDecision, dismissalCount } from './core/knowledge-linking.mjs';   // #1851, #1850, #1852
 import { deliveryQuery, linksOfDeliveryRows, selectDeliveries, firstShowings, deliverySourcesQuery, sourcesOfRows, deliveryBlock, showIntention, DELIVERY_DEADLINE_MS } from './core/knowledge-delivery.mjs';   // #1852
@@ -573,6 +574,7 @@ if (PORT !== DEFAULT_PORT && !declaresTarget) {
 // the reliability backstop. Critically, a down/absent MCP server must NEVER
 // break posting, so the fetch is not awaited and every error is swallowed.
 function notifyMcpOfPost(conversation) {
+  SEAT_INBOX?.kick();   // #1902 — a committed post: the reconciler reads the feed now rather than at its next tick
   if (!MCP_NOTIFY_URL) return Promise.resolve(false);
   // #1574 1b — returns a promise (true when the endpoint answered) so the announcement publisher can AWAIT its
   // dispatch before recording completion. Every other caller still fires and forgets, exactly as before.
@@ -1259,6 +1261,8 @@ function urlShapeForLog(url) {
 
 /** #1561 — the log-born unit's runtime when SCRUM_GRAPH_UNIT_LOGBORN=1 (set beside GRAPH_SLICE); null = today's paths. */
 let LOGBORN = null;
+const SEAT_LAST_CREDENTIALED = new Map();   // #1902 — seat → the time of its last request with a matched key, this process
+let SEAT_INBOX = null;   // #1902 — the commit-feed reconciler (core/seat-inbox.mjs), when the deliveries unit runs
 setLegacyContext(() => requestContext.getStore());   // #1558 — per-request legacy-path counters
 let _sharedBoard = null;   // { file, key, board, builtMs, builtAt } — one per file identity
 
@@ -5003,7 +5007,8 @@ const DELIVERY_CLAIMABLE = new Set(['offered', 'queued', 'failed']);
 const deliveryOpen = (e) => isOpenDelivery(deliveryToWire(e));
 // #1362 — `ring`: an offer made by the token ring's direct segment (the residents'
 // end-of-cycle slot), so a ledger row can say which policy delivered it.
-const DELIVERY_SOURCES = new Set(['fanout', 'guest-runner', 'presence-bridge', 'ring']);
+// #1902 — `commit-feed`: an offer made by REST's own reconciler from the commit-ordered post feed (core/seat-inbox.mjs).
+const DELIVERY_SOURCES = new Set(['fanout', 'guest-runner', 'presence-bridge', 'ring', 'commit-feed']);
 // What each step may follow. `claimed` is DELIVERY_CLAIMABLE above.
 const DELIVERY_NEXT = {
   offered: new Set(['offered', 'queued']), queued: new Set(['offered', 'queued']),
@@ -5026,6 +5031,8 @@ function deliveryToWire(e) {
       ...(ev['scrum:traceId'] ? { traceId: ev['scrum:traceId'] } : {}),
       ...(ev['scrum:ofModelCall'] ? { modelCall: ev['scrum:ofModelCall'] } : {}),
     })),
+    // #1902 — retrieved by the seat's own credential: a fact beside the steps, never one of them (not in `events`, not `state`)
+    ...(e['scrum:retrievedAt'] ? { retrieved: { by: seatKeyOfActor(e['scrum:retrievedBy']) ?? e['scrum:retrievedBy'] ?? null, at: e['scrum:retrievedAt'] } } : {}),
   };
 }
 
@@ -6754,6 +6761,265 @@ async function graphListDeliveries(q) {
   if (q.open === '1' || q.open === 'true') out = out.filter(deliveryOpen);
   out = sortDeliveryWire(out.map(deliveryToWire));
   return { status: 200, wire: { deliveries: out, count: out.length } };
+}
+
+// ── #1902 — EVERY SEAT'S INBOX: rows from the commit feed (core/seat-inbox.mjs holds the rules) ─────────────────────────
+// REST owns the post write and reads the commit-ordered feed (core/post-discovery.mjs) itself, so it offers each committed
+// post to the seats it concerns, from a persisted cursor. The MCP hint stays as it is: a row's identity is derived from
+// (seat, post), so both producers may offer the same post and there is still one row. Off with SCRUM_SEAT_INBOX=0.
+// ⚠️ CURSOR LOSS: seat-inbox-cursor.json is a projection. If it is lost (or names another store or epoch) the reconciler
+// restarts at the feed's TIP, and posts committed in that gap get NO row from this path (a channel resident's may still come
+// from the MCP hint). The report's observingSince moves to the restart, so the gap is visible there, never silently counted.
+const SEAT_INBOX_FILE = path.join(DATA_DIR, 'seat-inbox-cursor.json');
+const SEAT_INBOX_FEED_LIMIT = 200;
+function seatInboxStore() {
+  return {
+    read: () => { try { return JSON.parse(fs.readFileSync(SEAT_INBOX_FILE, 'utf8')); } catch (e) { if (e.code === 'ENOENT') return null; throw e; } },
+    write: (state) => { const tmp = `${SEAT_INBOX_FILE}.tmp-${process.pid}`; fs.writeFileSync(tmp, `${JSON.stringify(state)}\n`); fs.renameSync(tmp, SEAT_INBOX_FILE); },
+  };
+}
+function seatInboxConcerns(post) {
+  const index = seatInboxIndex(currentRoster() || {});
+  let talk = null;
+  if (typeof post?.conversation === 'string' && post.conversation) {
+    try { const t = talksOf(readBoard()).find((e) => talkIdOf(e) === post.conversation); if (t) talk = { with: t['scrum:with'] ?? null, openedBy: t.creator ?? null }; }
+    catch (e) { console.error(`[#1902] the talk of ${post.id} could not be read; its participants are not offered it: ${e.message}`); }
+  }
+  return concernedSeats(post, { index, talk });
+}
+async function seatInboxOffer(seat, postId) {
+  let r;
+  try { r = await graphCreateDelivery({ by: 'board', to: seat, conversation: postId, source: 'commit-feed' }); }
+  catch (e) { return { ok: false, why: e?.message ?? String(e) }; }
+  if (r.status === 201) return { ok: true, created: true };
+  if (r.status === 200) return { ok: true, created: false };
+  // a redacted post is offered to no one new; a post or seat REST refuses as malformed will never become offerable: skip both
+  if (r.status === 409 || r.status === 400) { console.error(`[#1902] ${postId} not offered to ${seat}: ${r.wire?.error ?? r.status}`); return { ok: true, created: false }; }
+  return { ok: false, why: `${r.status} ${r.wire?.error ?? ''}`.trim() };
+}
+function startSeatInbox() {
+  if (!DELIVERIES_UNIT || !ANNOUNCE_EXECUTOR) return;
+  if (process.env.SCRUM_SEAT_INBOX === '0') { console.error(`${new Date().toISOString()} #1902 seat inbox reconciler OFF (SCRUM_SEAT_INBOX=0): rows come only from the MCP hint`); return; }
+  SEAT_INBOX = createSeatInboxReconciler({
+    readPage: async (after) => {
+      try { return await postFeed(POSTS_BULK_READER || ANNOUNCE_EXECUTOR, { after, limit: SEAT_INBOX_FEED_LIMIT, filters: {}, snapshotClient: POSTS_SNAPSHOT_READER }); }
+      catch (e) { if (e instanceof DiscoveryError) throw Object.assign(new Error(e.body?.error ?? e.message), { status: e.status, body: e.body }); throw e; }
+    },
+    concerns: seatInboxConcerns,
+    offer: seatInboxOffer,
+    onOffered: (seat, postId, created) => { if (created) seatFetchAfterOffer(seat, postId); },
+    store: seatInboxStore(),
+    tickMs: Number(process.env.SCRUM_SEAT_INBOX_TICK_MS ?? 10_000),
+  });
+  SEAT_INBOX.start();
+  console.error(`${new Date().toISOString()} #1902 seat inbox reconciler ON: every committed post is offered to the seats it concerns (${SEAT_INBOX_FILE})`);
+}
+
+// ── #1902 — WHAT A SEAT'S OWN CREDENTIAL RETRIEVED: a mark on its row, and the newest post it has fetched ─────────────────
+// Both are written AFTER the answer and never awaited, the way recall's seat read is, under the credential's own actor
+// (deliverySeat: LOGBORN.actorFor judges the request's key as required mode would; req.auth.enforced never decides). The
+// mark is evidence the post was RETRIEVED by that seat's key: not that she attended to it, not that a hint ever arrived.
+const LATEST_FETCHED_MIN_MS = Number(process.env.SCRUM_LATEST_FETCHED_MIN_MS ?? 60_000);
+const SEAT_RS = 'https://scrumboard.local/ns#';
+const seatMarksDone = new Set();          // `${post}\0${seat}`: marked, or found marked, in this process (a restart forgets; the graph refuses a repeat)
+const seatFetchesEarly = new Map();       // `${post}\0${seat}` → { at, actor }: a fetch made before its row existed (bounded)
+const SEAT_FETCH_EARLY_MAX = 2000, SEAT_FETCH_EARLY_MS = 15 * 60_000;
+const latestFetchedState = new Map();     // seat → { loaded, sentSeq, lastWriteAt, pending, timer }
+const seatKeyOfActor = (actor) => (typeof actor === 'string' && actor.startsWith('urn:ex:seat/') ? actor.slice('urn:ex:seat/'.length) : null);
+function seatFetchCounts(seat) {
+  if (!seat || EXCLUDED_IDENTITIES.includes(seat) || !U3.SEAT_RE.test(seat)) return false;
+  const v = (currentRoster() || {})[seat];
+  return !(v && v.kind === 'system');   // the board's own voices never fetch "as a seat"
+}
+function noteSeatFetch(req, shown) {
+  if (!LOGBORN || !shown || typeof shown !== 'object' || shown.redacted || typeof shown.id !== 'string') return;
+  const actor = recallSeatActor(req);
+  const seat = seatKeyOfActor(actor);
+  if (!seat || !seatFetchCounts(seat)) return;
+  const at = new Date().toISOString();
+  // Both are recorded only where the deliveries unit runs: that is where the rows live and where the attention report reads
+  // them. Elsewhere a seat's fetch costs exactly what it cost before this slice.
+  if (!DELIVERIES_UNIT) return;
+  setImmediate(() => {
+    noteLatestFetched(seat, actor, shown, at);
+    if (U3.POST_ID_RE.test(shown.id)) markRetrieved(seat, actor, shown.id, at).catch((e) => console.error(`[#1902] the read mark for ${shown.id} by ${seat} was not recorded: ${e?.message ?? e}`));
+  });
+}
+/** One READ to learn whether the seat has an unmarked row for the post; a write only when it does. */
+async function markRetrieved(seat, actor, postId, at) {
+  const key = `${postId}\u0000${seat}`;
+  if (seatMarksDone.has(key)) return;
+  const iri = U3.deliveryIriOf(seat, postId);
+  const q = await POSTS_READER.query(`SELECT ?ra WHERE { <${iri}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <${SEAT_RS}Delivery> ; <${SEAT_RS}deliveredTo> ${JSON.stringify(seat)} . OPTIONAL { <${iri}> <${SEAT_RS}retrievedAt> ?ra } }`);
+  if (!q.ok) { console.error(`[#1902] whether ${seat} has a row for ${postId} could not be read; no mark: ${q.reason}`); return; }
+  if (!q.rows.length) {   // no row yet: remembered, so a row the reconciler makes in the next moments still gets this fetch's mark
+    if (seatFetchesEarly.size >= SEAT_FETCH_EARLY_MAX) seatFetchesEarly.delete(seatFetchesEarly.keys().next().value);
+    seatFetchesEarly.set(key, { at, actor });
+    return;
+  }
+  if (q.rows.some((r) => r.ra)) { seatMarksDone.add(key); return; }
+  await writeRetrieved(seat, actor, postId, at);
+}
+async function writeRetrieved(seat, actor, postId, at) {
+  const key = `${postId}\u0000${seat}`;
+  seatMarksDone.add(key);
+  const r = await LOGBORN.write(U3.retrievedIntention({ delivery: U3.deliveryIriOf(seat, postId), seat, actor, at }));
+  // PRECONDITION_FAILED: already marked (or the row is gone); an intent collision: this row's mark was sent before with another time
+  if (r.outcome === 'APPLIED' || r.outcome === 'PRECONDITION_FAILED' || r.reason === 'intent-collision') return;
+  seatMarksDone.delete(key);
+  console.error(`[#1902] the read mark for ${postId} by ${seat} was not recorded: ${r.outcome}${r.reason ? ` ${r.reason}` : ''}`);
+}
+/** The reconciler made a row: if its seat had already fetched the post, the row gets that fetch's mark (its time, its actor). */
+function seatFetchAfterOffer(seat, postId) {
+  const key = `${postId}\u0000${seat}`;
+  const f = seatFetchesEarly.get(key);
+  if (!f) return;
+  seatFetchesEarly.delete(key);
+  if (Date.now() - Date.parse(f.at) > SEAT_FETCH_EARLY_MS || !LOGBORN) return;
+  writeRetrieved(seat, f.actor, postId, f.at).catch((e) => console.error(`[#1902] the read mark for ${postId} by ${seat} was not recorded: ${e?.message ?? e}`));
+}
+/**
+ * latestFetched: the newest ROOM post (not a card thread's) this seat's credential has fetched. A MAXIMUM, never coverage.
+ * Written only when it moves up, at most once per LATEST_FETCHED_MIN_MS per seat: a move inside the interval is held and
+ * written when it ends. The value already in the graph is read once per seat per process, so a restart does not send a
+ * write the graph would refuse.
+ */
+function noteLatestFetched(seat, actor, post, at) {
+  const seq = post.postSeq;
+  if (!Number.isSafeInteger(seq) || seq <= 0 || post.attachedTo) return;
+  let st = latestFetchedState.get(seat);
+  if (!st) { st = { loaded: null, sentSeq: 0, lastWriteAt: 0, pending: null, timer: null }; latestFetchedState.set(seat, st); }
+  if (seq <= Math.max(st.sentSeq, st.pending?.seq ?? 0)) return;
+  st.pending = { seq, post: post.id, postAt: typeof post.createdAt === 'string' ? post.createdAt : null, actor, at };
+  flushLatestFetched(seat);
+}
+function flushLatestFetched(seat) {
+  const st = latestFetchedState.get(seat);
+  if (!st || !st.pending || st.timer) return;
+  if (!st.loaded) {
+    st.loaded = POSTS_READER.query(`SELECT ?seq WHERE { <${U3.latestFetchedIri(seat)}> <${SEAT_RS}latestFetchedSeq> ?seq }`).then((q) => {
+      if (!q.ok) { st.loaded = null; console.error(`[#1902] ${seat}'s latestFetched could not be read; not written: ${q.reason}`); return; }
+      const held = q.rows.length ? Number(q.rows[0].seq.value) : 0;
+      st.sentSeq = Math.max(st.sentSeq, Number.isSafeInteger(held) ? held : 0);
+      st.loaded = true;
+      if (st.pending && st.pending.seq <= st.sentSeq) st.pending = null;
+      flushLatestFetched(seat);
+    }, (e) => { st.loaded = null; console.error(`[#1902] ${seat}'s latestFetched could not be read: ${e?.message ?? e}`); });
+    return;
+  }
+  if (st.loaded !== true) return;   // the read is in flight; it flushes when it lands
+  const wait = st.lastWriteAt + LATEST_FETCHED_MIN_MS - Date.now();
+  if (wait > 0) { st.timer = setTimeout(() => { st.timer = null; flushLatestFetched(seat); }, wait); st.timer.unref?.(); return; }
+  const p = st.pending; st.pending = null;
+  const prev = st.sentSeq; st.sentSeq = p.seq; st.lastWriteAt = Date.now();
+  LOGBORN.write(U3.latestFetchedIntention({ seat, actor: p.actor, post: `${G.ENTITY}${p.post}`, seq: p.seq, postAt: p.postAt, at: p.at })).then((r) => {
+    if (r.outcome === 'APPLIED' || r.outcome === 'PRECONDITION_FAILED') return;
+    if (st.sentSeq === p.seq) st.sentSeq = prev;   // not stored: a later fetch may try again
+    console.error(`[#1902] ${seat}'s latestFetched (${p.seq}) was not recorded: ${r.outcome}${r.reason ? ` ${r.reason}` : ''}`);
+  }, (e) => { if (st.sentSeq === p.seq) st.sentSeq = prev; console.error(`[#1902] ${seat}'s latestFetched was not recorded: ${e?.message ?? e}`); });
+}
+
+// ── #1902 — GET /api/seats/attention: what each seat is owed and what its credential has retrieved. READ-ONLY. ─────────────
+// It reports; it does not post, alarm or ask (the watch that asks is the next slice). Where it cannot see, it says
+// "not observable" with the reason, never zero. Every read is bounded: one aggregate over the rows offered since the
+// reconciler began observing, one read of the latestFetched nodes, one of the room's newest post, one per seat for its
+// last post, and the existing bounded delivery list for runner seats.
+const ATTENTION_MEANS = Object.freeze({
+  unretrieved: 'Rows offered to this seat (since observingSince) that its OWN credential has not retrieved (GET of the post with its key). '
+    + 'A row is a post that names or concerns this seat: a candidate concern, not proof an answer is owed (a post saying a seat\'s link was down names it '
+    + 'and asks it nothing), so an unretrieved row is not an unanswered ask. '
+    + 'A row with no mark is ambiguous: the hint may not have arrived, no turn may have run, or a turn ran and did not fetch the post. '
+    + 'A mark is evidence the post was retrieved by the seat\'s key, not that she attended to it, and not that a hint arrived.',
+  latestFetched: 'The newest room post this seat\'s credential has fetched. It is a maximum, not coverage: posts below it may never have been '
+    + 'fetched (one fetch of a mention jumps it past every ambient post in between). A true received-up-to mark needs a receipt from the seat\'s '
+    + 'own connector and is not in this slice. behindPosts and behindMs compare it with the room\'s newest post.',
+  lastCredentialedRequest: 'The last request this REST process saw carrying this seat\'s key (any route). In memory: it starts empty at each REST start (since).',
+  runner: 'For a channel-mode resident: the existing open, in-turn and stuck counts over its recent rows (core/delivery.mjs classifyDeliveries).',
+});
+const ATTENTION_MIN_MS = Number(process.env.SCRUM_ATTENTION_MIN_MS ?? 5000);
+const REST_STARTED_AT = new Date().toISOString();
+let attentionLast = null, attentionFlight = null;
+function seatHasKey(seat) {
+  const c = seatCredentials();
+  if (c.dormant) return false;
+  const now = Date.now();
+  return (c.seats.get(seat)?.credentials ?? []).some((x) => (x.scope === 'act' || x.scope === 'admin') && !(x.revokedAt && Date.parse(x.revokedAt) <= now) && !(x.expiresAt && Date.parse(x.expiresAt) <= now));
+}
+async function attentionReport() {
+  const R = POSTS_BULK_READER || ANNOUNCE_EXECUTOR;
+  const sel = async (sparql) => { const q = await R.query(sparql); if (!q.ok) throw Object.assign(new Error(q.reason || 'unreadable'), { unavailable: true }); return q.rows; };
+  const v = (row, k) => row?.[k]?.value ?? null;
+  const roster = currentRoster() || {};
+  const seats = [...seatInboxIndex(roster).eligible];
+  const observingSince = SEAT_INBOX?.state()?.observingSince ?? null;
+  const since = observingSince ?? new Date(Date.now() - 86400_000).toISOString();
+  const now = Date.now();
+  const [unret, fetched, room] = await Promise.all([
+    sel(`SELECT ?to (COUNT(?d) AS ?n) (MIN(?oa) AS ?oldest) WHERE { ?d <${G.type}> <${SEAT_RS}Delivery> ; <${SEAT_RS}deliveredTo> ?to ; <${SEAT_RS}offeredAt> ?oa . FILTER(?oa >= ${JSON.stringify(since)}) FILTER NOT EXISTS { ?d <${SEAT_RS}retrievedAt> ?xr } } GROUP BY ?to`),
+    sel(`SELECT ?n ?seq ?post ?pat ?at WHERE { ?n <${SEAT_RS}latestFetchedSeq> ?seq ; <${SEAT_RS}latestFetchedPost> ?post ; <${SEAT_RS}latestFetchedAt> ?at . OPTIONAL { ?n <${SEAT_RS}latestFetchedPostAt> ?pat } FILTER(STRSTARTS(STR(?n), ${JSON.stringify(U3.LATEST_FETCHED_PREFIX)})) }`),
+    sel(`SELECT ?p ?ps ?at WHERE { ?p <${G.type}> <${G.S}Comment> ; <${SEAT_RS}postSeq> ?ps ; <${G.S}dateCreated> ?at . FILTER NOT EXISTS { ?p <${G.S}about> ?xc } } ORDER BY DESC(?ps) LIMIT 1`),
+  ]);
+  const lastPosts = await Promise.all(seats.map((k) => sel(`SELECT ?p ?ps ?at WHERE { ?p <${G.S}author> <${G.PERSON}${encodeURIComponent(k)}> ; <${SEAT_RS}postSeq> ?ps ; <${G.S}dateCreated> ?at } ORDER BY DESC(?ps) LIMIT 1`)));
+  const board = readBoard();
+  const runners = new Set((Array.isArray(board?.agents) ? board.agents : []).filter((a) => a?.['scrum:state'] === 'invited' && a['scrum:deliveryMode'] === 'channel').map((a) => a['scrum:seatKey']));
+  const runnerCounts = new Map();
+  for (const k of seats.filter((x) => runners.has(x))) {
+    const r = await graphListDeliveries({ to: k });
+    runnerCounts.set(k, r.status === 200 ? classifyDeliveries(r.wire.deliveries) : { observable: false, why: r.wire?.error ?? `the rows could not be read (${r.status})` });
+  }
+  const roomLatest = room.length ? { seq: Number(v(room[0], 'ps')), at: v(room[0], 'at'), id: v(room[0], 'p').slice(G.ENTITY.length) } : null;
+  const unretBy = new Map(unret.map((r) => [v(r, 'to'), { n: Number(v(r, 'n')), oldest: v(r, 'oldest') }]));
+  const fetchedBy = new Map(fetched.map((r) => [v(r, 'n').slice(U3.LATEST_FETCHED_PREFIX.length), r]));
+  const out = {};
+  seats.forEach((k, i) => {
+    const key = seatHasKey(k);
+    const u = unretBy.get(k) ?? { n: 0, oldest: null };
+    const unretrieved = { count: u.n, oldestOfferedAt: u.oldest, oldestAgeMs: u.oldest ? now - Date.parse(u.oldest) : null, means: ATTENTION_MEANS.unretrieved };
+    if (!key) Object.assign(unretrieved, { observable: false, why: 'no key is issued to this seat, so its retrievals cannot be seen: every row reads as not retrieved' });
+    const f = fetchedBy.get(k);
+    let latestFetched;
+    if (!key) latestFetched = { observable: false, why: 'no key is issued to this seat: its fetches, if any, are anonymous and cannot be attributed', means: ATTENTION_MEANS.latestFetched };
+    else if (!f) latestFetched = { observable: false, why: 'no single-post fetch with this seat\'s key has been recorded (reads made without its key cannot be seen)', means: ATTENTION_MEANS.latestFetched };
+    else {
+      const seq = Number(v(f, 'seq')); const postAt = v(f, 'pat');
+      latestFetched = { seq, post: v(f, 'post').slice(G.ENTITY.length), postAt, at: v(f, 'at'),
+        behindPosts: roomLatest ? Math.max(0, roomLatest.seq - seq) : null,
+        behindMs: roomLatest?.at && postAt ? Math.max(0, Date.parse(roomLatest.at) - Date.parse(postAt)) : null,
+        means: ATTENTION_MEANS.latestFetched };
+    }
+    const lp = lastPosts[i][0];
+    const cred = SEAT_LAST_CREDENTIALED.get(k);
+    out[k] = {
+      name: roster[k]?.name ?? k, credential: key ? 'issued' : 'none',
+      unretrieved, latestFetched,
+      lastPost: lp ? { id: v(lp, 'p').slice(G.ENTITY.length), seq: Number(v(lp, 'ps')), at: v(lp, 'at') } : null,
+      lastCredentialedRequest: cred ? { at: cred, since: REST_STARTED_AT, means: ATTENTION_MEANS.lastCredentialedRequest }
+        : { observable: false, why: key ? `no request with this seat's key since this REST process started (${REST_STARTED_AT})` : 'no key is issued to this seat', since: REST_STARTED_AT },
+      ...(runnerCounts.has(k) ? { runner: { ...runnerCounts.get(k), means: ATTENTION_MEANS.runner } } : {}),
+    };
+  });
+  return {
+    at: new Date(now).toISOString(), observingSince,
+    window: observingSince ? 'rows offered since observingSince, when this board began recording retrievals' : 'the seat inbox reconciler is not running here: rows offered in the last 24 hours',
+    observingSinceMeans: 'When the reconciler began reading the commit feed from its saved cursor. If seat-inbox-cursor.json is lost, it restarts at the feed\'s tip and this time moves to that restart: posts committed in the gap get no row from this path.',
+    room: roomLatest ? { latestSeq: roomLatest.seq, latestAt: roomLatest.at, latestPost: roomLatest.id } : { latestSeq: null, latestAt: null },
+    seats: out,
+    means: 'A report only: it does not post, alarm or ask. A row is a candidate concern, not proof an answer is owed. Each field says what it measures; "observable: false" says what the board cannot see, never zero.',
+  };
+}
+async function handleSeatsAttention(req, res) {
+  try {
+    if (!DELIVERIES_UNIT || !ANNOUNCE_EXECUTOR) return sendJSON(res, 503, { error: 'the attention report reads delivery rows from the graph executor; this server does not run the deliveries unit (SCRUM_GRAPH_UNIT_DELIVERIES)', code: 'GRAPH_UNAVAILABLE' });
+    if (attentionLast && ATTENTION_MIN_MS > 0 && Date.now() - attentionLast.atMs < ATTENTION_MIN_MS) return sendJSON(res, 200, { ...attentionLast.report, cached: true });
+    attentionFlight ??= attentionReport().finally(() => { attentionFlight = null; });
+    const report = await attentionFlight;
+    attentionLast = { report, atMs: Date.now() };
+    sendJSON(res, 200, report);
+  } catch (e) {
+    if (e?.unavailable) return sendJSON(res, 503, { error: `the graph could not be read, so the report is unknown: ${e.message}`, code: 'GRAPH_UNAVAILABLE' });
+    console.error('GET /api/seats/attention:', e.message);
+    if (!res.headersSent) sendJSON(res, 500, { error: e.message });
+  }
 }
 
 /** #1826 — the list's one order, on both stores: offeredAt, then the delivery id (the cursor's own tie-breaker). */
@@ -13306,7 +13572,7 @@ async function handleGetConversation(req, res, id) {
         if (_recall) setImmediate(() => recallForget([id]));
         return;
       }
-      if (g.post) { const shown = withRecall(g.post); sendJSON(res, 200, shown); return noteRecallRead(req, shown); }   // #1689
+      if (g.post) { const shown = withRecall(g.post); sendJSON(res, 200, shown); noteSeatFetch(req, shown); return noteRecallRead(req, shown); }   // #1689, #1902
     }
     const data = readBoard();
     const idx = findConversationIndex(data, id);
@@ -13314,6 +13580,7 @@ async function handleGetConversation(req, res, id) {
     const shown = withRecall(data.conversations[idx]);   // #1689
     sendJSON(res, 200, shown);
     noteRecallRead(req, shown);
+    noteSeatFetch(req, shown);   // #1902
   } catch (e) {
     console.error('GET /api/conversations/:id:', e.message);
     sendJSON(res, 500, { error: 'Failed to read conversation' });
@@ -14519,6 +14786,7 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/host-pressure$/,        fn: (req, res) => handleHostPressure(req, res) },
   { method: 'GET',    re: /^\/api\/board$/,                fn: (req, res) => handleGetBoard(req, res) },
   { method: 'GET',    re: /^\/api\/seats\/state$/,          fn: (req, res) => handleSeatStates(req, res) },
+  { method: 'GET',    re: /^\/api\/seats\/attention$/,      fn: (req, res) => handleSeatsAttention(req, res) },   // #1902
   { method: 'PUT',    re: /^\/api\/seats\/([^\/]+)\/state$/, fn: (req, res, m) => handleSeatDeclare(req, res, decodeURIComponent(m[1])) },
   { method: 'DELETE', re: /^\/api\/seats\/([^\/]+)\/state$/, fn: (req, res, m) => handleSeatClear(req, res, decodeURIComponent(m[1])) },
   { method: 'GET',    re: /^\/api\/roster$/,               fn: (req, res) => handleGetRoster(req, res) },
@@ -15087,6 +15355,7 @@ function handleRequest(req, res) {
     return sendJSON(res, decision.status, { error: decision.error, code: decision.code });
   }
   req.auth = decision;   // { seat, scope, enforced } — never the header
+  if (binding?.seat) SEAT_LAST_CREDENTIALED.set(binding.seat, new Date().toISOString());   // #1902 — in memory only, for the attention report
   req.authBinding = binding;   // #1561 — the matched credential, for the graph unit's own write check (core/logborn-unit.mjs actorFor)
   // #1561 launch — the log-born unit's write routes need a key even in observe
   // (core/graph-auth.mjs isLogbornWriteRoute). Only with the unit ON; nothing else moves.
@@ -15558,6 +15827,7 @@ const server = http.createServer(handleRequest);
 // mcp-server.mjs made for its own timeouts (#284).
 server.keepAliveTimeout = 0;
 
+startSeatInbox();   // #1902
 server.listen(PORT, '127.0.0.1', () => {
   try { _announcementsPending = countPendingAnnouncements(readBoard()); } catch (e) { console.error(`#1574 1b: pending announcements could not be counted at boot: ${e.message}`); }
   BOUND_PORT = server.address().port;   // #1338 — the port the Host guard checks against
