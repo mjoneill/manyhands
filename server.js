@@ -84,7 +84,7 @@ import * as U3 from './core/unit3-graph.mjs';   // #1582 — deliveries and mode
 import { seatIndex as seatInboxIndex, concernedSeats, createSeatInboxReconciler, createRetrievalMarker } from './core/seat-inbox.mjs';   // #1902 — every seat's inbox
 import { createGraphClient, setExecutorMeter } from './core/graph-client.mjs';   // #1574 C3b — the conversations unit's executor door
 import { decideIntention as linkDecideIntention, attachIntention as linkAttachIntention, claimIriOf, spanKey as linkSpanKey, linkIri as linkIriOf, linkCountsQuery, countLinkUse, linkDecisionsQuery, decisionsOfRows, retiringDecision, dismissalCount } from './core/knowledge-linking.mjs';   // #1851, #1850, #1852
-import { deliveryQuery, linksOfDeliveryRows, selectDeliveries, firstShowings, deliverySourcesQuery, sourcesOfRows, deliveryBlock, showIntention, DELIVERY_DEADLINE_MS } from './core/knowledge-delivery.mjs';   // #1852
+import { deliveryQuery, linksOfDeliveryRows, selectDeliverySet, firstShowings, deliverySourcesQuery, sourcesOfRows, deliveryBlock, showIntention, DELIVERY_DEADLINE_MS } from './core/knowledge-delivery.mjs';   // #1852
 import * as READING from './core/knowledge-reading.mjs';   // #1894
 import { readRecallConfig, createRecallEngine, createRecallQueue, createOfferProjection, createRecallHook, publicItem as recallPublicItem, RECALL_COUNTS_MEANS,
   POST_IRI as RECALL_POST_IRI, offerIri as recallOfferIri, offerIntention as recallOfferIntention, openIntention as recallOpenIntention, readIntention as recallReadIntention,
@@ -7760,11 +7760,12 @@ async function readDelivery(card, actor, how) {
   const cardIri = `https://scrumboard.local/entity/${card.id}`;
   // a claim shows the card's set every time; a read shows what this seat has not ANSWERED, so an unanswered claim is still
   // there when she reopens the card. Only a first showing is recorded (below); a repeat says shownBefore.
-  const items = selectDeliveries(linksOfDeliveryRows(await LOGBORN.query(deliveryQuery({ card: cardIri, actor })), { actor }), { unanswered: how === 'get' });
+  // #1905 decision ee188cd5 — the set is two lanes (machine, then hand); moreAttached counts the hand links past HAND_MAX
+  const { items, moreAttached } = selectDeliverySet(linksOfDeliveryRows(await LOGBORN.query(deliveryQuery({ card: cardIri, actor })), { actor }), { unanswered: how === 'get' });
   if (items.length === 0) return {};
   const sq = deliverySourcesQuery([...new Set(items.map((l) => l.source).filter(Boolean))]);
   const sources = sq ? sourcesOfRows(await LOGBORN.query(sq)) : new Map();
-  return { block: deliveryBlock({ items, shortId: card.shortId, sources, recorded: actor ? undefined : false, reader: actor }),   // #1901 — the reader is named beside a confirm
+  return { block: deliveryBlock({ items, shortId: card.shortId, sources, recorded: actor ? undefined : false, reader: actor, moreAttached }),   // #1901 — the reader is named beside a confirm
     show: actor ? { links: firstShowings(items).map((l) => l.iri), card: cardIri, how, actor } : null };
 }
 /** `{ block?, show? }` for one answer. Never throws and never waits past the deadline. */

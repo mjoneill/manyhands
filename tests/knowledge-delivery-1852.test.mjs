@@ -51,13 +51,19 @@
  *   D4  #1901 `means` says "confirmed" names another seat's verdict unless `yours` is true
  *   I1  the showing's IRI is fixed by link and seat: the same pair names the same node, another seat another node
  *   P1  the source of a passage
+ *   HL1 #1905 decision ee188cd5 — hand-attached links have their OWN lane: four hand links from one source are all delivered
+ *   HL2 the machine lane keeps both caps beside them: one per source, at most DELIVERY_MAX, hand links spending neither
+ *   HL3 the hand lane is bounded at HAND_MAX (8) per read, oldest attach first, and names how many more there are
+ *   HL4 a hand link this seat has answered, or that the room retired, is not delivered (the same filters as a machine link)
+ *   HL5 the block says how many more hand links there are and the exact call that lists them; absent when there are none
+ *   HL6 the order: the machine lane first, then the hand lane (an attached link does not outrank machine links, design 7)
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import {
-  selectDeliveries, firstShowings, deliveryBlock, quoteOf, sourceOfPassage, showIri, linksOfDeliveryRows,
-  DELIVERY_MAX, QUOTE_MAX_CHARS,
+  selectDeliveries, selectDeliverySet, firstShowings, deliveryBlock, quoteOf, sourceOfPassage, showIri, linksOfDeliveryRows,
+  DELIVERY_MAX, HAND_MAX, QUOTE_MAX_CHARS,
 } from '../core/knowledge-delivery.mjs';
 
 const hex = (n) => crypto.createHash('sha256').update(String(n)).digest('hex');
@@ -322,4 +328,59 @@ test('HD3 #1905 `means` says an item with attachedBy was attached by hand, and t
   const { means } = deliveryBlock({ items: [link(1)], shortId: 7, sources: new Map() });
   assert.match(means, /`attachedBy`.*by hand/i);
   assert.match(means, /not a confirm/i);
+});
+
+// #1905 decision ee188cd5: a hand link is a person saying "read this, and here's why"; the machine's budget does not ration it.
+const hand = (n, over = {}) => link(n, { score: null, source: 'https://scrumboard.local/source/one-article', attachedBy: 'seat-x',
+  attachedAt: `2026-11-15T10:0${n % 10}:00.000Z`, attachReason: `reason ${n}`, ...over });
+
+test('HL1 #1905 four hand links from ONE source are all delivered, on a claim and on a read', () => {
+  const four = [hand(1), hand(2), hand(3), hand(4)];
+  assert.deepEqual(ids(selectDeliveries(four)), ids(four));
+  assert.deepEqual(ids(selectDeliveries(four, { unanswered: true })), ids(four));
+  // CONTROL: the same four without attachedBy are machine links, and the per-source cap keeps exactly one
+  assert.equal(selectDeliveries(four.map((l) => ({ ...l, attachedBy: null }))).length, 1);
+});
+
+test('HL2 #1905 machine links keep both caps beside the hand lane, and hand links spend neither', () => {
+  const same = 'https://scrumboard.local/source/one-article';
+  const machines = [link(11, { score: 0.9, source: same }), link(12, { score: 0.8, source: same }), link(13, { score: 0.7 }), link(14, { score: 0.6 })];
+  const got = selectDeliveries([...machines, hand(1), hand(2), hand(3), hand(4)]);
+  const m = got.filter((l) => !l.attachedBy);
+  assert.deepEqual(ids(m), [hex(11), hex(13)], 'one machine link from the hand links\' own source, then the next source; two in all');
+  assert.equal(m.length, DELIVERY_MAX);
+  assert.equal(got.filter((l) => l.attachedBy).length, 4, 'all four hand links still delivered');
+});
+
+test('HL3 #1905 the hand lane is bounded at 8 per read, oldest attach first, and counts the rest', () => {
+  assert.equal(HAND_MAX, 8);
+  const nine = [9, 3, 7, 1, 5, 8, 2, 6, 4].map((n) => hand(n));
+  const { items, moreAttached } = selectDeliverySet(nine);
+  assert.deepEqual(ids(items), [1, 2, 3, 4, 5, 6, 7, 8].map(hex), 'oldest attachedAt first');
+  assert.equal(moreAttached, 1);
+  assert.equal(selectDeliverySet(nine.slice(0, 8)).moreAttached, 0, 'CONTROL: eight is not over the bound');
+  assert.deepEqual(ids(selectDeliveries(nine)), ids(items), 'selectDeliveries is the same set');
+});
+
+test('HL4 #1905 an answered, dismissed or self-dismissed hand link is not delivered, and is not counted as more', () => {
+  const links = [hand(1, { mine: 'confirmed' }), hand(2, { status: 'dismissed' }), hand(3, { mine: 'dismissed' }), hand(4)];
+  assert.deepEqual(ids(selectDeliveries(links, { unanswered: true })), [hex(4)], 'a read: only the one she has not answered');
+  assert.deepEqual(ids(selectDeliveries(links)), [hex(1), hex(4)], 'a claim: her confirm still shows, dismissals never');
+  const eleven = Array.from({ length: 11 }, (_, i) => hand(i + 1, { attachedAt: `2026-11-15T10:${String(i).padStart(2, '0')}:00.000Z`, mine: i < 3 ? 'confirmed' : null }));
+  const set = selectDeliverySet(eleven, { unanswered: true });
+  assert.deepEqual({ n: set.items.length, more: set.moreAttached }, { n: 8, more: 0 }, 'the three answered ones are filtered BEFORE the bound');
+});
+
+test('HL5 #1905 the block names how many more hand links there are and the call that lists them; absent when none', () => {
+  const block = deliveryBlock({ items: [hand(1)], shortId: 1902, sources: new Map(), moreAttached: 3 });
+  assert.equal(block.moreAttached.count, 3);
+  assert.deepEqual(block.moreAttached.read, { tool: 'link_list', args: { card: 1902 } });
+  assert.match(block.moreAttached.says, /3 more/);
+  assert.equal('moreAttached' in deliveryBlock({ items: [hand(1)], shortId: 1902, sources: new Map(), moreAttached: 0 }), false);
+  assert.equal('moreAttached' in deliveryBlock({ items: [hand(1)], shortId: 1902, sources: new Map() }), false);
+});
+
+test('HL6 #1905 the machine lane comes first, then the hand lane', () => {
+  const got = selectDeliveries([hand(1), link(21, { score: 0.9 }), hand(2), link(22, { score: 0.8 })]);
+  assert.deepEqual(ids(got), [hex(21), hex(22), hex(1), hex(2)]);
 });
