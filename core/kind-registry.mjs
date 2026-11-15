@@ -173,11 +173,13 @@ export const KIND_DECLARATIONS = Object.freeze([
       + '`scrum:providerFailures` (transport errors, counted apart and never a quality score). Written in the same guarded '
       + 'update as the run\'s assertions, so a crash mid-run leaves no report and no half-published run.',
   },
-  // #1851 — written by ONE compiler kind, `link.propose`, one linking run per update. Executor-only.
+  // #1851 — written by `link.propose`, one linking run per update; #1905 — and by `link.attach`, one claim attached by hand. Executor-only.
   {
     name: 'scrum:BearsOn', eventKind: null, collection: null,
-    createdBy: 'the knowledge linker, after an extraction run (compiler kind link.propose)',
-    definition: 'A MACHINE-PROPOSED link saying an extracted claim bears on one of our cards: `scrum:fromAssertion` the '
+    createdBy: 'the knowledge linker, after an extraction run (compiler kind link.propose); or a seat attaching a claim by hand (POST /api/links/attach, compiler kind link.attach)',
+    definition: 'A link saying an extracted claim bears on one of our cards. A HAND link (#1905) carries `scrum:attachedBy` (the seat) '
+      + 'and `scrum:attachReason` (the one line the claim adds to the card) and none of the search fields below; a link without '
+      + '`scrum:attachedBy` is MACHINE-PROPOSED, and the matcher\'s counts (#1850) read machine links only. Either way: `scrum:fromAssertion` the '
       + 'scrum:Assertion, `scrum:bearsOnCard` the scrum:Card, found by the board\'s own meaning search. It keeps how it was '
       + 'found (`scrum:searchQuery`, `scrum:score`, the `scrum:minScore` in force, `scrum:model`) and `scrum:status` '
       + '(proposed at birth; a seat confirms or dismisses). Its IRI is link/<sha256 of `scrum:spanKey`>, a hash of the '
