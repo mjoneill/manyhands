@@ -21,6 +21,7 @@
  * above: the verdict is counted per seat (#1850), so there is no seat parameter and the executor files it under the seat the
  * runner binds. #1852 puts links in front of guests; until this existed a guest handed one could not answer it. Like every
  * tool here it is granted per agent, by name, on the agent settings page; nothing implies it.
+ * `link_attach` (#1905) is the same class: the seat's own attachment of a claim to a card, with her reason; no seat parameter.
  *
  * ⭐ A GRANT IS NOW REAL. `toolGrants` used to change one sentence of an agent's
  * prompt and nothing else, so an agent granted everything and an agent granted
@@ -220,6 +221,28 @@ export const BOARD_TOOLS = Object.freeze([
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      // #1905 - a guest's door to POST /api/links/attach: a claim the seat can SEE bears on a card that meaning search missed.
+      // No seat parameter, as link_decide: the attachment is recorded as the wake's own seat's, with the reason she gave.
+      name: 'link_attach',
+      description: 'Attach a claim to a card by hand: say that a claim from a source the room read bears on one of our cards, when the board did not propose it. '
+        + 'claim is the claim\'s address exactly as you were given it (https://scrumboard.local/assertion/...). card is the card\'s number. '
+        + 'reason is REQUIRED, one line: what this claim would add to the card. '
+        + 'Attaching is not a confirm: it says the claim bears on the card, not that it was used; it then waits, like any proposed link, for a seat to confirm or dismiss it. '
+        + 'It is recorded under YOUR own seat with your reason; you cannot attach for another seat. If the claim is already linked to that card you are told the existing link instead.',
+      parameters: {
+        type: 'object',
+        properties: {
+          claim: { type: 'string', description: 'the claim\'s address exactly as given: https://scrumboard.local/assertion/...' },
+          card: { type: 'integer', description: 'the number of the card the claim bears on' },
+          reason: { type: 'string', description: 'one line: what this claim would add to the card' },
+        },
+        required: ['claim', 'card', 'reason'],
+      },
+    },
+  },
 ]);
 
 /** The opening sentence of a definition — orientation, not the whole register. */
@@ -293,6 +316,16 @@ export function makeExecutor({ get, post, put = null, del = null, patch = null, 
         if (verdict === 'confirmed' && !given) throw new Error('link_decide: a confirm needs workingOn, the number of the card you were working on (e.g. 1852). A confirm counts the claim as used, so it must say what it was used for. If you were not working on a card, dismiss it or leave it.');
         if (given && !Number.isInteger(args.workingOn)) throw new Error('link_decide workingOn is a card number, a whole number such as 1852');
         return post(`/api/links/${link}/decide`, { verdict, ...(given ? { workingOn: args.workingOn } : {}), by });
+      }
+      // #1905 - the seat's OWN attachment of a claim to a card. Built from the three allowed fields and `by`, the seat the runner
+      // binds, as link_decide's body is; the server takes the actor from the credential and refuses a foreign onBehalfOf.
+      case 'link_attach': {
+        const claim = typeof args?.claim === 'string' ? args.claim.trim() : '';
+        if (!/^https:\/\/scrumboard\.local\/assertion\/[^\s<>"]+$/.test(claim)) throw new Error('link_attach needs the claim\'s address exactly as you were given it: https://scrumboard.local/assertion/...');
+        if (!Number.isInteger(args?.card)) throw new Error('link_attach card is the card\'s number, a whole number such as 1902');
+        const reason = typeof args?.reason === 'string' ? args.reason.trim() : '';
+        if (!reason) throw new Error('link_attach needs a reason: one line saying what this claim would add to the card');
+        return post('/api/links/attach', { claim, card: args.card, reason, by });
       }
       // #1600 D1 - a READ of one post. The id is the model's, so it is trimmed, refused when empty, and refused when it is a
       // bare dot segment (`.`/`..` survive encodeURIComponent and a URL layer may normalise them into another route);
