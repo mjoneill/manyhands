@@ -10,15 +10,17 @@
  *       brings the rest. Every post shown while soloed is that seat's.
  *   C4  The owner's other path: typing the seat's display name in the search box finds the post (server name match, N1).
  *   C5  Clearing the solo returns the whole room, newest last.
+ *   C6  C1 and C4 again with the conversations unit ON (a real executor), the paths production answers from.
  *
- * Must-fail control: C1, C2, C3 and C4 are RED on main 818953a. C5 passes there; it guards the way back.
+ * Must-fail control: C1, C2, C3, C4 and C6 are RED on main 818953a. C5 passes there; it guards the way back.
  */
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { withBrowserServer } from './helpers/harness.mjs';
+import { withBrowserServer, makeBoardFixture } from './helpers/harness.mjs';
+import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-executor-proc.mjs';
 
 const ROSTER_FILE = path.join(os.tmpdir(), `commons-solo-1931-${process.pid}.json`);
 fs.writeFileSync(ROSTER_FILE, JSON.stringify({ seats: {
@@ -121,4 +123,31 @@ test('C5 clearing the solo returns the whole room', async () => {
     await page.waitForFunction((n) => document.querySelectorAll('.cv-feed .cv-msg').length === n, { timeout: 5000 }, before.length);
     assert.deepEqual(await shownIds(page), before);
   }, { server: { board: boardOf(buried(55)), env }, launch: { headless: 'new' } });
+});
+
+// ── C6: the same two paths with the conversations unit ON, as production runs ─────────────────────────────────────────────────────────────
+// With the unit on, `?author=&limit=` is answered by the targeted graph read (server.js targetedPosts) and `?q=` by the merged bulk path:
+// neither is the path C1-C4 exercise. A real executor; without a python with pyoxigraph the row is SKIPPED, and a skip is NOT a pass.
+const UNIT_SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)';
+test('C6 unit ON: a seat whose only post is 55 back is found by its chip (with its count) and by its name in the search box', { skip: UNIT_SKIP }, async () => {
+  const DSID = 'commons-solo-1931';
+  const store = tmpStore('solo-1931-');
+  const exec = await startExecutor({ store, datasetId: DSID, create: true });
+  const post = async (base, author, body) => { const r = await fetch(`${base}/api/conversations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ author, body }) }); assert.equal(r.status, 201, `post by ${author}`); return r.json(); };
+  try {
+    await withBrowserServer(async ({ server, browser }) => {
+      const song = await post(server.baseUrl, 'lodger', 'a sea shanty for the crew');
+      for (let k = 0; k < 55; k++) await post(server.baseUrl, 'ada', `ada says ${k}`);
+      const page = await openCommons(server, browser);
+      assert.ok(!(await shownIds(page)).includes(song.id), 'CONTROL: the post is outside the loaded window before the click');
+      await clickChip(page, 'Marmalade');
+      await page.waitForFunction((id) => [...document.querySelectorAll('.cv-feed .cv-msg')].some((e) => e.dataset.id === id), { timeout: 8000 }, song.id)
+        .catch(async () => assert.fail(`unit on: the seat's post never appeared; the feed says: ${await feedText(page)}`));
+      assert.match(await page.$eval('.cv-solo-count', (e) => e.textContent), /\b1 post\b/);
+      await page.click('.cv-solo-clear');
+      await page.type('.cv-search', 'marmalade');
+      await page.waitForFunction(() => document.querySelector('.cv-search-head') && !/Searching/.test(document.querySelector('.cv-search-head').textContent), { timeout: 8000 });
+      assert.deepEqual(await page.$$eval('.cv-result .cv-msg', (els) => els.map((e) => e.dataset.id)), [song.id], await page.$eval('.cv-search-head', (e) => e.textContent));
+    }, { server: { board: makeBoardFixture({ cards: [], postSeqEpoch: '11111111-2222-4333-8444-555555555555', nextPostSeq: 1 }), env: { ...env, SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: exec.baseUrl, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1' } }, launch: { headless: 'new' } });
+  } finally { await killExecutor(exec); fs.rmSync(store, { recursive: true, force: true }); }
 });

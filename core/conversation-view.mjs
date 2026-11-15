@@ -34,9 +34,11 @@ import { recallBlock } from './recall-line.mjs';   // #1689 — what the room ha
  *   (board-parity "commons" — the whole feed, homed and floating alike).
  * - since/before/limit: the #210 pagination + poll cursors, passed through.
  */
-export function conversationsUrl({ baseUrl = '', attachedTo, since, before, limit, q } = {}) {
+export function conversationsUrl({ baseUrl = '', attachedTo, since, before, limit, q, author } = {}) {
   const params = [];
   if (typeof attachedTo === 'string' && attachedTo) params.push('attachedTo=' + encodeURIComponent(attachedTo));
+  // #1931 — one seat's posts, asked of the server (a solo), so `author` + `limit` is "that seat's N most recent", never "theirs among N"
+  if (typeof author === 'string' && author) params.push('author=' + encodeURIComponent(author));
   // #1010 — a corpus-wide search term. The server filters BEFORE `limit`, so
   // `q` + `limit` is "the N most recent MATCHES", never "matches within N".
   if (typeof q === 'string' && q.trim()) params.push('q=' + encodeURIComponent(q.trim()));
@@ -211,6 +213,13 @@ export function mountConversationView(opts = {}) {
   let searchSeq = 0;        // a stale response must not overwrite a newer term
   let searchTimer = null;
   let authorSolo = null; // presence — "listen to one mind": solo an author's voice
+  // #1931 — a solo ASKS THE BOARD, as #1010 made the search box do. It used to filter the loaded window (50) and hide "load older",
+  // so a seat whose last post was further back read "Nothing from them yet": a board-wide negative from a window check.
+  // `soloState` is null (no solo) · 'pending' · 'done' · 'failed', and the count line says exactly which.
+  let soloState = null;
+  let soloRows = [];      // the server's posts by the soloed seat (grows with load older)
+  let soloTotal = null;   // X-Total-Count for that seat, or null if unknown
+  let soloSeq = 0;        // a slow answer for an earlier solo must not land on a newer one
   let exhaustedOlder = false; // #303-6 — no more history behind the oldest loaded
   const renderedIds = new Set();
 
@@ -452,7 +461,8 @@ export function mountConversationView(opts = {}) {
   // #303-6 — messages matching the search query (body or author). Empty query
   // matches everything.
   function visibleMessages() {
-    let out = messages;
+    // #1931 — while soloed, the board's answer joins the window (the window carries live posts the answer predates).
+    let out = authorSolo && soloState === 'done' ? mergeMessages(soloRows, messages) : messages;
     // presence — soloing a mind filters the room to that author's voice.
     if (authorSolo) out = out.filter((c) => identityOf(c.author).key === authorSolo);
     if (talk && talk.id) out = out.filter((c) => c.conversation === talk.id);   // #1401
@@ -551,10 +561,13 @@ export function mountConversationView(opts = {}) {
       clear.addEventListener('click', () => solo(null));
       banner.append(clear);
       feed.appendChild(banner);
+      feed.appendChild(soloCountLine(who.name || authorSolo));
     }
     const vis = visibleMessages();
     if (!vis.length) {
-      feed.appendChild(el('div', 'cv-empty', authorSolo ? 'Nothing from them yet.' : (query ? 'No messages match your search.' : (talk ? 'Nothing in this talk yet — say the first thing.' : 'No messages yet. Be the first.'))));
+      // #1931 — a solo's empty state is the count line above it, which says what was checked; this line only covers a failed ask
+      if (authorSolo) { if (soloState === 'failed') feed.appendChild(el('div', 'cv-empty', 'None of their posts are among the loaded messages.')); }
+      else feed.appendChild(el('div', 'cv-empty', query ? 'No messages match your search.' : (talk ? 'Nothing in this talk yet — say the first thing.' : 'No messages yet. Be the first.')));
     } else {
       for (const c of vis) { feed.appendChild(messageNode(c)); renderedIds.add(c.id); }
     }
@@ -567,21 +580,61 @@ export function mountConversationView(opts = {}) {
   // constellation can mark the active light.
   function solo(key) {
     authorSolo = key || null;
+    soloRows = []; soloTotal = null; soloState = authorSolo ? 'pending' : null;
+    const seq = ++soloSeq;
     renderAll();
     if (onSolo) try { onSolo(authorSolo); } catch (_) { /* best-effort */ }
+    if (authorSolo) runSolo(authorSolo, seq);
+  }
+
+  // #1931 — the soloed seat's most recent posts and its total, from the board.
+  async function runSolo(key, seq) {
+    let rows = null; let total = null;
+    try {
+      const res = await f(conversationsUrl({ baseUrl, attachedTo, author: key, limit }));
+      if (res.ok) {
+        rows = await res.json();
+        const h = res.headers && typeof res.headers.get === 'function' ? res.headers.get('X-Total-Count') : null;
+        total = h != null && /^\d+$/.test(String(h)) ? Number(h) : null;
+      }
+    } catch (_) { rows = null; }
+    if (seq !== soloSeq || key !== authorSolo) return;   // superseded
+    if (Array.isArray(rows)) { soloRows = mergeMessages([], rows); soloTotal = total; soloState = 'done'; }
+    else { soloRows = []; soloTotal = null; soloState = 'failed'; }
+    renderAll();
+  }
+
+  // #1931 — what a solo checked, in words: the board's count, how many are shown, or that the board could not be asked.
+  function soloCountLine(name) {
+    const line = el('div', 'cv-solo-count');
+    line.setAttribute('role', 'status');
+    const where = typeof attachedTo === 'string' && attachedTo ? 'in this thread' : 'on this board';
+    if (soloState === 'pending') line.textContent = `Looking for ${name}'s posts ${where}…`;
+    else if (soloState === 'failed') line.textContent = `Could not ask the board — showing only ${name}'s posts among the loaded messages.`;
+    else if (soloState === 'done') {
+      const n = soloTotal != null ? soloTotal : soloRows.length;
+      const shown = soloRows.length;
+      line.textContent = n === 0 ? `${name} has no posts ${where}.`
+        : shown < n ? `${n} posts by ${name} ${where} — showing the ${shown} most recent.`
+        : `${n} post${n === 1 ? '' : 's'} by ${name} ${where}.`;
+    }
+    return line;
   }
 
   function updateOlderBtn() {
     // Load-older only makes sense on a paginating mount (finite `limit`) and
     // while there's still history to fetch and no active search.
-    const show = typeof limit === 'number' && !query && !authorSolo && !exhaustedOlder;
+    // #1931 — while soloed it offers the seat's older posts, until the board's count is reached.
+    const show = typeof limit === 'number' && !query && (authorSolo
+      ? soloState === 'done' && soloTotal != null && soloRows.length < soloTotal
+      : !exhaustedOlder);
     olderBtn.style.display = show ? '' : 'none';
   }
 
   function appendNew(fresh) {
     // #303-6 — while searching, a new post must respect the filter; re-render
     // through the query path rather than blindly appending.
-    if (query) { renderAll(); return; }
+    if (query || authorSolo) { renderAll(); return; }   // #1931 — a live post by someone else must not land in a solo
     // #1401 — a live post that is not in this talk stays out of this view.
     if (talk && talk.id) { fresh = fresh.filter((c) => c.conversation === talk.id); if (!fresh.length) return; }
     const empty = feed.querySelector('.cv-empty');
@@ -880,6 +933,7 @@ export function mountConversationView(opts = {}) {
   // prepend them, preserving the reader's scroll position (no jump). Uses the
   // #210 `before` cursor. When a fetch returns nothing new, history is exhausted.
   async function loadOlder() {
+    if (authorSolo) return loadOlderSolo();
     const oldest = oldestTs();
     if (!oldest) return;
     olderBtn.disabled = true;
@@ -898,6 +952,27 @@ export function mountConversationView(opts = {}) {
     // Keep the same message under the viewport after prepending taller content.
     feed.scrollTop = prevTop + (feed.scrollHeight - prevH);
     olderBtn.disabled = false;
+  }
+
+  // #1931 — the soloed seat's posts older than the oldest of theirs we hold.
+  async function loadOlderSolo() {
+    const key = authorSolo; const seq = soloSeq;
+    const oldest = soloRows.length ? soloRows[0].createdAt : null;
+    if (!oldest) return;
+    olderBtn.disabled = true;
+    let data = null;
+    try {
+      const res = await f(conversationsUrl({ baseUrl, attachedTo, author: key, before: oldest, limit }));
+      if (res.ok) data = await res.json();
+    } catch (_) { data = null; }
+    olderBtn.disabled = false;
+    if (seq !== soloSeq || key !== authorSolo || !Array.isArray(data)) return;
+    const known = new Set(soloRows.map((m) => m.id));
+    if (!data.some((m) => m && !known.has(m.id))) { soloTotal = soloRows.length; updateOlderBtn(); return; }   // nothing older: the count was a ceiling
+    const prevH = feed.scrollHeight; const prevTop = feed.scrollTop;
+    soloRows = mergeMessages(soloRows, data);
+    renderAll();
+    feed.scrollTop = prevTop + (feed.scrollHeight - prevH);
   }
 
   async function pollOnce() {

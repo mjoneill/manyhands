@@ -35,6 +35,8 @@
 
 /* presence — "listening to one mind" banner (the constellation solo) */
 .cv-solo-banner { display: flex; align-items: center; gap: 10px; padding: 8px 12px; margin-bottom: 10px; border-radius: 8px; font-size: 13px; color: var(--ink); background: color-mix(in srgb, var(--mind, var(--accent)) 12%, transparent); box-shadow: inset 2px 0 0 var(--mind, var(--accent)); }
+/* #1931 — what a solo checked: the board's count of that seat's posts, or that the board could not be asked */
+.cv-solo-count { color: var(--muted); font-size: 0.9em; padding: 0 0 10px; margin-bottom: 8px; border-bottom: 1px solid var(--line, #ddd); font-variant-numeric: tabular-nums; }
 .cv-solo-clear { margin-left: auto; background: none; border: 1px solid var(--line); color: var(--muted); border-radius: 7px; padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer; }
 .cv-solo-clear:hover { color: var(--ink); border-color: var(--mind, var(--accent)); }
 

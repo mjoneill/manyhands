@@ -46,6 +46,7 @@
   "tests/collections-migrate-retire-k13.test.mjs",
   "tests/columns-graph-c1.test.mjs",
   "tests/commons-page-poll-p7.test.mjs",
+  "tests/commons-solo-1931.test.mjs",
   "tests/conversations-list-r1.test.mjs",
   "tests/copy-guard-bytes-1577.test.mjs",
   "tests/cursor-explicit-ack-1576.test.mjs",

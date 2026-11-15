@@ -13362,9 +13362,13 @@ async function handleListConversations(req, res) {
       const needle = q.q.trim().toLowerCase();
       // #1010 — body OR author, because the box's local filter always matched
       // both and the corpus search must not find LESS than the window did.
+      // #1931 — and the author's roster display NAME. People see a seat by its name, which can share nothing with its key, so a search
+      // for the name they can see found none of that seat's posts.
+      const named = new Set(Object.entries(currentRoster(data))
+        .filter(([, s]) => typeof s?.name === 'string' && s.name.toLowerCase().includes(needle)).map(([k]) => k.toLowerCase()));
       convs = convs.filter((c) =>
         (typeof c.body === 'string' && c.body.toLowerCase().includes(needle))
-        || (typeof c.author === 'string' && c.author.toLowerCase().includes(needle)));
+        || (typeof c.author === 'string' && (c.author.toLowerCase().includes(needle) || named.has(c.author.toLowerCase()))));
     }
     // #210 — backward pagination for the browser's bounded load + load-older.
     // `before`: strictly older than the cursor (same safe string-compare as
