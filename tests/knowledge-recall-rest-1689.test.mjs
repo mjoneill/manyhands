@@ -195,6 +195,11 @@ async function settle() {
   }
 }
 
+// settle() returns once the MARKER post is decided; the retries it triggers run after that, without anyone waiting on them
+// (the hook never makes a caller wait). So a row that reads a retried post must wait for the retry to land: one read straight
+// after settle() passes on a fast host and reads `unavailable` on a slow one (CI, 2026-11-15: P6 and X1, "reading 'map'").
+const carried = (id, opts) => until(async () => { const r = await call('GET', `/api/conversations/${id}`, null, opts); return r.json?.recall?.items ? r : null; });
+
 let kiwi, plum;
 test('R0 the first call over more claims than one batch is partial and says so; later calls finish the index', T, async () => {
   kiwi = await seedRun({ title: 'The kiwi book', url: 'https://example.com/kiwi', claims: [{ gist: 'kiwi', quote: 'All about the kiwi.' }, { gist: 'kiwi melon', quote: 'Kiwi beside melon.' }] });
@@ -354,7 +359,7 @@ test('P6 unavailable, then retried by a later post: the earlier post carries its
   await seedRun({ title: 'The quince letter', url: 'https://example.com/quince', claims: [{ gist: 'quince', quote: 'Quince.' }] });
   await recall('quince');   // the new claim is embedded
   await settle();           // a later post that succeeds retries the earlier one
-  const after = await call('GET', `/api/conversations/${early.json.id}`);
+  const after = await carried(early.json.id);
   assert.deepEqual(after.json.recall.items.map((i) => i.source.title), ['The quince letter']);
 });
 
@@ -440,7 +445,7 @@ test('X1 an offer write that committed but reported UNKNOWN: unavailable, then t
   const offersOn = async () => { const r = await gc.query(`SELECT ?o WHERE { ?o <${RS}offerOn> <${post}> }`); assert.ok(r.ok, r.reason); return r.rows; };
   assert.equal((await offersOn()).length, 1, 'though the offer landed');
   await settle();   // a later post's success retries it: the write is refused as not fresh, and the landed node is read back
-  const after = await call('GET', `/api/conversations/${p.json.id}`, null, { seat: null });
+  const after = await carried(p.json.id, { seat: null });
   assert.deepEqual(after.json.recall.items.map((i) => i.source.title), ['The date palm']);
   assert.equal((await offersOn()).length, 1, 'exactly one offer node');
 });
