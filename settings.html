@@ -214,6 +214,7 @@ _exportStyle.textContent = `
     <div class="msg" id="signin-msg"></div>
     <p class="live" id="signin-recent"></p>
     <p class="live"><strong>The honest limit.</strong> Anyone with a shell on this machine can run the mint script, and that includes the AI seats. This is the same boundary seat-tokens.json has today: a rule, not a mechanism. The rule: seats never run it; only the person whose seat it signs in does. Every mint is recorded, and the list above is where a mint you did not make would show.</p>
+    <p class="live"><strong>A known limit.</strong> Browsers do not separate cookies by port, so this browser sends its sign-in cookie to every other local web service it visits on the same host name, whatever the port. A service that logs or keeps that cookie could act as you until you sign out, and that would not show as a mint above. It is accepted under today's trust; the fix planned for later is to serve the board on its own host name.</p>
   </div>
   <script>
   (function () {

@@ -130,10 +130,25 @@ function prune(doc, now) {
   doc.sessions = doc.sessions.filter((s) => !(old(s.endedAt) || old(s.expiresAt)));
 }
 
-/** One event, appended (O_APPEND, one line). Only the fields named here are written, so a caller cannot pass a value in. */
+export const EVENTS_KEPT = 1000;
+/**
+ * One event, appended (O_APPEND, one line). Only the fields named here are written, so a caller cannot pass a value in.
+ * The file keeps the last EVENTS_KEPT lines: past that it is rewritten (temp + rename) with only those. Two writers exist
+ * (the script and the board); an append that lands between the trim's read and its rename is lost, which is acceptable
+ * for a history this size and is the reason the trim runs only when the cap is exceeded.
+ */
 export function appendSessionEvent(store, { op, seat = null, at = new Date().toISOString(), reason = null, expiresAt = null, via = null, count = null, fromTerminal = null }) {
   const ev = { at, op, seat, ...(reason ? { reason } : {}), ...(expiresAt ? { expiresAt } : {}), ...(via ? { via } : {}), ...(count != null ? { count } : {}), ...(fromTerminal != null ? { fromTerminal } : {}) };
-  fs.appendFileSync(eventsPathFor(store), JSON.stringify(ev) + '\n', { mode: 0o600 });
+  const file = eventsPathFor(store);
+  fs.appendFileSync(file, JSON.stringify(ev) + '\n', { mode: 0o600 });
+  try {
+    const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+    if (lines.length > EVENTS_KEPT) {
+      const tmp = `${file}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
+      fs.writeFileSync(tmp, lines.slice(-EVENTS_KEPT).join('\n') + '\n', { mode: 0o600 });
+      fs.renameSync(tmp, file);
+    }
+  } catch { /* the event is written; a failed trim is retried at the next one */ }
   return ev;
 }
 export function readSessionEvents(store, { limit = 50 } = {}) {
@@ -236,6 +251,11 @@ export function cookieValue(header, name = COOKIE_NAME) {
   }
   return null;
 }
+// ⚠️ KNOWN LIMIT, accepted under today's trust (#1906): cookies do not separate ports (RFC 6265 §8.5). This cookie is sent to
+// EVERY server on this host name, whatever its port, so any other local service the browser visits receives it in its request
+// headers, and whatever logs or keeps it can replay it (a non-browser client sets any Origin it likes). Such a replay mints
+// nothing, so it leaves no mint event. The later mitigation is to serve the board on its own host name, so the host-only
+// cookie goes to the board alone; `Secure` and the `__Host-` prefix follow when it is served over https.
 export const sessionCookie = (id, maxAgeS = Math.floor(SESSION_TTL_MS / 1000)) =>
   `${COOKIE_NAME}=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAgeS}`;   // no Secure: plain http on loopback (#1906 design 2)
 export const clearedCookie = () => `${COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`;

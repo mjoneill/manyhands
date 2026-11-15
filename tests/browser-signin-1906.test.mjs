@@ -306,3 +306,17 @@ test('R8 the honest limit is written on the settings page and in the script\'s -
   assert.equal(h.status, 0, h.stderr);
   assert.match(h.stdout, sentence);
 });
+
+test('R9 the events file keeps only the last 1,000 lines', async () => {
+  const { appendSessionEvent, eventsPathFor, EVENTS_KEPT } = await import('../core/browser-sessions.mjs');
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'bs1906-ev-'));
+  try {
+    const st = path.join(d, 'browser-sessions.json');
+    for (let i = 0; i < EVENTS_KEPT + 5; i++) appendSessionEvent(st, { op: 'code-refused', reason: `n${i}` });
+    const lines = fs.readFileSync(eventsPathFor(st), 'utf8').split('\n').filter(Boolean);
+    assert.equal(EVENTS_KEPT, 1000);
+    assert.equal(lines.length, EVENTS_KEPT);
+    assert.equal(JSON.parse(lines.at(-1)).reason, `n${EVENTS_KEPT + 4}`, 'the newest is kept');
+    assert.equal(JSON.parse(lines[0]).reason, 'n5', 'the oldest five are gone');
+  } finally { fs.rmSync(d, { recursive: true, force: true }); }
+});
