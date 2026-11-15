@@ -118,7 +118,8 @@ function decider(l, reader) {
   const by = l.confirmedBy ?? null; const at = l.confirmedAt ?? null; const n = l.confirmedByCount ?? 0; const yours = l.yours === true;
   const me = seatKeyOf(reader);
   let who;
-  if (by == null) who = 'No seat\'s confirm of this claim stands now (every seat that confirmed it has since dismissed it), so it is not your verdict.';
+  // the code knows only THAT no confirm stands, not why: say just that (review of #1901)
+  if (by == null) who = 'No seat\'s confirm of this claim stands now, so it is not your verdict.';
   else if (yours) who = `You (${me}) confirmed this claim at ${at}: this verdict is yours.${n > 1 ? ` ${n - 1} other seat${n - 1 === 1 ? '\'s confirm stands' : 's\' confirms stand'} too.` : ''}`;
   else {
     const head = `${by} confirmed this claim at ${at}${n > 1 ? ` (${n} seats' confirms stand; ${by}'s is the latest)` : ''}.`;

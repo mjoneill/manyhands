@@ -318,6 +318,29 @@ test('C9 #1901 a delivery-born confirm leads the card\'s set; a confirm by a sea
     'the delivery-born confirm leads despite its 0.4; the triage confirm (0.3) falls to score order and out of the two');
 });
 
+test('C10 #1901 delivery-born means the CONFIRMING seat was shown the link: another seat\'s earlier showing does not make it lead', T, async () => {
+  // The reviewer's surviving mutant: in deliveryQuery, the deciding seat's own showing (`shownTo ?dby`) replaced by ANY seat's
+  // showing. Then a confirm given from link_list by a seat never shown the link ranks as delivery-born whenever someone else
+  // had been shown it first. C9's triage link was shown to nobody, so it could not tell the two apart.
+  const card = await newCard();
+  const top = await seedLink(card, { source: await seedSource(), score: 0.9 });
+  const x = await seedLink(card, { source: await seedSource(), score: 0.4 });
+  // seat-b is shown both on her read, and decides nothing
+  assert.deepEqual(await readLinks('seat-b', card), [top.id, x.id], 'PRECONDITION: seat-b was shown both links');
+  await untilShown(x.link);
+  // seat-d confirms x without ever being shown it
+  assert.equal((await decide('seat-d', x, 'confirmed', card)).status, 200);
+  const shown = await showingsOf(x.link);
+  assert.equal(shown.length, 1, 'PRECONDITION: exactly one showing of x');
+  assert.ok(shown[0].to.value.endsWith('seat-b'), `PRECONDITION: that showing is seat-b's, not the confirming seat's (${shown[0].to.value})`);
+  const r = await claim('seat-a', card);
+  assert.equal(r.status, 200, r.text);
+  assert.equal((await release('seat-a', card)).status, 200);
+  assert.deepEqual(r.json.roomHasRead.items.map((i) => [i.link, i.status, i.confirmedBy ?? null]),
+    [[top.id, 'proposed', null], [x.id, 'confirmed', 'seat-d']],
+    'seat-d was never shown x, so her confirm is not delivery-born: x stays in score order behind the 0.9 proposal');
+});
+
 test('G1 a read with no bearer carries no field, byte for byte, and records nothing', T, async () => {
   const card = await newCard(); const bare = await newCard();
   const s = await seedLink(card, { source: await seedSource() });
