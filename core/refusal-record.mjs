@@ -37,7 +37,8 @@ REQUEST_ID_INVALID REQUEST_ID_REQUIRED ROW_CAP SCOPE_INSUFFICIENT SEAT_MISMATCH 
 SINGLE_SEAT SOURCE_UNAVAILABLE TALK_CLOSED TOKEN_EXPIRED TOKEN_REVOKED TOKEN_UNKNOWN UNBOUNDED_PATH UNKNOWN_CURSOR UNKNOWN_LANE
 UNKNOWN_NODE UNKNOWN_PREFIX UNKNOWN_ROLE UNKNOWN_SEAT UNKNOWN_TERM UNSUPPORTED_RETURN_SHAPE WRITE_CONFLICT LINKS_UNAVAILABLE LINK_NOT_FOUND
 BAD_LIMIT BAD_RUN_ID READINGS_UNAVAILABLE READING_NOT_FOUND
-BAD_TEXT BAD_K BAD_POST_ID BAD_SINCE RECALL_UNAVAILABLE RECALL_POST_NOT_FOUND RECALL_OFFER_NOT_FOUND`.split(/\s+/)));
+BAD_TEXT BAD_K BAD_POST_ID BAD_SINCE RECALL_UNAVAILABLE RECALL_POST_NOT_FOUND RECALL_OFFER_NOT_FOUND
+AUTH_AMBIGUOUS CODE_MISSING CSRF_CONTENT_TYPE CSRF_ORIGIN`.split(/\s+/)));
 // (#1894: the second-last line's four codes are the readings routes' own; #1689: the last line's are the recall routes'.)
 // The adapter's rails (POST /api/refusals `rule`), verbatim; any other rule is `unlisted`.
 export const REFUSAL_RULES = Object.freeze(new Set(['#755 work gate', '#755 claim cooldown']));
@@ -61,6 +62,7 @@ export const ROUTE_TEMPLATES = Object.freeze(new Set([
   'POST /api/procedure-versions', 'POST /api/procedures', 'POST /api/refusals', 'POST /api/roles', 'POST /api/roster',
   'POST /api/runs', 'POST /api/runs/generated', 'POST /api/search', 'POST /api/search/all', 'POST /api/talks',
   'POST /api/recall', 'POST /api/recall/opened',   // #1689
+  'POST /api/session', 'DELETE /api/session',   // #1906 — a browser signs in with a one-time code; signs out
   'POST /api/tending-config', 'POST /api/tending/mints', 'POST /api/tending/order', 'POST /api/tending/shuffle',
   'POST /api/tending/claims', 'POST /api/tending/whispers', 'POST /api/tending/windows', 'POST /api/wakes', 'PUT /api/seats/:p/state',
   'POST /api/ceremony-bells', 'PATCH /api/ceremony-bells', 'POST /api/ceremony-bells/events'   // #1815
