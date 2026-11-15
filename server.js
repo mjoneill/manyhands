@@ -6740,7 +6740,7 @@ async function graphDeliveryStep(id, input) {
  */
 const RECEIVED_ONE_ROW = 'received is written one row at a time, on POST /api/deliveries/:id/events, with the seat\'s own key';
 async function deliveryReceived(req, id, body) {
-  if (!DELIVERIES_UNIT) return { status: 400, wire: { error: 'received is recorded only where deliveries live in the graph (SCRUM_GRAPH_UNIT_DELIVERIES=1); nothing was written' } };
+  if (!DELIVERIES_UNIT) return { status: 400, wire: { error: `received is recorded only where deliveries live in the graph (SCRUM_GRAPH_UNIT_DELIVERIES=1); nothing was written. On this board state must be one of ${DELIVERY_STATES.join(' | ')}` } };
   if (!LOGBORN) return deliveryGraphDown('the credential that writes received is judged by the log-born unit (SCRUM_GRAPH_UNIT_LOGBORN), which is off here');
   const who = LOGBORN.actorFor(req, 'delivery.received');
   if (who.refused) return { status: who.status ?? 401, wire: { error: `graph write refused: ${who.refused}`, code: who.status === 403 ? 'GRAPH_WRITE_SCOPE' : 'GRAPH_WRITE_UNAUTHENTICATED' } };
