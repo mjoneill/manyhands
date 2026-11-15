@@ -594,6 +594,8 @@ export const LOGBORN_TERMS = Object.freeze({
   RecallOffer: `${RS}RecallOffer`, offerOn: `${RS}offerOn`, offeredSource: `${RS}offeredSource`,
   RecallOpening: `${RS}RecallOpening`, ofOffer: `${RS}ofOffer`, openedBy: `${RS}openedBy`, openedVia: `${RS}openedVia`,
   RecallRead: `${RS}RecallRead`, readOf: `${RS}readOf`, readBy: `${RS}readBy`,
+  // the run activity's input (written by the research verbs, not a record kind): recall.offer binds a claim to its source through it
+  used: 'http://www.w3.org/ns/prov#used',
 });
 const TM = LOGBORN_TERMS;
 
@@ -1146,6 +1148,7 @@ function planRecord(c) {
   const delAny = [];       // #1574 R4a [{s, keep:[predicate…]}]: every triple of s is removed except those predicates
   const delOwned = [];     // #1574 R4a [{owner, prefix}]: every triple of every node that is attachmentOf owner AND under prefix is removed
   const delLinked = [];    // #1582 [{link, owner, type, pred}]: every `pred` value on every node of `type` that `link`s to owner is removed
+  const delMatched = [];   // #1689 [{patterns}]: every triple of every node ?NODE one of the patterns proves, and its recordedBy in the bk graph
   const condIns = [];      // #1582 [{s, p, o, unless:[node, type]}]: inserted only where `node` is NOT of `type` when the update runs
   const insAt = [];        // #1762 S2 [[s, p]]: s p ?n_at, the receipt's own NOW(), ok-guarded through its subject
   let verGuard = null;
@@ -1301,6 +1304,11 @@ function planRecord(c) {
     for (const o of R.offers) {
       fresh.push(o.iri);
       pre.push(`    ${I(o.assertion)} ${I(TM.type)} ${I(TM.Assertion)} .`, `    ${I(o.source)} ${I(TM.type)} ${I(TM.SourceVersion)} .`);
+      // the claim CAME FROM this source, by both ties the graph holds for every published claim (measured 251 of 251 on
+      // 2026-11-14): its run used the source (how recall and the reading page name a claim's source), and its passage is one
+      // of the source's blocks (written in the same extraction.publish as the claim). Either one missing refuses the offer.
+      pre.push(`    FILTER EXISTS { ${I(o.assertion)} ${I(TM.ofRun)} ?xor . ?xor ${I(TM.used)} ${I(o.source)} }`,
+        `    FILTER EXISTS { ${I(o.assertion)} ${I(TM.expressedIn)} ?xop FILTER(STRSTARTS(STR(?xop), ${JSON.stringify(`${o.source}/block/`)})) }`);
       add(o.iri, TM.type, I(TM.RecallOffer)); add(o.iri, TM.offerOn, I(R.post)); add(o.iri, TM.offeredSource, I(o.source));
       add(o.iri, TM.fromAssertion, I(o.assertion)); add(o.iri, TM.score, L(o.score)); add(o.iri, TM.minScore, L(o.bar));
       add(o.iri, TM.dateCreated, L(R.at)); add(o.iri, TM.wasAssociatedWith, I(c.actor)); add(o.iri, TM.recordedBy, ref(c.opId));
@@ -1468,6 +1476,22 @@ function planRecord(c) {
     // #1582 point 6 — a model call that quoted this post keeps no copy of its text: in the SAME update, every
     // `postedText` on a ModelCall whose producedPost is this post is deleted.
     delLinked.push({ link: TM.producedPost, owner: P, type: TM.ModelCall, pred: TM.postedText });
+    // #1689 — the post's recall records go too. An offer holds no text, but "this post touched that source" says what the post
+    // was about, which is what a redaction exists to stop. Offer IRIs are hashes, never under the post's prefix, so a node goes
+    // only when its ownership is PROVEN by type, edge and IRI shape together: an offer (RecallOffer, offerOn P, under recall/);
+    // an opening of one (RecallOpening, ofOffer that offer, under <offer>/opened/); a read (RecallRead, readOf P, under
+    // recall/read/). A node that carries one of those edges to P without the rest refuses the whole redaction rather than
+    // widening it. Each node's recordedBy goes from the bookkeeping graph too: its IRI is a hash of the post and the source
+    // (or the seat), so a recordedBy left behind would still let someone check "did post P touch source S".
+    const REC = JSON.stringify('https://scrumboard.local/recall/'), REC_READ = JSON.stringify('https://scrumboard.local/recall/read/');
+    pre.push(`    FILTER NOT EXISTS { ?xr1 ${I(TM.offerOn)} ${I(P)} FILTER(NOT EXISTS { ?xr1 ${I(TM.type)} ${I(TM.RecallOffer)} } || !STRSTARTS(STR(?xr1), ${REC}) || STRSTARTS(STR(?xr1), ${REC_READ})) }`,
+      `    FILTER NOT EXISTS { ?xr2 ${I(TM.ofOffer)} ?xr2o . ?xr2o ${I(TM.offerOn)} ${I(P)} FILTER(NOT EXISTS { ?xr2 ${I(TM.type)} ${I(TM.RecallOpening)} } || !STRSTARTS(STR(?xr2), CONCAT(STR(?xr2o), "/opened/"))) }`,
+      `    FILTER NOT EXISTS { ?xr3 ${I(TM.readOf)} ${I(P)} FILTER(NOT EXISTS { ?xr3 ${I(TM.type)} ${I(TM.RecallRead)} } || !STRSTARTS(STR(?xr3), ${REC_READ})) }`);
+    delMatched.push({ patterns: [
+      `?NODE ${I(TM.type)} ${I(TM.RecallOffer)} ; ${I(TM.offerOn)} ${I(P)} .`,
+      `?NODEo ${I(TM.type)} ${I(TM.RecallOffer)} ; ${I(TM.offerOn)} ${I(P)} . ?NODE ${I(TM.type)} ${I(TM.RecallOpening)} ; ${I(TM.ofOffer)} ?NODEo .`,
+      `?NODE ${I(TM.type)} ${I(TM.RecallRead)} ; ${I(TM.readOf)} ${I(P)} .`,
+    ] });
     add(P, TM.type, I(TM.RedactedPost));
     add(P, TM.redactedBy, ref(c.opId));
   } else if (c.kind === 'person.import') {
@@ -1508,7 +1532,7 @@ function planRecord(c) {
     for (const a of P.aliases) add(P.iri, TM.aliases, L(a));
     add(P.iri, TM.recordedBy, ref(c.opId));
   }
-  return { target, pre, fresh, freshSubject, ins, delAll, delAny, delOwned, delLinked, condIns, insAt, verGuard, dispatchHold };
+  return { target, pre, fresh, freshSubject, ins, delAll, delAny, delOwned, delLinked, delMatched, condIns, insAt, verGuard, dispatchHold };
 }
 
 function compileRecord(c) {
@@ -1566,6 +1590,16 @@ function compileRecord(c) {
     top.push(`  OPTIONAL { ?xl${k} ${ref(link)} ${ref(owner)} ; ${ref(LOGBORN_TERMS.type)} ${ref(type)} ; ${ref(pred)} ?xlo${k} }`);
     dBinds.push(ok(`?xl${k}`, `xl${k}`), ok(`?xlo${k}`, `xlo${k}`));
     del.push(`  ?d_xl${k} ${ref(pred)} ?d_xlo${k} .`);
+  });
+  (plan.delMatched || []).forEach(({ patterns }, k) => {
+    // #1689 — ONE optional over a UNION of the proven node sets, so its rows are the SUM of their triples, never a product;
+    // the bookkeeping recordedBy is read inside it, where ?xm is bound (a free read would bind every recordedBy in the store)
+    const n = `?xm${k}`;
+    const arms = patterns.map((p) => `{ ${p.replaceAll('?NODEo', `?xmq${k}`).replaceAll('?NODE', n)} }`).join(' UNION ');
+    top.push(`  OPTIONAL { ${arms} ${n} ?xmp${k} ?xmo${k} OPTIONAL { GRAPH ${BK} { ${n} ${EX.recordedBy} ?xmr${k} } } }`);
+    dBinds.push(ok(n, `xm${k}`), ok(`?xmp${k}`, `xmp${k}`), ok(`?xmo${k}`, `xmo${k}`), ok(`?xmr${k}`, `xmr${k}`));
+    del.push(`  ?d_xm${k} ?d_xmp${k} ?d_xmo${k} .`);
+    bDel.push(`  ?d_xm${k} ${EX.recordedBy} ?d_xmr${k} .`);
   });
   (plan.condIns || []).forEach(({ s, p, o, unless }, k) => {
     // ?xcn is never bound, so IF(...) yields an UNBOUND ?xc (no triple) when the node IS of the type, else the literal

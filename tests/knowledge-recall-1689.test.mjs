@@ -362,6 +362,26 @@ test('H3 a retry decides as of its own sequence, and never rewrites a later post
   } finally { fs.rmSync(d, { recursive: true, force: true }); }
 });
 
+test('H6 a post redacted while it waited for a retry is forgotten, not given up; forget drops a post from both files', async () => {
+  const d = tmp();
+  try {
+    const embed = fakeEmbed();
+    const h = hookOver(d, { embed });
+    embed.down = true; post(h, 'gone', 1, 'kiwi kiwi'); await h.hook.idle(); embed.down = false;
+    assert.ok(h.queue.has('gone'));
+    h.texts.delete('gone');   // readPostText answers null: the post is a tombstone now
+    post(h, 'next', 2, 'plum plum'); await h.hook.idle();
+    assert.equal(h.queue.has('gone'), false, 'its id is kept nowhere, not even as gave up');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(d, 'recall-queue.json'), 'utf8')).posts.gone, undefined);
+    assert.ok(h.projection.has('next'));
+    assert.deepEqual([h.queue.forget(['next', 'never']), h.projection.forget(['next', 'never'])], [1, 1]);
+    assert.equal(h.projection.has('next'), false);
+    assert.equal(Object.hasOwn(JSON.parse(fs.readFileSync(path.join(d, 'recall-offers.json'), 'utf8')).posts, 'next'), false, 'and the file says so');
+    assert.equal(Object.hasOwn(JSON.parse(fs.readFileSync(path.join(d, 'recall-queue.json'), 'utf8')).posts, 'next'), false);
+    assert.deepEqual([h.queue.forget(['next']), h.projection.forget(['next'])], [0, 0], 'a second forget writes nothing');
+  } finally { fs.rmSync(d, { recursive: true, force: true }); }
+});
+
 test('H5 an offer exists only once APPLIED; a failed write is retried; one that landed though reported failed is taken back once', async () => {
   const d = tmp();
   try {

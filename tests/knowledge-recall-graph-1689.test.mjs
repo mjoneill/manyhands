@@ -20,6 +20,10 @@
  *   G6  a read: one per (post, seat), a re-read refused; a read of a post that carries no offer is refused
  *   G7  existing kinds digest exactly as before the three were added (RECORD_V is not bumped)
  *   G8  offersQuery reads the offers back as the items a post carries (the projection's rebuild)
+ *   G9  an offer whose claim did not come from the source it names (a real claim, a real source, not each other's) is refused
+ *   G10 post.redact takes the post's recall records with it in the SAME update: its offers, their openings and its reads, in the
+ *       default graph and their recordedBy in the bookkeeping graph; another post's records are untouched
+ *   G11 a node that claims to belong to the post's recall but is not provably one refuses the whole redaction (never widens)
  */
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -67,7 +71,7 @@ async function world({ claims = 2, seq = 7 } = {}) {
     <${src}> <${RDF}type> <${RS}SourceVersion> ; <${SC}name> "The source" ; <${SC}url> "https://example.com/s" .
     <${run}> <${RDF}type> <${PROV}Activity> ; <${RS}op> "extract" ; <${PROV}used> <${src}> .
     <${run}/extraction> <${RDF}type> <${RS}ExtractionReport> ; <${RS}ofRun> <${run}> ; <${RS}at> "2026-11-14T10:00:00.000Z" .
-    ${as.map((a, i) => `<${a}> <${RDF}type> <${RS}Assertion> ; <${RS}ofRun> <${run}> ; <${RS}gist> "gist ${i}" ; <${RS}anchorText> "quote ${i}" .`).join('\n')} }`);
+    ${as.map((a, i) => `<${a}> <${RDF}type> <${RS}Assertion> ; <${RS}ofRun> <${run}> ; <${RS}expressedIn> <${src}/block/${i}> ; <${RS}gist> "gist ${i}" ; <${RS}anchorText> "quote ${i}" .`).join('\n')} }`);
   return { id, post, src, run, as };
 }
 const item = (w, i = 0, score = 0.7) => ({ source: w.src, assertion: w.as[i], score, bar: 0.62 });
@@ -171,4 +175,54 @@ test('G8 offersQuery reads a post\'s offers back as the items it carries', { ski
   assert.deepEqual(got.items.map((i) => [i.why.claim, i.score, i.source.title, i.why.gist, i.why.quote]), [[a.as[1], 0.71, 'The source', 'gist 1', 'quote 1'], [b.as[0], 0.66, 'The source', 'gist 0', 'quote 0']]);
   assert.equal(got.items[0].readingPage, `/reading.html?run=${a.run.split('/').pop()}`);
   assert.equal(got.items[0].readAt, '2026-11-14T10:00:00.000Z');
+});
+
+test('G9 an offer naming a real claim and a real source the claim did not come from is refused, nothing written', { skip: SKIP }, async () => {
+  const a = await world(); const b = await world();
+  const crossed = await client.update(offerIntention({ post: a.post, offers: [{ source: b.src, assertion: a.as[0], score: 0.7, bar: 0.62 }], actor: BOARD, at: at() }));
+  assert.equal(crossed.outcome, 'PRECONDITION_FAILED', `a's claim offered as b's source: ${JSON.stringify(crossed)}`);
+  assert.equal(await count(`?o <${RS}offerOn> <${a.post}>`), 0, 'nothing written');
+  // CONTROL: the same claim under its own source is accepted
+  assert.equal((await client.update(offerIntention({ post: a.post, offers: [{ source: a.src, assertion: a.as[0], score: 0.7, bar: 0.62 }], actor: BOARD, at: at() }))).outcome, 'APPLIED');
+});
+
+const redact = (w) => client.update({ kind: 'post.redact', opId: `urn:ex:op/redact-${crypto.randomUUID()}`, actor: BOARD, post: { id: w.id }, authorityRef: 'test:1689', occurredAt: at() });
+const BK_REC = (iri) => `SELECT ?r WHERE { GRAPH ?g { <${iri}> <urn:ex:recordedBy> ?r } }`;
+
+test('G10 post.redact takes the post\'s offers, their openings and its reads with it, bookkeeping included; others untouched', { skip: SKIP }, async () => {
+  const a = await world(); const b = await world();
+  for (const w of [a, b]) {
+    assert.equal((await client.update(offerIntention({ post: w.post, offers: [item(w)], actor: BOARD, at: at() }))).outcome, 'APPLIED');
+    const offer = offerIri(w.post, w.src);
+    assert.equal((await client.update(openIntention({ offer, actor: SEAT, via: 'seat', at: at() }))).outcome, 'APPLIED');
+    assert.equal((await client.update(openIntention({ offer, actor: BOARD, via: 'browser', at: at() }))).outcome, 'APPLIED');
+    assert.equal((await client.update(readIntention({ post: w.post, actor: SEAT, at: at() }))).outcome, 'APPLIED');
+  }
+  const nodes = (w) => { const o = offerIri(w.post, w.src); return [o, openingIri(o, SEAT), openingIri(o, BOARD), readIri(w.post, SEAT)]; };
+  for (const n of nodes(a)) assert.equal((await q(BK_REC(n))).length, 1, `PRECONDITION: ${n} has its recordedBy`);
+  const r = await redact(a);
+  assert.equal(r.outcome, 'APPLIED', JSON.stringify(r));
+  for (const n of nodes(a)) {
+    assert.equal(await count(`<${n}> ?p ?o`), 0, `${n}: no default-graph triple left`);
+    assert.equal((await q(BK_REC(n))).length, 0, `${n}: no bookkeeping triple left`);
+  }
+  assert.equal(await count(`?x ?p <${a.post}>`), 0, 'nothing in the store points at the redacted post any more');
+  assert.equal(await count(`{ ?x <${RS}offeredSource> <${a.src}> } UNION { ?x <${RS}ofOffer> <${offerIri(a.post, a.src)}> }`), 0);
+  for (const n of nodes(b)) assert.equal(await count(`<${n}> ?p ?o`) > 0, true, `${n}: the other post's record is untouched`);
+  assert.equal(await count(`<${a.post}> <${RDF}type> <${RS}RedactedPost>`), 1, 'and the post is a tombstone as before');
+});
+
+test('G11 a node that says it is the post\'s but cannot be proven so refuses the whole redaction', { skip: SKIP }, async () => {
+  for (const stray of [
+    (w) => `<https://scrumboard.local/recall/${'cd'.repeat(32)}> <${RS}offerOn> <${w.post}> .`,   // not typed an offer
+    (w) => `<https://scrumboard.local/elsewhere/${crypto.randomUUID()}> <${RDF}type> <${RS}RecallRead> ; <${RS}readOf> <${w.post}> .`,   // a read outside recall/read/
+  ]) {
+    const w = await world();
+    await client.update(offerIntention({ post: w.post, offers: [item(w)], actor: BOARD, at: at() }));
+    await raw(`INSERT DATA { ${stray(w)} }`);
+    const r = await redact(w);
+    assert.equal(r.outcome, 'PRECONDITION_FAILED', `ambiguity refuses, never widens: ${JSON.stringify(r)}`);
+    assert.equal(await count(`<${w.post}> <${RDF}type> <${SC}Comment>`), 1, 'the post is not redacted');
+    assert.equal(await count(`<${offerIri(w.post, w.src)}> ?p ?o`) > 0, true, 'and nothing was deleted');
+  }
 });

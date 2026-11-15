@@ -352,6 +352,16 @@ export function createRecallQueue({ file, cap = POST_CAP, fsImpl = fs }) {
     has: (id) => !!posts && Object.hasOwn(posts, id),
     raw: (id) => (posts && Object.hasOwn(posts, id) ? posts[id] : undefined),
     decide(id, entry) { need(); posts[id] = entry; save(); },
+    /** Every post id held (to ask the graph which are redacted). */
+    ids: () => (posts ? Object.keys(posts) : []),
+    /** Drop posts that no longer exist as posts (redacted): their id is not kept here at all. → how many were dropped. */
+    forget(ids) {
+      if (!posts) return 0;
+      let n = 0;
+      for (const id of ids) if (Object.hasOwn(posts, id)) { delete posts[id]; n++; }
+      if (n) save();
+      return n;
+    },
     /** The oldest posts still waiting for a retry, by sequence. */
     pending(n) { need(); return Object.entries(posts).filter(([, e]) => typeof e.unavailable === 'string' && !e.gaveUp).sort(([, a], [, b]) => a.seq - b.seq).slice(0, n).map(([id, e]) => ({ id, ...e })); },
     /** A post's `recall` when it could not be decided: { unavailable, gaveUp? }, else undefined. */
@@ -409,6 +419,15 @@ export function createOfferProjection({ file, fsImpl = fs, log = (m) => console.
     entries: () => (posts ? Object.values(posts).map((e) => ({ seq: e.seq, sources: e.items.map((i) => i.sourceIri) })) : []),
     itemFor(id, runId) { const e = posts && Object.hasOwn(posts, id) ? posts[id] : null; return e ? e.items.find((i) => i.runId === runId) ?? null : null; },
     hasItems: (id) => !!posts && Object.hasOwn(posts, id) && posts[id].items.length > 0,
+    ids: () => (posts ? Object.keys(posts) : []),
+    /** Drop redacted posts from the cache (the graph no longer holds their offers, so a rebuild agrees). → how many. */
+    forget(ids) {
+      if (!posts) return 0;
+      let n = 0;
+      for (const id of ids) if (Object.hasOwn(posts, id)) { delete posts[id]; n++; }
+      if (n) save();
+      return n;
+    },
   };
   return self;
 }
@@ -459,7 +478,8 @@ export function createRecallHook({ engine, queue, projection, ready = async () =
     const tries = (e.tries ?? 1) + 1;
     const { id, ...was } = e;
     const failed = (reason) => queue.decide(id, { ...was, unavailable: reason, lastReason: reason, tries, ...(tries >= MAX_TRIES ? { gaveUp: true } : {}) });
-    if (text === null) return queue.decide(id, { ...was, unavailable: 'the post can no longer be read', lastReason: 'the post can no longer be read', gaveUp: true });
+    // gone (redacted): nothing is kept about it, not even that it failed — a redaction takes the post's recall with it
+    if (text === null) { queue.forget([id]); projection.forget([id]); return; }
     if (text === undefined) return failed('the post could not be re-read');
     if (projection.has(id)) return queue.decide(id, { seq: e.seq, at: iso(), offered: projection.publicOf(id)?.items.length ?? 0, retried: tries });   // already in the graph (a rebuilt cache found it)
     const r = await engine.recall(text, { allSources: true });

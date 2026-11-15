@@ -61,7 +61,7 @@ const TOKENS = path.join(os.tmpdir(), `kr1689-tokens-${process.pid}.json`);
 after(() => { for (const f of [ROSTER, TOKENS]) fs.rmSync(f, { force: true }); });
 
 // ── the fake embedder: a word's count on its own axis, so every score below is computed by hand ───────────────────────────
-const AX = ['kiwi', 'melon', 'plum', 'fig', 'pear', 'quince', 'lime', 'grape', 'olive'];
+const AX = ['kiwi', 'melon', 'plum', 'fig', 'pear', 'quince', 'lime', 'grape', 'olive', 'lemon'];
 const fakeVec = (t) => { const s = String(t).toLowerCase(); const v = AX.map((w) => (s.match(new RegExp(`\\b${w}\\b`, 'g')) || []).length); return v.some(Boolean) ? [...v, 0] : [...AX.map(() => 0), 1]; };
 function fakeEmbedder() {
   const st = { calls: 0, mode: 'pass', delayMs: 0, server: null };
@@ -158,9 +158,9 @@ async function seedRun({ title, url, claims }) {
   const t = [`<${src}> <${RDF}type> <${RS}SourceVersion> ; <${SCHEMA}url> ${L(url)} ; <${SCHEMA}name> ${L(title)} .`,
     `<${run}> <${RDF}type> <${PROV}Activity> ; <${RS}op> "extract" ; <${PROV}used> <${src}> .`,
     `<${run}/extraction> <${RDF}type> <${RS}ExtractionReport> ; <${RS}ofRun> <${run}> ; <${RS}outcome> "complete" ; <${RS}at> ${L(at)} .`];
-  const ids = claims.map((c) => {
+  const ids = claims.map((c, k) => {
     const a = `https://scrumboard.local/assertion/${uuid()}`;
-    t.push(`<${a}> <${RDF}type> <${RS}Assertion> ; <${RS}ofRun> <${run}> ; <${RS}anchorText> ${L(c.quote ?? c.gist)}${c.gist ? ` ; <${RS}gist> ${L(c.gist)}` : ''} .`);
+    t.push(`<${a}> <${RDF}type> <${RS}Assertion> ; <${RS}ofRun> <${run}> ; <${RS}expressedIn> <${src}/block/${k}> ; <${RS}anchorText> ${L(c.quote ?? c.gist)}${c.gist ? ` ; <${RS}gist> ${L(c.gist)}` : ''} .`);
     return a;
   });
   await seed(t.join('\n'));
@@ -459,6 +459,38 @@ test('L1 latency: POST /api/conversations with recall on, against a post that ge
   } finally { emb.st.mode = 'pass'; emb.st.delayMs = 0; }
 });
 
+let redactedId = null;
+test('X3 a redacted post takes its recall with it: graph records, both files and the counts', T, async () => {
+  await seedRun({ title: 'The lemon tree', url: 'https://example.com/lemon', claims: [{ gist: 'lemon', quote: 'Lemons.' }] });
+  await recall('lemon');
+  const p = await posted('seat-a', long('lemon lemon'));
+  const g = await recallOf(p.json.id, { seat: null });
+  assert.ok(g.json.recall?.items?.length, g.text);
+  const run = g.json.recall.items[0].readingPage.split('run=')[1];
+  assert.equal((await call('POST', '/api/recall/opened', { run, post: p.json.id }, { seat: 'seat-b' })).status, 200);
+  const counts = async () => (await call('GET', '/api/recall/counts', null, { seat: null })).json;
+  const b0 = (await counts()).seats['seat-b']?.readCarrying ?? 0;
+  await call('GET', `/api/conversations/${p.json.id}`, null, { seat: 'seat-b' });
+  await until(async () => ((await counts()).seats['seat-b']?.readCarrying ?? 0) === b0 + 1);
+  const dir = path.dirname(w.boardFile);
+  const inFile = (f) => { try { return Object.hasOwn(JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')).posts, p.json.id); } catch { return false; } };
+  assert.equal(inFile('recall-offers.json'), true, 'PRECONDITION: the cache holds the post');
+  assert.equal(inFile('recall-queue.json'), true, 'PRECONDITION: the queue holds the post');
+  const c0 = await counts();
+  // the redaction is the host-only substrate's (#1574 R4a): an intention sent straight to the executor, as its own rows send it
+  const gc = createGraphClient({ baseUrl: w.exec.baseUrl, expectedDatasetId: WB_DATASET, timeoutMs: 30000, label: 'kr1689-redact' });
+  const r = await gc.update({ kind: 'post.redact', opId: `urn:ex:op/redact-${uuid()}`, actor: 'https://scrumboard.local/person/board', post: { id: p.json.id }, authorityRef: 'test:1689', occurredAt: new Date().toISOString() });
+  assert.equal(r.outcome, 'APPLIED', JSON.stringify(r));
+  const c1 = await counts();
+  assert.deepEqual([c0.offered - c1.offered, c0.postsWithRecall - c1.postsWithRecall, c0.opened - c1.opened, b0 + 1 - (c1.seats['seat-b']?.readCarrying ?? 0)], [1, 1, 1, 1],
+    `the counts no longer count its offer, opening or read: ${JSON.stringify({ c0, c1 })}`);
+  await until(async () => !inFile('recall-offers.json') && !inFile('recall-queue.json'));
+  const gone = await call('GET', `/api/conversations/${p.json.id}`, null, { seat: null });
+  assert.equal(gone.json.redacted, true); assert.equal('recall' in gone.json, false);
+  assert.equal(fs.readFileSync(path.join(dir, 'recall-offers.json'), 'utf8').includes('The lemon tree'), false, 'the source title is in no file under any post');
+  redactedId = p.json.id;
+});
+
 test('X2 the offer cache is a projection: delete it, restart the server, and the same posts carry the same recall', T, async () => {
   const dir = path.dirname(w.boardFile);
   const ids = (await call('GET', '/api/conversations?limit=200', null, { seat: null })).json.filter((x) => x.recall?.items).map((x) => x.id).slice(-5);
@@ -475,4 +507,5 @@ test('X2 the offer cache is a projection: delete it, restart the server, and the
   await until(async () => 'recall' in (await call('GET', `/api/conversations/${ids[0]}`, null, { seat: null, base })).json);
   for (const id of ids) assert.equal((await call('GET', `/api/conversations/${id}`, null, { seat: null, base })).text, before[id], `post ${id}: the same bytes`);
   assert.ok(fs.existsSync(path.join(dir, 'recall-offers.json')), 'and the cache file is written again');
+  assert.equal(Object.hasOwn(JSON.parse(fs.readFileSync(path.join(dir, 'recall-offers.json'), 'utf8')).posts, redactedId), false, 'the rebuilt cache agrees: the redacted post is not in it');
 });

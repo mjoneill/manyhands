@@ -7220,10 +7220,32 @@ function recallUnit() {
   const loaded = queue.load();
   if (!loaded.ok) console.error(`[#1689] ${loaded.error}`);
   const projection = createOfferProjection({ file: RECALL_OFFERS_FILE });
-  const ready = () => projection.ensure(recallRebuild);
+  // the cache, loaded or rebuilt, and then rid of any post redacted since (the hook's quiet rule and the opened route read it)
+  const ready = async () => { await projection.ensure(recallRebuild); await recallReconcile(queue, projection); };
   _recall = { engine, queue, projection, ready,
     hook: createRecallHook({ engine, queue, projection, ready, readConfig: () => readRecallConfig(), readPostText: recallPostText, writeOffers: recallWriteOffers }) };
   return _recall;
+}
+/**
+ * A redaction (post.redact, #1574 R4a) deletes the post's recall RECORDS in the graph, in its own update; the two files are
+ * projections and must not keep the post's id either. The redaction is the executor's, with no route here to hook, so the
+ * files are RECONCILED: one query asks which of the posts they hold are now tombstones, and those ids are dropped from both
+ * (a rebuilt cache agrees, since the graph holds no offer for them). Run before the hook decides a post, before an opening
+ * and before the counts; a read of a tombstone drops its id with no query. A failed query leaves the files as they were
+ * (logged): the graph is the record, and the next reconcile catches up.
+ */
+async function recallReconcile(queue, projection) {
+  const ids = [...new Set([...queue.ids(), ...projection.ids()])].filter((id) => RECALL_POST_ID_RE.test(id));
+  if (!ids.length) return;
+  try {
+    const rows = await LOGBORN.query(`SELECT ?p WHERE { VALUES ?p { ${ids.map((id) => `<${RECALL_POST_IRI(id)}>`).join(' ')} } ?p a <https://scrumboard.local/ns#RedactedPost> }`);
+    const gone = rows.map((r) => String(r.p.value).slice(RECALL_POST_IRI('').length)).filter((id) => ids.includes(id));
+    if (gone.length) recallForget(gone, queue, projection);
+  } catch (e) { console.error(`[#1689] redacted posts not yet dropped from the recall files: ${e?.message ?? e}`); }
+}
+function recallForget(ids, queue = recallUnit().queue, projection = recallUnit().projection) {
+  try { queue.forget(ids); } catch (e) { console.error(`[#1689] recall queue not rid of ${ids.join(', ')}: ${e?.message ?? e}`); }
+  projection.forget(ids);
 }
 /**
  * The `recall` field a post read carries, from the offer cache and the queue alone: no executor query, no embedder call. A
@@ -7340,8 +7362,9 @@ async function handleRecallCounts(req, res) {
     if (ms !== null && !Number.isFinite(ms)) return sendJSON(res, 400, { error: 'since is an ISO date-time, e.g. 2026-11-05T00:00:00Z', code: 'BAD_SINCE' });
     const since = ms === null ? null : new Date(ms).toISOString();
     if (!LOGBORN) return sendJSON(res, 503, { error: recallOffReason(), code: 'RECALL_UNAVAILABLE' });
-    const { queue } = recallUnit();
+    const { queue, projection } = recallUnit();
     if (!queue.loaded()) return sendJSON(res, 503, { error: queue.error(), code: 'RECALL_UNAVAILABLE' });
+    await recallReconcile(queue, projection);   // the queue's numbers must not count a redacted post either
     const T = RECALL_TERMS;
     const after = since ? `FILTER(STR(?at) >= ${JSON.stringify(since)}) ` : '';
     const offers = await LOGBORN.query(`SELECT ?o ?post WHERE { ?o a <${T.RecallOffer}> ; <${T.offerOn}> ?post ; <${T.dateCreated}> ?at ${after}}`);
@@ -13278,7 +13301,11 @@ async function handleGetConversation(req, res, id) {
     if (ANNOUNCE_EXECUTOR) {
       const g = await readGraphPost(id);
       if (g.unavailable) return sendJSON(res, 503, { error: `the graph could not be read: ${g.unavailable}`, code: 'GRAPH_UNAVAILABLE' });
-      if (g.redacted) return sendJSON(res, 200, g.redacted);
+      if (g.redacted) {   // #1689 — a tombstone read drops the post's id from the recall files (after the answer, no query)
+        sendJSON(res, 200, g.redacted);
+        if (_recall) setImmediate(() => recallForget([id]));
+        return;
+      }
       if (g.post) { const shown = withRecall(g.post); sendJSON(res, 200, shown); return noteRecallRead(req, shown); }   // #1689
     }
     const data = readBoard();
