@@ -530,7 +530,7 @@ export function staticCheck(sparql, opId) {
 export const RECORD_V = 2;   // 2: memory.revise records the identity it replaces (a MemoryRevision node)
 /** #1905 — a hand link's reason is one line: the line the claim would add to the card. */
 export const ATTACH_REASON_MAX = 300;
-export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create', 'card.write', 'entity.put', 'origin.prepare', 'refusal.record', 'extraction.publish', 'link.propose', 'link.attach', 'link.decide', 'link.show', 'recall.offer', 'recall.open', 'recall.read', 'delivery.retrieved', 'seat.latestFetched']);
+export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create', 'card.write', 'entity.put', 'origin.prepare', 'refusal.record', 'extraction.publish', 'link.propose', 'link.attach', 'link.decide', 'link.show', 'recall.offer', 'recall.open', 'recall.read', 'delivery.retrieved', 'seat.latestFetched', 'delivery.received']);
 
 const RS = 'https://scrumboard.local/ns#';
 const RSC = 'https://schema.org/';
@@ -605,6 +605,9 @@ export const LOGBORN_TERMS = Object.freeze({
   retrievedAt: `${RS}retrievedAt`, retrievedBy: `${RS}retrievedBy`,
   latestFetchedBy: `${RS}latestFetchedBy`, latestFetchedPost: `${RS}latestFetchedPost`, latestFetchedSeq: `${RS}latestFetchedSeq`,
   latestFetchedPostAt: `${RS}latestFetchedPostAt`, latestFetchedAt: `${RS}latestFetchedAt`,
+  // #1902 — the seat's own receipt for its delivery row: two triples ON the delivery node, beside its steps and never one of them
+  // (no step node, no version bump), so the runner's next legal step and its expected version are unaffected
+  receivedAt: `${RS}receivedAt`, receivedBy: `${RS}receivedBy`,
   // the run activity's input (written by the research verbs, not a record kind): recall.offer binds a claim to its source through it
   used: 'http://www.w3.org/ns/prov#used',
 });
@@ -640,6 +643,7 @@ const RECORD_FIELDS = {
   'recall.read': ['read', 'post', 'at'],      // #1689 — a seat read a post that carried an offer
   'delivery.retrieved': ['target', 'seat', 'at'],   // #1902 — a seat's credential retrieved the post of its own delivery row: a mark ON the row, once
   'seat.latestFetched': ['node', 'seat', 'post', 'seq', 'postAt', 'at'],   // #1902 — the newest post a seat's credential has fetched: one node per seat, replaced upward only
+  'delivery.received': ['target', 'seat', 'at'],   // #1902 — the row's own seat says its runtime holds the post: a mark ON the row, once
 };
 
 // #1762 S1b — the record kinds whose write records ONE ChangeActivity (part 0) when the intention carries `history`. The
@@ -976,6 +980,14 @@ function canonicalizeRecord(i) {
     if (!post.startsWith(ENTITY_IRI)) fail(`post must be a post's entity IRI (${ENTITY_IRI}<id>)`);
     if (!Number.isSafeInteger(i.seq) || i.seq <= 0) fail('seq must be a positive safe integer (the post\'s postSeq)');
     record = { node, seat, post, seq: String(i.seq), postAt: rOpt(i.postAt, 'postAt'), at: rStr(i.at, 'at') };
+  } else if (i.kind === 'delivery.received') {
+    // #1902 — the actor IS the seat whose row it is: a receipt records what that seat's own side did, never a claim about it
+    const target = checkIri(i.target, 'target');
+    if (!/^https:\/\/scrumboard\.local\/delivery\/[A-Za-z0-9-]{1,64}$/.test(target)) fail('target must be a delivery IRI');
+    const seat = rStr(i.seat, 'seat');
+    if (!SEAT_KEY_RE.test(seat)) fail('seat must be a seat key');
+    if (actor !== `urn:ex:seat/${seat}`) fail(`actor must be the seat's own (urn:ex:seat/${seat}): a receipt is the seat's act`);
+    record = { target, seat, at: rStr(i.at, 'at') };
   } else if (i.kind === 'post.create') {
     // #1574 C3c — every field comes from the outbox entry's frozen payload plus the two values the server fixed once
     // at the first publish attempt (publicationAt, postSeq). All of it is in `record`, so all of it is digest-covered.
@@ -1406,6 +1418,12 @@ function planRecord(c) {
     for (const p of [TM.latestFetchedPost, TM.latestFetchedSeq, TM.latestFetchedPostAt, TM.latestFetchedAt]) delAll.push({ s: N, p });
     add(N, TM.latestFetchedBy, I(c.actor)); add(N, TM.latestFetchedPost, I(R.post)); add(N, TM.latestFetchedSeq, R.seq);
     add(N, TM.latestFetchedPostAt, R.postAt == null ? null : L(R.postAt)); add(N, TM.latestFetchedAt, L(R.at));
+  } else if (c.kind === 'delivery.received') {
+    // #1902 — two triples ON the delivery node, guarded: it is a delivery, it is THIS seat's, and it holds no receipt yet. No
+    // version bump and no step node: the steps the runner drives (offered … published) and their expected version read as before.
+    const D = R.target; target = null;
+    pre.push(`    ${I(D)} ${I(TM.type)} ${I(TM.Delivery)} ; ${I(TM.deliveredTo)} ${L(R.seat)} .`, `    FILTER NOT EXISTS { ${I(D)} ${I(TM.receivedAt)} ?xrc }`);
+    add(D, TM.receivedAt, L(R.at)); add(D, TM.receivedBy, I(c.actor));
   } else if (c.kind === 'post.create') {
     const P = R.post; target = null;   // a create: the post IRI must be fresh
     dispatchHold = `${P.mutationId}:${P.slot}`;   // #1749 A8: the announcement is a dispatch of this obligation
