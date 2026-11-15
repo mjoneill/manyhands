@@ -25,7 +25,10 @@ export const DELIVERY_MEANS = 'Claims from documents the room has read that a me
   + 'hides it from you alone (a second seat\'s dismiss retires it for everyone); a claim keeps appearing on this card until you answer it. '
   // #1901 — a small-model seat was shown another seat's confirm and posted "I accepted that claim". Said here AND per item.
   + 'Status "confirmed" is ANOTHER seat\'s verdict unless `yours` is true: `confirmedBy` names the seat and `confirmedAt` when, and '
-  + '`whoConfirmed` says it in one sentence; never say you confirmed or accepted a claim whose `yours` is false.';
+  + '`whoConfirmed` says it in one sentence; never say you confirmed or accepted a claim whose `yours` is false. '
+  // #1905 — a seat may attach a claim by hand; that item is one seat's judgement, never a machine proposal or a use
+  + 'An item with `attachedBy` was attached to this card BY HAND by that seat, at `attachedAt`, for the reason in `attachReason` '
+  + '(`whoAttached` says it in one sentence): one seat\'s judgement that it bears on the card, not a confirm and not a use.';
 
 const sha = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
 /** A passage is `<source>/block/<n>` (core/knowledge-extraction.mjs); the graph holds no other edge from a claim to its source. */
@@ -92,7 +95,7 @@ export function deliveryBlock({ items, shortId, sources = new Map(), recorded, r
       const { quote, truncated } = quoteOf(l.span || l.gist);
       const src = sources.get(l.source) ?? {};
       return {
-        link: l.id, status: l.status, ...(l.status === 'confirmed' ? decider(l, reader) : {}),
+        link: l.id, status: l.status, ...(l.status === 'confirmed' ? decider(l, reader) : {}), ...(l.attachedBy ? attacher(l, reader) : {}),
         gist: l.gist || quote, quote, ...(truncated ? { quoteTruncated: true } : {}),
         source: { title: src.title ?? null, url: src.url ?? null },
         score: Number.isFinite(l.score) ? l.score : null,
@@ -129,6 +132,17 @@ function decider(l, reader) {
   return { confirmedBy: by, confirmedAt: at, confirmedByCount: n, yours, whoConfirmed: who };
 }
 
+/**
+ * #1905 — WHO attached a claim by hand, when and why, in fields AND in one sentence, as decider() says who confirmed it. Only a
+ * hand link has these: a machine link's item is unchanged, so an item without `attachedBy` is a machine proposal.
+ */
+function attacher(l, reader) {
+  const me = seatKeyOf(reader);
+  const who = me && me === l.attachedBy ? `You (${me})` : l.attachedBy;
+  return { attachedBy: l.attachedBy, attachedAt: l.attachedAt ?? null, attachReason: l.attachReason ?? null,
+    whoAttached: `${who} attached this claim to the card by hand at ${l.attachedAt}, because: ${l.attachReason}. Attaching is not a confirm: it is one seat's judgement that the claim bears on the card.` };
+}
+
 /** The ONE node a (seat, link) showing lives at: a second showing names the same node, and the compiler's freshness guard refuses it. */
 export const showIri = (link, actor) => `${link}/shown/${sha(actor)}`;
 
@@ -143,8 +157,10 @@ export function showIntention({ links, card, how, actor, at = new Date().toISOSt
  * seat, which links that seat has been shown. One row per decision; a link nobody decided gives one row.
  */
 export function deliveryQuery({ card, actor = null } = {}) {
-  return `SELECT ?l ?st ?sc ?span ?gist ?pass ?sh ?d ?dby ?dv ?dat ?dsh ?dshat WHERE { ?l <${TM.bearsOnCard}> <${card}> ; a <${TM.BearsOn}> ; <${TM.status}> ?st ; <${TM.fromAssertion}> ?a `
+  return `SELECT ?l ?st ?sc ?span ?gist ?pass ?sh ?d ?dby ?dv ?dat ?dsh ?dshat ?ab ?ar ?lat WHERE { ?l <${TM.bearsOnCard}> <${card}> ; a <${TM.BearsOn}> ; <${TM.status}> ?st ; <${TM.fromAssertion}> ?a `
     + `FILTER(?st != "dismissed") OPTIONAL { ?l <${TM.score}> ?sc } OPTIONAL { ?a <${TM.anchorText}> ?span } OPTIONAL { ?a <${TM.gist}> ?gist } `
+    // #1905 — a hand link's attacher, reason and time (a machine link has no attachedBy, so all three stay unbound)
+    + `OPTIONAL { ?l <${TM.attachedBy}> ?ab ; <${TM.attachReason}> ?ar ; <${TM.dateCreated}> ?lat } `
     + `OPTIONAL { ?a <${TM.expressedIn}> ?pass } ${actor ? `OPTIONAL { ?sh a <${TM.LinkShowing}> ; <${TM.ofLink}> ?l ; <${TM.shownTo}> <${actor}> } ` : ''}`
     + `OPTIONAL { ?d a <${TM.LinkDecision}> ; <${TM.ofLink}> ?l ; <${TM.decidedBy}> ?dby ; <${TM.linkVerdict}> ?dv ; <${TM.dateCreated}> ?dat `
     // #1901 — the deciding seat's own showing of the link (at most one per seat and link), for "delivery-born"
@@ -164,7 +180,8 @@ export function linksOfDeliveryRows(rows, { actor = null } = {}) {
     if (!byId.has(iri)) {
       const sc = r.sc ? Number(r.sc.value) : null;
       byId.set(iri, { iri, id: iri.split('/').pop(), status: r.st.value, score: Number.isFinite(sc) ? sc : null,
-        span: r.span?.value ?? null, gist: r.gist?.value ?? null, source: sourceOfPassage(r.pass?.value), shown: false, decisions: new Map() });
+        span: r.span?.value ?? null, gist: r.gist?.value ?? null, source: sourceOfPassage(r.pass?.value), shown: false, decisions: new Map(),
+        attachedBy: r.ab ? seatKeyOf(r.ab.value) : null, attachReason: r.ar?.value ?? null, attachedAt: r.ab ? r.lat?.value ?? null : null });
     }
     const l = byId.get(iri);
     if (r.sh) l.shown = true;
