@@ -175,6 +175,7 @@
   "tests/procedure-version-order-1624.test.mjs",
   "tests/ready-executor-1644-snapshot.test.mjs",
   "tests/ready-executor-1644.test.mjs",
+  "tests/reading-attach-page-1905.test.mjs",
   "tests/record-files-gaps-1648.test.mjs",
   "tests/record-files-restore-1648.test.mjs",
   "tests/recovery-hold-1749.test.mjs",
