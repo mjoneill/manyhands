@@ -83,6 +83,15 @@ test('#1410 findMentions trusts the board\'s resolved `mentions` — a seat addr
     'n1/n2: named, resolved by the board ⇒ wake · n3: nobody · n4: own post · n5: board notice · n6: pre-field row, regex fallback · n7: the board says nobody, the text is not re-parsed');
 });
 
+test('#1954 findMentions fallback (a row without `mentions`): an @seat inside code is quoted, not addressed', () => {
+  const rows = [
+    { id: 'q1', author: 'ada', body: 'quoting `@gizmo` from earlier', createdAt: '2026-11-16T08:31:00Z' },
+    { id: 'q2', author: 'ada', body: 'log:\n```\n@gizmo ping\n```', createdAt: '2026-11-16T08:32:00Z' },
+    { id: 'q3', author: 'ada', body: '@gizmo, see `@other`', createdAt: '2026-11-16T08:33:00Z' },
+  ];
+  assert.deepEqual(findMentions(rows, 'gizmo').map((m) => m.id), ['q3'], 'q1/q2: code only ⇒ no wake · q3: prose ⇒ wake');
+});
+
 test('#1201 findMentions: only @seat in the body, never its own posts, never an email-shaped near miss, never a board notice (#1237); sinceId pages forward', () => {
   assert.deepEqual(findMentions(MSGS, 'gizmo').map((m) => m.id), ['m2', 'm5']);
   assert.deepEqual(findMentions(MSGS, 'gizmo', { sinceId: 'm5' }).map((m) => m.id), [], 'the board notice after m5 is not a wake');
