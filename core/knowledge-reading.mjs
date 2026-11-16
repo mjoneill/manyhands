@@ -161,6 +161,10 @@ export function blockOfPassage(iri) {
  * article read as page 1 for every claim would be a false number. The kept text is looked up by the SOURCE'S hash under
  * `<dataDir>/sources/`, and used only if it hashes back to that name (the text the claims were anchored in).
  */
+/** A file whose kept text was found and verified but has no form feed: it HAS no pages, so every claim's page is null and the
+ *  reading says "none". Distinct from null (the text could not be found or did not match), which is the fault "unavailable". */
+export const PAGELESS = Object.freeze(Object.assign(() => null, { pageless: true }));
+
 export function pagesOf({ sourceIri, url, dataDir }) {
   if (typeof url !== 'string' || !url.startsWith('urn:sha256:')) return null;
   if (typeof sourceIri !== 'string' || !sourceIri.startsWith(SOURCE) || !dataDir) return null;
@@ -169,7 +173,7 @@ export function pagesOf({ sourceIri, url, dataDir }) {
   let text;
   try { text = fs.readFileSync(path.join(dataDir, 'sources', `${hex}.txt`), 'utf8'); } catch { return null; }
   if (crypto.createHash('sha256').update(text).digest('hex') !== hex) return null;
-  if (!text.includes('\f')) return null;
+  if (!text.includes('\f')) return PAGELESS;   // found and verified, but the file has no pages (a .docx): not the "unavailable" fault (#1854)
   const blocks = blocksOf(text);
   return (block) => (Number.isInteger(block) && block >= 0 && block < blocks.length ? pageOfBlock(blocks, block) : null);
 }
@@ -177,9 +181,11 @@ export function pagesOf({ sourceIri, url, dataDir }) {
 /** The whole run: header, then every claim in SOURCE order, each with its links to cards. */
 /**
  * "known": the claims carry page numbers. "unavailable": the source is an uploaded file, so it HAS pages, but the kept text could not
- * be found (or did not match), so none can be given: that is a fault to see, not a source without pages. "none": a web source.
+ * be found (or did not match), so none can be given: that is a fault to see, not a source without pages. "none": a web source, or a
+ * file whose verified text has no pages at all (a .docx, #1854).
  */
 export function pagesStateOf(url, pageOf) {
+  if (pageOf?.pageless) return 'none';
   if (pageOf) return 'known';
   return typeof url === 'string' && url.startsWith('urn:sha256:') ? 'unavailable' : 'none';
 }
@@ -202,7 +208,7 @@ export function shapeReading({ header, claimRows, linkRows, cardOf, pageOf = nul
   const { sourceIri, source, ...run } = header;
   return {
     run: { ...run, claims: claims.length, links: total },
-    source: { ...source, iri: sourceIri, pages: pagesStateOf(source.url, pageOf), hasPages: pageOf != null },
+    source: { ...source, iri: sourceIri, pages: pagesStateOf(source.url, pageOf), hasPages: pageOf != null && !pageOf.pageless },
     claims,
   };
 }
