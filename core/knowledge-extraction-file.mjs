@@ -15,6 +15,11 @@
  *     slice; today it is in the summary, computable from the kept text by anyone.)
  *
  * Slice 1 converts PDF only. Every other format is refused before any model call, naming what is supported.
+ *
+ * #1854 slice 3: a Word file (.docx) converts with macOS's own `textutil` (on this machine, no network). A .docx has no pages
+ * of its own (pagination belongs to whatever renders it), so its claims are cited by BLOCK only and its text is kept free of
+ * form feeds: nothing downstream may count pages in it. textutil writes one paragraph per line, so a block is a paragraph
+ * and no rejoin is needed.
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -51,11 +56,14 @@ export function rejoinWrapped(text) {
 }
 
 /** What a format's conversion IS, versioned: a change to it is a new job for the same bytes (the text the model sees changed). */
-export const CONVERSION = Object.freeze({ '.pdf': 'pdftotext+rejoin@2' });
+export const CONVERSION = Object.freeze({ '.pdf': 'pdftotext+rejoin@2', '.docx': 'textutil-txt@1' });
 const LEGACY_CONVERSION = 'pdftotext@1';   // slice 1's raw lines: its jobs keep their original ids
 
 const CONVERTERS = Object.freeze({
-  '.pdf': { from: 'application/pdf', converter: CONVERSION['.pdf'], run: (file, exec) => rejoinWrapped(exec('pdftotext', ['-enc', 'UTF-8', file, '-'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })) },
+  '.pdf': { from: 'application/pdf', converter: CONVERSION['.pdf'], paged: true, empty: ' (a scanned PDF needs OCR, which this machine does not have yet)',
+    run: (file, exec) => rejoinWrapped(exec('pdftotext', ['-enc', 'UTF-8', file, '-'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })) },
+  '.docx': { from: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', converter: CONVERSION['.docx'], paged: false, empty: '',
+    run: (file, exec) => String(exec('textutil', ['-convert', 'txt', '-stdout', '-encoding', 'UTF-8', file], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })).replace(/\f/g, '\n') },
 });
 
 /** Convert a local file to text on this machine. Throws, naming the supported extensions, for anything else. */
@@ -64,8 +72,8 @@ export function convertFile(file, { exec = execFileSync } = {}) {
   const c = CONVERTERS[ext];
   if (!c) throw new Error(`no local converter for ${ext || 'a file without an extension'} yet (supported: ${Object.keys(CONVERTERS).join(', ')}); nothing was sent anywhere`);
   const text = c.run(file, exec);
-  if (typeof text !== 'string' || !text.trim()) throw new Error(`${c.converter} produced no text from ${path.basename(file)} (a scanned PDF needs OCR, which this machine does not have yet); nothing was sent anywhere`);
-  return { text, from: c.from, converter: c.converter };
+  if (typeof text !== 'string' || !text.trim()) throw new Error(`${c.converter} produced no text from ${path.basename(file)}${c.empty}; nothing was sent anywhere`);
+  return { text, from: c.from, converter: c.converter, paged: c.paged };
 }
 
 // #1894 — pageOfBlock is stated once, in core/knowledge-blocks.mjs (no imports), and re-exported here for its earlier callers
@@ -103,7 +111,8 @@ export async function extractFile({ file, extractor, sourcesDir, modelKey, promp
   };
   const label = `${path.basename(file)} (urn:sha256:${original})`;
   const finish = async (r, blocks) => {
-    const published = r.published.map((p) => ({ ...p, page: pageOfBlock(blocks, p.block) }));
+    // a paged format's claims name their page; a .docx has none of its own, so its claims carry only their block
+    const published = converted.paged ? r.published.map((p) => ({ ...p, page: pageOfBlock(blocks, p.block) })) : r.published.map((p) => ({ ...p }));
     // #1852: a file's run is linked to our cards as a link's run is, before its finish report. Linking never fails the run.
     const links = await linkPublished(link, r);
     await tell({ kind: 'finish', url: label, result: { ...r, published }, ...(links ? { links } : {}) });

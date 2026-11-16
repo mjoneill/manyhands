@@ -2,7 +2,7 @@
 /**
  * #1854 slice 1 — run ONE file the owner named through the knowledge-extraction job (core/knowledge-extraction-file.mjs).
  *
- *   node scripts/extract-file.mjs <file.pdf> --asked-in <post id>
+ *   node scripts/extract-file.mjs <file.pdf|file.docx> --asked-in <post id>
  *
  * `--asked-in` is the commons post in which the owner asked for this file to be extracted: it becomes the Source's
  * wasDerivedFrom, so the run is traceable to the ask. Each run is a paid model call, so a file whose job already has an
