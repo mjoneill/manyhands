@@ -35,7 +35,7 @@ import { guestOnce } from '../core/guest-loop.mjs';
 import { rowToBoard } from '../core/model-call-row.mjs';
 import { readWithheldState } from '../core/withheld-state.mjs';
 import {
-  appendWithheldLog, readWithheldLog, defaultWithheldLogPath,
+  appendWithheldLog, readWithheldLog, defaultWithheldLogPath, withheldLogAsidePath,
   WITHHELD_LOG_MAX_ENTRIES, WITHHELD_LOG_MAX_AGE_MS,
 } from '../core/withheld-log.mjs';
 import { startRestServer, makeBoardFixture } from './helpers/harness.mjs';
@@ -222,8 +222,9 @@ test('#1952 a corrupt log does not break the wake: the wake proceeds, the bad fi
     assert.equal(w.row.withheldStateOutcome, 'retained', 'the #1428 hand-back store is untouched by the log');
     assert.equal(readWithheldState(w.withheldStateFile).pending.text, heldText(s));
     assert.deepEqual(readWithheldLog(lf).entries.map((e) => e.wakeId), ['c1'], 'a fresh log was started');
-    const aside = fs.readdirSync(dir).filter((n) => n.includes('withheld-log.json.corrupt-'));
-    assert.equal(aside.length, 1, 'the unreadable log is kept aside, not destroyed');
+    const aside = fs.readdirSync(dir).filter((n) => n.includes('withheld-log.json.corrupt'));
+    assert.deepEqual(aside, ['seat.state.json.withheld-log.json.corrupt'], 'the unparseable log is kept aside (one fixed name), not destroyed');
+    assert.equal(fs.statSync(path.join(dir, aside[0])).mode & 0o777, 0o600, 'the aside copy is 0600');
     assert.equal(fs.readFileSync(path.join(dir, aside[0]), 'utf8'), '{ this is not json');
     assert.ok(w.errors.some((l) => /\[#1952\].*corrupt=1/.test(l)), `the corruption is reported as a count: ${w.errors.join(' | ')}`);
     assert.equal(w.errors.join('\n').includes(s), false);
@@ -319,4 +320,76 @@ test('#1952 the real runner (guest-once.mjs) keeps both of two withheld replies,
     assert.equal(calls.includes(s1), false, 'model-call rows carry no withheld text');
     assert.match(calls, /declined/);
   } finally { await board.stop(); await model.stop(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------------------
+// REVIEW (f2a6e23) — 1. a corrupt copy must not escape both bounds;
+// 2. a read error is not corruption.
+// ---------------------------------------------------------------------------
+test('#1952 review: at most ONE aside copy per seat, 0600, replaced by the next, and deleted once older than 7 days', () => {
+  const dir = tmpDir();
+  try {
+    const f = path.join(dir, 's.withheld-log.json');
+    const aside = withheldLogAsidePath(f);
+    assert.equal(aside, `${f}.corrupt`);
+    const entry = (i, at) => ({ text: `t${i}`, at: iso(at), wakeId: `w${i}`, wakeKind: 'mention', reason: 'standalone-no-reply', tokens: 1, model: 'm' });
+    fs.writeFileSync(f, 'first garbage', { mode: 0o644 });
+    const a = appendWithheldLog(f, entry(1, T0), { now: T0 });
+    assert.equal(a.corrupt, true);
+    assert.equal(fs.readFileSync(aside, 'utf8'), 'first garbage');
+    assert.equal(fs.statSync(aside).mode & 0o777, 0o600, 'chmod 0600 at the rename, whatever mode the bad file had');
+    fs.writeFileSync(f, 'second garbage', { mode: 0o600 });
+    appendWithheldLog(f, entry(2, T0 + DAY), { now: T0 + DAY });
+    assert.deepEqual(fs.readdirSync(dir).filter((n) => n.includes('.corrupt')), ['s.withheld-log.json.corrupt'], 'still one aside copy');
+    assert.equal(fs.readFileSync(aside, 'utf8'), 'second garbage', 'the newer copy replaced the older');
+    // Within 7 days of being set aside, an ordinary append keeps it.
+    appendWithheldLog(f, entry(3, T0 + 7 * DAY), { now: T0 + 7 * DAY });
+    assert.equal(fs.existsSync(aside), true, 'set aside at T0+1d; at T0+7d it is 6 days old and stays');
+    // Past 7 days, the next append deletes it.
+    appendWithheldLog(f, entry(4, T0 + 8 * DAY + 1000), { now: T0 + 8 * DAY + 1000 });
+    assert.equal(fs.existsSync(aside), false, 'older than 7 days: pruned on append');
+    assert.deepEqual(fs.readdirSync(dir).filter((n) => n.includes('.corrupt')), []);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('#1952 review: a read error (EACCES) is `unreadable`, not `corrupt` — the file stays, no aside copy, no append, the wake goes on', { skip: process.getuid?.() === 0 ? 'root reads a 0000 file' : false }, async () => {
+  const dir = tmpDir();
+  const lf = defaultWithheldLogPath(path.join(dir, 'seat.state.json'));
+  try {
+    const original = JSON.stringify({ version: 1, entries: [{ text: 'kept body', at: iso(T0), wakeId: 'old', wakeKind: 'mention', reason: 'standalone-no-reply', tokens: 1, model: 'm' }] });
+    fs.writeFileSync(lf, original, { mode: 0o600 });
+    fs.chmodSync(lf, 0o000);
+    const r = readWithheldLog(lf);
+    assert.equal(r.status, 'unreadable');
+    assert.equal(r.code, 'EACCES');
+    assert.deepEqual(r.entries, []);
+    const s = secret();
+    const w = await wake(dir, { text: heldText(s), id: 'e1', at: iso(T0 + 1000) });
+    assert.equal(w.r.declined, true, 'the wake completes');
+    assert.equal(w.row.withheldStateOutcome, 'retained', 'the #1428 hand-back store is untouched');
+    assert.equal(fs.existsSync(withheldLogAsidePath(lf)), false, 'NOT moved aside');
+    assert.deepEqual(fs.readdirSync(dir).filter((n) => n.includes('withheld-log')), ['seat.state.json.withheld-log.json'], 'no aside copy, no tmp, no new file');
+    fs.chmodSync(lf, 0o600);
+    assert.equal(fs.readFileSync(lf, 'utf8'), original, 'the file is exactly as it was: no append');
+    assert.ok(w.errors.some((l) => /\[#1952\] withheld-log for gizmo unreadable \(unreadable=1, code=EACCES\)/.test(l)), w.errors.join(' | '));
+    assert.equal(w.errors.some((l) => /corrupt=1/.test(l)), false, 'not reported as corruption');
+    assert.equal([...w.logs, ...w.errors].join('\n').includes(s), false);
+    // A direct append reports the skip rather than throwing or writing.
+    fs.chmodSync(lf, 0o000);
+    const out = appendWithheldLog(lf, { text: 'x', at: iso(T0), wakeId: 'd', wakeKind: 'mention', reason: 'r', tokens: 1, model: 'm' }, { now: T0 });
+    assert.deepEqual(out, { kept: null, corrupt: false, skipped: 'unreadable', code: 'EACCES' });
+  } finally { try { fs.chmodSync(lf, 0o600); } catch { /* gone */ } fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('#1952 review: only a parse failure or a wrong shape is `corrupt`', () => {
+  const dir = tmpDir();
+  try {
+    const f = path.join(dir, 'c.json');
+    fs.writeFileSync(f, '{ not json');
+    assert.equal(readWithheldLog(f).status, 'corrupt');
+    fs.writeFileSync(f, JSON.stringify({ version: 1, entries: 'nope' }));
+    assert.equal(readWithheldLog(f).status, 'corrupt');
+    fs.mkdirSync(path.join(dir, 'isdir.json'));
+    assert.equal(readWithheldLog(path.join(dir, 'isdir.json')).status, 'unreadable', 'EISDIR is a read error, not corruption');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
