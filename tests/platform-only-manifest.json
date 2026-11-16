@@ -123,5 +123,15 @@
     "file": "tests/graph-store-backup-clone-1634.test.mjs",
     "name": "K14q BOTH READS EXACT -> freedExact true and freedBytes === freedEstimateBytes (the K14 world, with the new fields)",
     "reason": "UNAVAILABLE: cp -c (APFS clone) does not work under the suite tmpdir (Linux CI has no APFS; a skip is not a pass; these rows are evidenced by macOS runs)"
+  },
+  {
+    "file": "tests/extract-file-1854.test.mjs",
+    "name": "D1 a real .docx converts on this machine, one paragraph per block, named by its versioned conversion",
+    "reason": "UNAVAILABLE: no textutil on this machine (a skip is not a pass)"
+  },
+  {
+    "file": "tests/extract-file-1854.test.mjs",
+    "name": "D3 a .docx run cites each claim by BLOCK only: no page in the summary, none in the finish post",
+    "reason": "UNAVAILABLE: no textutil on this machine (a skip is not a pass)"
   }
 ]

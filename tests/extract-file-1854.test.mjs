@@ -245,7 +245,7 @@ function writeDocx(dir) {
   return out;
 }
 
-test('D1 a real .docx converts on this machine, one paragraph per block, named by its versioned conversion', { skip: !haveTextutil && 'textutil is not available (macOS only)' }, () => {
+test('D1 a real .docx converts on this machine, one paragraph per block, named by its versioned conversion', { skip: !haveTextutil && 'UNAVAILABLE: no textutil on this machine (a skip is not a pass)' }, () => {
   const got = convertFile(writeDocx(tmp()));
   assert.equal(got.converter, 'textutil-txt@1');
   assert.equal(got.from, DOCX_MIME);
@@ -261,7 +261,7 @@ test('D2 a .docx\'s text never carries a form feed, so nothing downstream can co
   assert.match(got.text, /Before the break\.\s+After the break\./);
 });
 
-test('D3 a .docx run cites each claim by BLOCK only: no page in the summary, none in the finish post', { skip: !haveTextutil && 'textutil is not available (macOS only)' }, async () => {
+test('D3 a .docx run cites each claim by BLOCK only: no page in the summary, none in the finish post', { skip: !haveTextutil && 'UNAVAILABLE: no textutil on this machine (a skip is not a pass)' }, async () => {
   const d = tmp(); const ex = fakeExtractor(); const { events, report } = recorder();
   const f = writeDocx(d);
   // the fake extractor publishes the block holding "second page"; give it one in this file's words
