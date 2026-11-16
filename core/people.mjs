@@ -62,6 +62,18 @@ import { PERSON_IRI_BASE } from './jsonld.mjs';
  * @param {string} text   the message body
  * @param {object} seats  roster map: key → { name, … }
  */
+/**
+ * #1954 — an @name inside code is QUOTED, not addressed. Removes fenced blocks
+ * (``` or ~~~, to the closing fence or the end of the text) and inline code
+ * spans, the same rule as the connector's own text classifier, so the board
+ * and the connector agree about what counts as asking someone. A quote of an
+ * earlier ask used to be recorded as a new one and woke the quoted seat.
+ */
+export function stripCode(text) {
+  if (typeof text !== 'string') return '';
+  return text.replace(/(```|~~~)[\s\S]*?(?:\1|$)/g, ' ').replace(/(`+)[^`]*?\1/g, ' ');
+}
+
 export function extractMentions(text, seats = {}) {
   if (typeof text !== 'string') return [];
   // key → key, and lowercased display name → key. Built per call because the
@@ -74,7 +86,7 @@ export function extractMentions(text, seats = {}) {
     if (name) canon.set(name, k);
   }
   const found = new Set();
-  for (const m of text.matchAll(/@(\w+)/g)) {
+  for (const m of stripCode(text).matchAll(/@(\w+)/g)) {
     const hit = canon.get(m[1].toLowerCase());
     if (hit) found.add(hit);
   }

@@ -37,6 +37,7 @@ import { fileURLToPath } from 'node:url';
 import { runToolLoop } from './tool-loop.mjs';
 import { readWithheldState, writePending, clearPending, preservePending, handBackFromState, defaultWithheldStatePath, isBareDecline } from './withheld-state.mjs';   // #1428 — private per-seat withheld recovery
 import { appendWithheldLog } from './withheld-log.mjs';   // #1952 — bounded per-seat local record of every withheld reply
+import { stripCode } from './people.mjs';   // #1954 — the fallback regex ignores code, like the board's extractor
 
 /**
  * #1294 — add two usage blocks, keeping NULL when neither reported anything.
@@ -145,7 +146,7 @@ export function findMentions(messages = [], seatKey, { sinceId = null, since = n
   // regex is only the fallback for a row that predates the field.
   const mentioned = (m) => (Array.isArray(m.mentions)
     ? m.mentions.some((k) => String(k).toLowerCase() === seatKey.toLowerCase())
-    : re.test(m.body));
+    : re.test(stripCode(m.body)));
   const rows = (messages || []).filter((m) => m && typeof m.body === 'string'
     && String(m.author || '').toLowerCase() !== seatKey.toLowerCase()
     // #1237 — the board's own notices (claim/release/done lines carrying a card
