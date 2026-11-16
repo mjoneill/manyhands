@@ -19,9 +19,15 @@
  *      the prompt, or a runner log line beyond counts.
  *   4. NEVER FEEDS THE PROMPT. The hand-back stays the #1428 file's job; this
  *      log is read only by the machine's owner (scripts/withheld-log.mjs).
- *   5. FAILS OPEN. A missing log is the normal first case; a corrupt one is
- *      moved aside (kept, not destroyed) and a fresh one started; an unwritable
- *      one throws to the runner, which reports a count and lets the wake finish.
+ *   5. FAILS OPEN. A missing log is the normal first case. A CORRUPT one (a
+ *      parse failure or a wrong shape) is moved aside to ONE fixed name per
+ *      seat (`<log>.corrupt`, 0600, replacing any earlier copy) and a fresh log
+ *      started; the aside copy is deleted on an append once it is older than
+ *      the same 7 days, so it cannot escape both bounds. An UNREADABLE one (a
+ *      read error: EACCES, EIO, EISDIR, ...) is NOT corruption: it is left
+ *      exactly where it is, nothing is appended, and the runner reports a count
+ *      with the code. An unwritable one throws to the runner, which reports a
+ *      count and lets the wake finish.
  *
  * ⛔ PRIVACY LINE (#1952): read locally by the machine's owner, never posted or
  * quoted to the room without the seat's say-so. A standalone NO_REPLY is also
@@ -36,6 +42,12 @@ import path from 'node:path';
 export const WITHHELD_LOG_VERSION = 1;
 export const WITHHELD_LOG_MAX_ENTRIES = 10;
 export const WITHHELD_LOG_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Where a corrupt log is set aside: one fixed name per seat, so at most one copy exists. */
+export function withheldLogAsidePath(file) {
+  if (!file) return null;
+  return `${file}.corrupt`;
+}
 
 /** The log's location: beside the seat's state file, like the #1428 file. */
 export function defaultWithheldLogPath(stateFile) {
@@ -61,13 +73,17 @@ function cleanEntry(e) {
  * count a corrupt file instead of mistaking it for an empty one:
  *   ok      — parsed; `entries` oldest first
  *   missing — no file (the normal first case)
- *   corrupt — the file exists but is not a log; `entries` is []
+ *   corrupt    — the file was read but is not a log (a parse failure or a
+ *                wrong shape); `entries` is []
+ *   unreadable — the file could not be read (EACCES, EIO, EISDIR, ...); `code`
+ *                names the error; `entries` is []. NOT corruption: nobody
+ *                knows what is in it, so nothing may move or replace it.
  */
 export function readWithheldLog(file) {
   if (!file) return { entries: [], status: 'missing' };
   let raw;
   try { raw = fs.readFileSync(file, 'utf8'); }
-  catch (e) { return e?.code === 'ENOENT' ? { entries: [], status: 'missing' } : { entries: [], status: 'corrupt' }; }
+  catch (e) { return e?.code === 'ENOENT' ? { entries: [], status: 'missing' } : { entries: [], status: 'unreadable', code: e?.code ?? e?.name ?? 'unknown' }; }
   let parsed;
   try { parsed = JSON.parse(raw); } catch { return { entries: [], status: 'corrupt' }; }
   if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.entries)) return { entries: [], status: 'corrupt' };
@@ -100,7 +116,10 @@ function writeAtomic0600(file, obj) {
 /**
  * Append one entry and rewrite the bounded log. Returns
  *   { kept, corrupt }  — how many entries the file now holds, and whether an
- *                        unreadable log was moved aside to make room for it.
+ *                        unparseable log was moved aside to make room for it;
+ *   { kept: null, corrupt: false, skipped: 'unreadable', code }
+ *                      — the log could not be READ, so nothing was appended
+ *                        and the file was left exactly as it was.
  * THROWS on a write failure (the runner catches it and reports a count). The
  * thrown message names the error code, never the text.
  */
@@ -108,15 +127,28 @@ export function appendWithheldLog(file, entry, { now = Date.now() } = {}) {
   if (!file) throw new Error('appendWithheldLog: file is required');
   const clean = cleanEntry(entry);
   if (!clean) throw new Error('appendWithheldLog: entry.text (non-empty string) is required');
-  const nowMs = typeof now === 'number' ? now : Date.parse(now);
+  const parsedNow = typeof now === 'number' ? now : Date.parse(now);
+  const nowMs = Number.isFinite(parsedNow) ? parsedNow : Date.now();
+  const aside = withheldLogAsidePath(file);
+  // The aside copy is held to the same age bound as the entries: past 7 days
+  // since it was set aside (its mtime, stamped at the rename), it goes.
+  try { if (fs.statSync(aside).mtimeMs < nowMs - WITHHELD_LOG_MAX_AGE_MS) fs.rmSync(aside, { force: true }); } catch { /* none */ }
   const prior = readWithheldLog(file);
+  if (prior.status === 'unreadable') return { kept: null, corrupt: false, skipped: 'unreadable', code: prior.code };
   let corrupt = false;
   if (prior.status === 'corrupt') {
     corrupt = true;
-    // Keep the unreadable file, aside; never destroy a record we could not read.
-    try { fs.renameSync(file, `${file}.corrupt-${Date.now()}`); } catch { /* the write below replaces it either way */ }
+    // Keep the unparseable file aside, ONE copy per seat: the rename replaces
+    // any earlier copy. 0600 whatever mode it had, and its mtime is the time it
+    // was set aside, which is what the age bound above reads.
+    try {
+      fs.renameSync(file, aside);
+      fs.chmodSync(aside, 0o600);
+      const t = new Date(nowMs);
+      fs.utimesSync(aside, t, t);
+    } catch { /* the write below replaces it either way */ }
   }
-  const entries = boundWithheldEntries([...prior.entries, clean], Number.isFinite(nowMs) ? nowMs : Date.now());
+  const entries = boundWithheldEntries([...prior.entries, clean], nowMs);
   try { writeAtomic0600(file, { version: WITHHELD_LOG_VERSION, entries }); }
   catch (e) {
     const err = new Error(`withheld-log write failed (${e?.code ?? e?.name ?? 'unknown'})`);

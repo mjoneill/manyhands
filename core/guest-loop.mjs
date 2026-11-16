@@ -1304,8 +1304,11 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
         text, at, wakeId: wake?.id ?? null, wakeKind: wake?.kind || 'mention', reason: withheldReason,
         tokens: result.usage?.completionTokens ?? null, model: agent.model?.model ?? null,
       }, { now: Date.parse(at) });
-      if (out.corrupt) onError(`[#1952] withheld-log for ${agent.seatKey} was unreadable (corrupt=1); moved aside, started fresh`);
-      log(`[#1952] ${agent.seatKey} withheld-log: ${out.kept} kept`);
+      if (out.skipped === 'unreadable') onError(`[#1952] withheld-log for ${agent.seatKey} unreadable (unreadable=1, code=${out.code}); left in place, not appended; the wake goes on`);
+      else {
+        if (out.corrupt) onError(`[#1952] withheld-log for ${agent.seatKey} was not a log (corrupt=1); moved aside, started fresh`);
+        log(`[#1952] ${agent.seatKey} withheld-log: ${out.kept} kept`);
+      }
     } catch (e) {
       onError(`[#1952] withheld-log append failed for ${agent.seatKey} (errors=1, code=${e?.code ?? 'unknown'}); the wake goes on`);
     }

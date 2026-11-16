@@ -231,20 +231,26 @@ test('#1952 a corrupt log does not break the wake: the wake proceeds, the bad fi
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('#1952 a missing log is the normal first case; an unwritable log fails open with a count-only error', async () => {
+test('#1952 a missing log is the normal first case; an unwritable log fails open with a count-only error', { skip: process.getuid?.() === 0 ? 'root writes into a 0500 directory' : false }, async () => {
   const dir = tmpDir();
+  // A read-only directory: the log is MISSING there (a normal read), and the
+  // write is refused (EACCES). Review fix: a path under a regular file now
+  // fails at the READ (ENOTDIR = unreadable), so it no longer reaches the write.
+  const ro = path.join(dir, 'read-only');
+  fs.mkdirSync(ro);
+  fs.chmodSync(ro, 0o500);
   try {
-    const reg = path.join(dir, 'a-regular-file');
-    fs.writeFileSync(reg, 'not a directory');
     const s = secret();
-    const w = await wake(dir, { text: heldText(s), id: 'u1', at: iso(T0), logFile: path.join(reg, 'log.json') });
+    const w = await wake(dir, { text: heldText(s), id: 'u1', at: iso(T0), logFile: path.join(ro, 'log.json') });
     assert.equal(w.r.declined, true, 'the wake completes');
     assert.equal(w.row.withheldStateOutcome, 'retained', 'the hand-back store still succeeded');
     assert.equal(w.r.recoveryFailed, undefined, 'a log failure is not a #1428 recovery failure');
     assert.ok(w.errors.some((l) => /\[#1952\] withheld-log append failed for gizmo \(errors=1/.test(l)), w.errors.join(' | '));
     assert.equal([...w.logs, ...w.errors].join('\n').includes(s), false);
+    assert.match(w.errors.join(' | '), /code=EACCES/);
+    assert.deepEqual(fs.readdirSync(ro), [], 'nothing landed, not even a tmp file');
     assert.deepEqual(readWithheldLog(path.join(dir, 'never-written.json')), { entries: [], status: 'missing' });
-  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  } finally { fs.chmodSync(ro, 0o700); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('#1952 scripts/withheld-log.mjs prints the entries newest first, from --state-file or SCRUM_GUEST_STATE_FILE', () => {
