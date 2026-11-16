@@ -36,6 +36,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runToolLoop } from './tool-loop.mjs';
 import { readWithheldState, writePending, clearPending, preservePending, handBackFromState, defaultWithheldStatePath, isBareDecline } from './withheld-state.mjs';   // #1428 — private per-seat withheld recovery
+import { appendWithheldLog } from './withheld-log.mjs';   // #1952 — bounded per-seat local record of every withheld reply
 
 /**
  * #1294 — add two usage blocks, keeping NULL when neither reported anything.
@@ -838,7 +839,7 @@ async function postFailureLine({ agent, wake, error, latencyMs, post, onError })
  *   post       ({author, body}) => Promise<{id?}>
  *   ledgerFile where the pre-ledger row goes
  */
-export async function guestOnce({ agent, wake, changes = () => [], memories = null, rulings = null, priorRefusals = null, priorWithheld = null, withheldStateFile = null, writeMemory = null, claimCard = null, callModel, execute = null, maxHops = undefined, post, ledgerFile = ledgerFilePath(), ledgerSink = null, spentToday = null, now = () => new Date().toISOString(), log = () => {}, onError = () => {}, preparePost = null }) {
+export async function guestOnce({ agent, wake, changes = () => [], memories = null, rulings = null, priorRefusals = null, priorWithheld = null, withheldStateFile = null, withheldLogFile = null, writeMemory = null, claimCard = null, callModel, execute = null, maxHops = undefined, post, ledgerFile = ledgerFilePath(), ledgerSink = null, spentToday = null, now = () => new Date().toISOString(), log = () => {}, onError = () => {}, preparePost = null }) {
   if (!agent?.seatKey) throw new Error('guestOnce: agent.seatKey is required — a post with no seat is actor:null forever (#1193)');
   if (!agent?.model?.model || !agent?.model?.protocol) throw new Error('guestOnce: agent.model {model, protocol} is required');
   // #1202 — the budget gate, BEFORE any context is fetched or any call is made.
@@ -1283,6 +1284,30 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
       const op = (declined && !bareDecline) ? 'retain' : (handedWithheld.length > 0 ? 'clear' : 'preserve');
       withheldStateOutcome = (declined && !bareDecline) ? 'retain-failed' : (handedWithheld.length > 0 ? 'clear-failed' : 'preserve-failed');
       onError(`[#1428] withheld-state ${op} failed for ${agent.seatKey}: ${e?.message ?? e}`);
+    }
+  }
+  // #1952 — THE RECORD BESIDE THE HAND-BACK. The #1428 file keeps only the
+  // newest withheld reply and is cleared after one hand-back, so a reply the
+  // seat wrote and withheld was gone after the next decline or the next wake.
+  // Every text the runner parks there (a non-bare decline, same condition as
+  // writePending above) is ALSO appended to a bounded per-seat local log
+  // (core/withheld-log.mjs): last 10, 7 days, 0600. It is appended whether or
+  // not the #1428 store landed, so a failed hand-back store still leaves the
+  // record. ⛔ The log never feeds the prompt and never rides the row; the
+  // lines below carry COUNTS and an error code only — never the text. ⛔ FAIL
+  // OPEN: a log failure never changes the wake's outcome, its row, or
+  // recoveryFailed (that flag is the hand-back's, not the record's).
+  if (agent.residency === 'resident' && withheldStateFile && withheldLogFile && declined && !bareDecline) {
+    try {
+      const at = now();
+      const out = appendWithheldLog(withheldLogFile, {
+        text, at, wakeId: wake?.id ?? null, wakeKind: wake?.kind || 'mention', reason: withheldReason,
+        tokens: result.usage?.completionTokens ?? null, model: agent.model?.model ?? null,
+      }, { now: Date.parse(at) });
+      if (out.corrupt) onError(`[#1952] withheld-log for ${agent.seatKey} was unreadable (corrupt=1); moved aside, started fresh`);
+      log(`[#1952] ${agent.seatKey} withheld-log: ${out.kept} kept`);
+    } catch (e) {
+      onError(`[#1952] withheld-log append failed for ${agent.seatKey} (errors=1, code=${e?.code ?? 'unknown'}); the wake goes on`);
     }
   }
   // #1428 REVIEW — The runner's local `error` field on a SUCCESSFUL

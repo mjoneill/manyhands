@@ -138,7 +138,7 @@ test('#1952 the age bound holds: entries older than 7 days are dropped, and the 
     const entry = (i, at) => ({ text: `t${i}`, at: iso(at), wakeId: `w${i}`, wakeKind: 'mention', reason: 'standalone-no-reply', tokens: 1, model: 'm' });
     // Five old (8 days back), three fresh: the age bound is the tighter one here.
     for (let i = 0; i < 5; i += 1) appendWithheldLog(f, entry(i, T0 - 8 * DAY + i), { now: T0 - 8 * DAY + i });
-    for (let i = 5; i < 8; i += 1) appendWithheldLog(f, entry(i, T0 - DAY + i), { now: T0 - DAY + i });
+    for (let i = 5; i < 8; i += 1) appendWithheldLog(f, entry(i, T0 - 2 * DAY + i), { now: T0 - 2 * DAY + i });
     let { entries } = readWithheldLog(f);
     assert.equal(entries.length, 8, 'appended within the window of each write, all eight were kept');
     const out = appendWithheldLog(f, entry(8, T0), { now: T0 });
@@ -271,4 +271,52 @@ test('#1952 scripts/withheld-log.mjs prints the entries newest first, from --sta
     const traversal = spawnSync(process.execPath, [cli, '--seat', '../x'], { env, encoding: 'utf8' });
     assert.notEqual(traversal.status, 0, 'a seat key is a name, never a path');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------------------
+// THE REAL RUNNER — scripts/guest-once.mjs, as the launchd job runs it, for a
+// resident whose model writes a reply and withholds it. Two mentions, two
+// ticks: both replies are in the log beside SCRUM_GUEST_STATE_FILE, and the
+// runner's stdout/stderr and the board's model-call rows carry none of it.
+// ---------------------------------------------------------------------------
+test('#1952 the real runner (guest-once.mjs) keeps both of two withheld replies, and prints and posts none of the text', async () => {
+  const http = await import('node:http');
+  const { spawn } = await import('node:child_process');
+  const s1 = secret();
+  const reply = heldText(s1);
+  const model = await new Promise((resolve) => {
+    const srv = http.createServer((req, res) => { req.resume(); req.on('end', () => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ model: 'fake', message: { role: 'assistant', content: reply }, done: true, done_reason: 'stop', prompt_eval_count: 40, eval_count: 174 })); }); });
+    srv.listen(0, '127.0.0.1', () => resolve({ baseUrl: `http://127.0.0.1:${srv.address().port}`, stop: () => new Promise((r) => srv.close(r)) }));
+  });
+  const board = await startRestServer({ board: makeBoardFixture({ cards: [], conversations: [] }) });
+  const dir = tmpDir();
+  const api = async (method, p, body) => { const r = await fetch(`${board.baseUrl}${p}`, { method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) }); return { status: r.status, body: await r.json().catch(() => null) }; };
+  const runOnce = (env) => new Promise((resolve) => {
+    const p = spawn(process.execPath, [path.join(PROJECT_DIR, 'scripts/guest-once.mjs'), '--seat', 'guest'], { env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = ''; p.stdout.on('data', (c) => { out += c; }); p.stderr.on('data', (c) => { out += c; });
+    p.on('close', (code) => resolve({ code, out }));
+  });
+  try {
+    assert.equal((await api('POST', '/api/agents', { seatKey: 'guest', name: 'Sausage', prompt: 'You are Sausage.', model: { model: 'fake', protocol: 'ollama-native', baseUrl: model.baseUrl }, residency: 'resident', deliveryMode: 'wake', wakeOn: ['mention'], by: 'ada' })).status, 201);
+    const stateFile = path.join(dir, 'scrum-guest-wake-guest.state.json');
+    const env = { SCRUM_BOARD_URL: board.baseUrl, SCRUM_GUEST_STATE_FILE: stateFile };
+    const outs = [];
+    for (const q of ['@sausage did the perimeter check pass?', '@sausage thank you']) {
+      await api('POST', '/api/conversations', { author: 'ada', body: q });
+      const r = await runOnce(env);
+      assert.equal(r.code, 0, r.out);
+      outs.push(r.out);
+    }
+    const lf = defaultWithheldLogPath(stateFile);
+    const { entries } = readWithheldLog(lf);
+    assert.equal(entries.length, 2, `both withheld replies kept:\n${outs.join('\n')}`);
+    assert.ok(entries.every((e) => e.text === reply && e.tokens === 174 && e.wakeKind === 'mention' && e.model === 'fake' && e.wakeId));
+    assert.equal(fs.statSync(lf).mode & 0o777, 0o600);
+    const all = outs.join('\n');
+    assert.equal(all.includes(s1), false, 'runner output carries no withheld text');
+    assert.match(all, /\[#1952\] guest withheld-log: 2 kept/);
+    const calls = JSON.stringify((await api('GET', '/api/model-calls?agent=guest&limit=10')).body);
+    assert.equal(calls.includes(s1), false, 'model-call rows carry no withheld text');
+    assert.match(calls, /declined/);
+  } finally { await board.stop(); await model.stop(); fs.rmSync(dir, { recursive: true, force: true }); }
 });

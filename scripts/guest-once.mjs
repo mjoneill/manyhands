@@ -25,6 +25,7 @@ import { callModel } from '../core/model-adapter.mjs';
 import { deliveryStaleMs, isStaleDelivery } from '../core/delivery.mjs';   // #1346
 import { rowToBoard, refusalsSince } from '../core/model-call-row.mjs';
 import { handBackFromState, defaultWithheldStatePath } from '../core/withheld-state.mjs';   // #1428 — private per-seat withheld recovery
+import { defaultWithheldLogPath } from '../core/withheld-log.mjs';   // #1952 — bounded local record of every withheld reply
 import { annotateTalks } from '../core/guest-loop.mjs';   // #1446
 import { findMentions, findWakes, pairCapSuppressed, DEFAULT_PAIR_CAP_PER_HOUR, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, advanceScan, settlePending, sweepDue, sweepSince, captureSweep, withSweepAttempt, acquireLock, releaseLock, effectiveWakeOn, budgetCheck, deliveryOutcome, bindingRulings } from '../core/guest-loop.mjs';
 import { makeExecutor } from '../core/board-tools.mjs';
@@ -460,6 +461,9 @@ const priorWithheld = async (seat) => {
   return handBackFromState(file, { cap: 5 });
 };
 const withheldStateFile = defaultWithheldStatePath(stateFile);
+// #1952 — the bounded local record beside it (last 10 / 7 days, 0600). Read by the owner with
+// scripts/withheld-log.mjs; never fed to the prompt, never sent to the board.
+const withheldLogFile = defaultWithheldLogPath(stateFile);
 const memories = async (seat) => {
   // #1473 — a declared budget means the wake reads the ASSEMBLY: her
   // `agent-memory` memories, priority first then newest, inside the budget,
@@ -495,7 +499,7 @@ const r = await guestOnce({
     writeStateAtomic(stateFile, state);
     return prepared;
   } : null,
-  agent, wake, changes: () => { if (changesError) throw changesError; return rows; }, ledgerSink, spentToday, memories, priorRefusals, priorWithheld, withheldStateFile, writeMemory, claimCard,
+  agent, wake, changes: () => { if (changesError) throw changesError; return rows; }, ledgerSink, spentToday, memories, priorRefusals, priorWithheld, withheldStateFile, withheldLogFile, writeMemory, claimCard,
   // #1436 — the live decisions that name this seat, its held role, or its display name
   rulings: async (seatKey) => {
     const all = (await get('/api/decisions?live=1'));
