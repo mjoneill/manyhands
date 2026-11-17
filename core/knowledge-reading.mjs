@@ -17,7 +17,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { LOGBORN_TERMS as TM } from './graph-compiler.mjs';
-import { blocksOf, pageOfBlock } from './knowledge-blocks.mjs';   // #868: never the extractor's modules, which import npm packages
+import { blocksOf, pageOfBlock, sectionOfBlock, addressOf } from './knowledge-blocks.mjs';   // #868: never the extractor's modules, which import npm packages
 
 // `op` and `prov:used` are the run activity's own terms (written by the research verbs, not by a log-born record kind), so
 // they are not in LOGBORN_TERMS. They are derived from namespaces that table does hold; the REST rows check them end to end.
@@ -162,7 +162,8 @@ export function blockOfPassage(iri) {
  * `<dataDir>/sources/`, and used only if it hashes back to that name (the text the claims were anchored in).
  */
 /** A file whose kept text was found and verified but has no form feed: it HAS no pages, so every claim's page is null and the
- *  reading says "none". Distinct from null (the text could not be found or did not match), which is the fault "unavailable". */
+ *  reading says "none". Distinct from null (the text could not be found or did not match), which is the fault "unavailable".
+ *  #1961: pagesOf's own pageless answer also carries `sectionOf(block)`; this constant is the shape with no sections. */
 export const PAGELESS = Object.freeze(Object.assign(() => null, { pageless: true }));
 
 export function pagesOf({ sourceIri, url, dataDir }) {
@@ -173,8 +174,13 @@ export function pagesOf({ sourceIri, url, dataDir }) {
   let text;
   try { text = fs.readFileSync(path.join(dataDir, 'sources', `${hex}.txt`), 'utf8'); } catch { return null; }
   if (crypto.createHash('sha256').update(text).digest('hex') !== hex) return null;
-  if (!text.includes('\f')) return PAGELESS;   // found and verified, but the file has no pages (a .docx): not the "unavailable" fault (#1854)
   const blocks = blocksOf(text);
+  if (!text.includes('\f')) {   // found and verified, but the file has no pages (a .docx): not the "unavailable" fault (#1854)
+    // #1961: a .docx's claims are addressed by SECTION, derived from the kept text's heading lines as pages are from form feeds.
+    // Kept text from the older textutil conversion has no heading lines, so its claims get no section and keep their block.
+    const sectionOf = (block) => (Number.isInteger(block) ? addressOf(sectionOfBlock(blocks, block)) : null);
+    return Object.freeze(Object.assign(() => null, { pageless: true, sectionOf }));
+  }
   return (block) => (Number.isInteger(block) && block >= 0 && block < blocks.length ? pageOfBlock(blocks, block) : null);
 }
 
@@ -201,7 +207,7 @@ export function shapeReading({ header, claimRows, linkRows, cardOf, pageOf = nul
   const claims = claimRows.map((r) => {
     const block = blockOfPassage(lit(r, 'pass'));
     return { id: r.a.value.split('/').pop(), gist: lit(r, 'gist'), quote: lit(r, 'span'), type: lit(r, 'type'), verb: lit(r, 'verb'),
-      block, page: pageOf ? pageOf(block) : null, links: byClaim.get(r.a.value) ?? [] };
+      block, page: pageOf ? pageOf(block) : null, section: pageOf?.sectionOf ? pageOf.sectionOf(block) : null, links: byClaim.get(r.a.value) ?? [] };
   }).sort((x, y) => (x.block ?? Infinity) - (y.block ?? Infinity) || x.id.localeCompare(y.id));
   let total = 0;   // a dismissed link is the owner's "no": it is listed on its claim, but not counted as a link the run has
   for (const c of claims) for (const l of c.links) if (l.status !== 'dismissed') total += 1;

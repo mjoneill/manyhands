@@ -146,7 +146,7 @@ export function finishBody({ url, result, links = null }) {
       + ` · by type: ${fmt(tally(published.map((a) => a.type ?? 'untyped')))}`
       + ` · by predicate: ${byPredicate(published)}`);
     if (withEdges.length) {
-      for (const a of withEdges.slice(0, SHOWN)) lines.push(`  ${a.subject} —${a.predicate}→ ${a.object} (${a.type ?? 'untyped'}, ${a.proposedPredicate ? `proposed ${a.proposedPredicate}, ` : ''}${Number.isInteger(a.page) ? `page ${a.page}, ` : ''}block ${a.block})`);   // #1854: a file's claim names its page
+      for (const a of withEdges.slice(0, SHOWN)) lines.push(`  ${a.subject} —${a.predicate}→ ${a.object} (${a.type ?? 'untyped'}, ${a.proposedPredicate ? `proposed ${a.proposedPredicate}, ` : ''}${Number.isInteger(a.page) ? `page ${a.page}, ` : ''}${typeof a.section === 'string' && a.section ? `§ ${a.section}, ` : ''}block ${a.block})`);   // #1854: a file's claim names its page; #1961: a .docx's, its section
       if (withEdges.length > SHOWN) lines.push(`  …and ${withEdges.length - SHOWN} more`);
     }
   } else {

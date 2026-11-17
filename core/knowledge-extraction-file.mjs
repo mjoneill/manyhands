@@ -16,17 +16,19 @@
  *
  * Slice 1 converts PDF only. Every other format is refused before any model call, naming what is supported.
  *
- * #1854 slice 3: a Word file (.docx) converts with macOS's own `textutil` (on this machine, no network). A .docx has no pages
- * of its own (pagination belongs to whatever renders it), so its claims are cited by BLOCK only and its text is kept free of
- * form feeds: nothing downstream may count pages in it. textutil writes one paragraph per line, so a block is a paragraph
- * and no rejoin is needed.
+ * #1854 slice 3: a Word file (.docx) converts on this machine, no network. A .docx has no pages of its own (pagination belongs
+ * to whatever renders it), so its text is kept free of form feeds: nothing downstream may count pages in it. One paragraph is
+ * one line, so a block is a paragraph and no rejoin is needed.
+ *
+ * #1961: slice 3 used `textutil`, which cited a claim only as "block N". The .docx's own XML is read instead, so each heading
+ * is kept as a "#" line, and a claim is cited by SECTION: its heading path and paragraph ("Evaluation › Method ¶2").
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { ingestSource } from './knowledge-extraction.mjs';
-import { pageOfBlock } from './knowledge-blocks.mjs';
+import { pageOfBlock, sectionOfBlock, addressOf } from './knowledge-blocks.mjs';
 import { linkPublished, linkSummary } from './knowledge-linking-supply.mjs';
 
 const ENTITY = 'https://scrumboard.local/entity/';
@@ -56,15 +58,67 @@ export function rejoinWrapped(text) {
 }
 
 /** What a format's conversion IS, versioned: a change to it is a new job for the same bytes (the text the model sees changed). */
-export const CONVERSION = Object.freeze({ '.pdf': 'pdftotext+rejoin@2', '.docx': 'textutil-txt@1' });
+export const CONVERSION = Object.freeze({ '.pdf': 'pdftotext+rejoin@2', '.docx': 'docx-xml+headings@1' });   // #1961: was textutil-txt@1
 const LEGACY_CONVERSION = 'pdftotext@1';   // slice 1's raw lines: its jobs keep their original ids
 
 const CONVERTERS = Object.freeze({
   '.pdf': { from: 'application/pdf', converter: CONVERSION['.pdf'], paged: true, empty: ' (a scanned PDF needs OCR, which this machine does not have yet)',
     run: (file, exec) => rejoinWrapped(exec('pdftotext', ['-enc', 'UTF-8', file, '-'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })) },
   '.docx': { from: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', converter: CONVERSION['.docx'], paged: false, empty: '',
-    run: (file, exec) => String(exec('textutil', ['-convert', 'txt', '-stdout', '-encoding', 'UTF-8', file], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })).replace(/\f/g, '\n') },
+    run: (file, exec) => docxText(readDocxParts(file, exec)) },
 });
+
+/**
+ * #1961 — a .docx is a zip; its text is word/document.xml and its heading styles are named in word/styles.xml. Both are read on
+ * this machine with `unzip -p` (nothing is sent anywhere). textutil could not be used: its .docx reader drops heading styles.
+ */
+function readDocxParts(file, exec) {
+  const part = (name) => String(exec('unzip', ['-p', file, name], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }));
+  let stylesXml = '';
+  try { stylesXml = part('word/styles.xml'); } catch { /* a .docx may carry no styles part: then nothing is a heading */ }
+  return { documentXml: part('word/document.xml'), stylesXml };
+}
+
+const XML_ENTITY = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+const decodeXml = (s) => s.replace(/&(?:#x([0-9a-f]+)|#(\d+)|(amp|lt|gt|quot|apos));/gi,
+  (_, hex, dec, name) => (hex ? String.fromCodePoint(parseInt(hex, 16)) : dec ? String.fromCodePoint(Number(dec)) : XML_ENTITY[name.toLowerCase()]));
+
+/** Heading level by style id: a style NAMED "heading N" (Word's own, whatever its id), else one with an outline level. */
+function headingStyles(stylesXml) {
+  const levels = new Map();
+  for (const m of String(stylesXml).matchAll(/<w:style\b[^>]*w:styleId="([^"]+)"[^>]*>([\s\S]*?)<\/w:style>/g)) {
+    const name = /<w:name w:val="([^"]*)"/.exec(m[2])?.[1] ?? '';
+    const byName = /^heading (\d)$/i.exec(name.trim());
+    const outline = /<w:outlineLvl w:val="(\d)"/.exec(m[2]);
+    if (byName) levels.set(m[1], Number(byName[1]));
+    else if (outline) levels.set(m[1], Number(outline[1]) + 1);
+  }
+  return levels;
+}
+
+/**
+ * #1961 — a .docx's text, one paragraph per line (a block IS a paragraph, as before), with each heading written as "#" × its
+ * level and a space. A body paragraph that starts with "#" gets a backslash, so it is never read back as a heading. A Word file
+ * has no pages of its own, so no form feed is ever written.
+ */
+export function docxText({ documentXml, stylesXml = '' }) {
+  const levels = headingStyles(stylesXml);
+  const lines = [];
+  for (const m of String(documentXml).matchAll(/<w:p(?:\s[^>]*)?\/>|<w:p(?:\s[^>]*)?>([\s\S]*?)<\/w:p>/g)) {
+    const inner = m[1] ?? '';
+    const style = /<w:pStyle w:val="([^"]+)"/.exec(inner)?.[1];
+    const ownOutline = /<w:pPr>[\s\S]*?<w:outlineLvl w:val="(\d)"[\s\S]*?<\/w:pPr>/.exec(inner);
+    const level = (style && levels.get(style)) || (ownOutline ? Number(ownOutline[1]) + 1 : 0);
+    let text = '';
+    for (const t of inner.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>|<w:tab\/>|<w:(?:br|cr)(?:\s[^>]*)?\/>/g)) {
+      text += t[1] != null ? decodeXml(t[1]) : t[0].startsWith('<w:tab') ? '\t' : ' ';
+    }
+    text = text.replace(/[\r\n\f\v]+/g, ' ');
+    if (level >= 1 && level <= 9 && text.trim()) lines.push(`${'#'.repeat(level)} ${text.trim()}`);
+    else lines.push(text.startsWith('#') ? `\\${text}` : text);
+  }
+  return lines.join('\n');   // no trailing newline: it would be one more (empty) block
+}
 
 /** Convert a local file to text on this machine. Throws, naming the supported extensions, for anything else. */
 export function convertFile(file, { exec = execFileSync } = {}) {
@@ -112,7 +166,9 @@ export async function extractFile({ file, extractor, sourcesDir, modelKey, promp
   const label = `${path.basename(file)} (urn:sha256:${original})`;
   const finish = async (r, blocks) => {
     // a paged format's claims name their page; a .docx has none of its own, so its claims carry only their block
-    const published = converted.paged ? r.published.map((p) => ({ ...p, page: pageOfBlock(blocks, p.block) })) : r.published.map((p) => ({ ...p }));
+    // #1961: a .docx claim names its SECTION (heading path and paragraph) when the kept text has headings
+    const published = converted.paged ? r.published.map((p) => ({ ...p, page: pageOfBlock(blocks, p.block) }))
+      : r.published.map((p) => { const section = addressOf(sectionOfBlock(blocks, p.block)); return section ? { ...p, section } : { ...p }; });
     // #1852: a file's run is linked to our cards as a link's run is, before its finish report. Linking never fails the run.
     const links = await linkPublished(link, r);
     await tell({ kind: 'finish', url: label, result: { ...r, published }, ...(links ? { links } : {}) });
