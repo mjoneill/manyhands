@@ -289,7 +289,11 @@ test('#1825 P1: under the graph units the picker counts the posts and memories i
     const delRoute = await (await fetch(`${w.rest.baseUrl}/api/deliveries?all=1&limit=500`)).json();
     assert.equal(del.countedBy, 'graph', 'the deliveries count says it was counted in the graph');
     assert.equal(del.count, delRoute.deliveries.length, `the graph count agrees with the route (${del.count} vs ${delRoute.deliveries.length})`);
-    assert.equal(menu.spaces.find((x) => x.space === 'commons').countedBy, 'route', 'every other kind says it was counted from its route');
+    assert.equal(menu.spaces.find((x) => x.space === 'memories').countedBy, 'route', 'a kind read in full says it was counted from its route');
+    // PO 55050: the posts are counted by the route's own X-Total-Count, so the picker never parses the whole room in REST.
+    const commons = menu.spaces.find((x) => x.space === 'commons');
+    assert.equal(commons.countedBy, 'route-total', 'the posts count says it is the route\'s total');
+    assert.equal(commons.count, posts.length, `the route's total agrees with what it serves (${commons.count} vs ${posts.length})`);
   } finally { await w.stop(); }
 });
 
@@ -360,5 +364,25 @@ test('#1825 P5: Settings shows "counting…" until the counts arrive, then the n
     await page.waitForFunction((q) => document.querySelector(q).parentElement.querySelector('.n').textContent !== 'counting…', { timeout: 15000 }, sel);
     const after = await page.$eval(sel, (i) => i.parentElement.querySelector('.n').textContent);
     assert.match(after, /^\d+ · counted in the graph$/, `the deliveries count is labelled as a graph count (got "${after}")`);
+    const commonsShown = await page.$eval('#export-panel [data-export-include] input[value=commons]', (i) => i.parentElement.querySelector('.n').textContent);
+    assert.match(commonsShown, /^\d+ · the route's total$/, `the posts count is labelled as the route's total (got "${commonsShown}")`);
   }, { server: {}, launch: { headless: 'new', args: ['--no-sandbox'] } });
+});
+
+test('#1825 P6: the picker never reads the posts in full: skip leaves a kind unread even when cards would pull it in', async () => {
+  const { readRouteSources } = await import('../core/export-spaces.mjs');
+  const asked = [];
+  const fakeFetch = async (url) => { asked.push(new URL(url).pathname); return { ok: true, status: 200, json: async () => [] }; };
+  const r = await readRouteSources('http://x', ['cards'], { fetch: fakeFetch, skip: ['commons'] });
+  assert.ok(!asked.includes('/api/conversations'), `the posts route was not read (asked: ${asked.join(', ')})`);
+  assert.equal(r.overrides.commons, undefined, 'and no rows are claimed for it');
+});
+
+test('#1825 P7: a route total is the X-Total-Count header as an integer; a missing or malformed header, or a failed call, is a reason, never a number', async () => {
+  const { routeTotalOf } = await import('../core/export-spaces.mjs');
+  const fake = (status, header) => async () => ({ ok: status === 200, status, headers: { get: (k) => (k.toLowerCase() === 'x-total-count' ? header : null) }, json: async () => [] });
+  assert.deepEqual(await routeTotalOf('http://x', '/api/conversations?limit=1', { fetch: fake(200, '55045') }), { n: 55045 });
+  assert.ok((await routeTotalOf('http://x', '/p', { fetch: fake(200, null) })).why, 'no header ⇒ a reason');
+  assert.ok((await routeTotalOf('http://x', '/p', { fetch: fake(200, '12abc') })).why, 'a malformed header ⇒ a reason');
+  assert.ok((await routeTotalOf('http://x', '/p', { fetch: fake(503, '9') })).why, 'a failed call ⇒ a reason, even with a header');
 });

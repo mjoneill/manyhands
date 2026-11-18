@@ -78,9 +78,11 @@ export function rowsOfResponse(space, json) {
  * Returns { overrides, unread }: overrides[space] holds the rows of every kind read in full; unread[space] holds the reason for
  * every kind that could not be, and that kind has NO override. A short read is unread, never a smaller number.
  */
-export async function readRouteSources(base, spaces, { fetch: get = globalThis.fetch } = {}) {
+export async function readRouteSources(base, spaces, { fetch: get = globalThis.fetch, skip = [] } = {}) {
   const overrides = {}; const unread = {};
-  const wanted = (sp) => sp.key === undefined || spaces.includes(sp.space) || (sp.space === 'commons' && spaces.includes('cards'));
+  // `skip`: kinds the caller counts another way (the picker, PO 55050) — never read here, whatever the selection pulls in.
+  const wanted = (sp) => !skip.includes(sp.space)
+    && (sp.key === undefined || spaces.includes(sp.space) || (sp.space === 'commons' && spaces.includes('cards')));
   for (const sp of exportableSpaces().filter((x) => x.source && wanted(x))) {
     const all = [];
     let after = null; let why = null;
@@ -105,6 +107,21 @@ export async function readRouteSources(base, spaces, { fetch: get = globalThis.f
     if (why) unread[sp.space] = why; else overrides[sp.space] = all;
   }
   return { overrides, unread };
+}
+
+/**
+ * #1825 — a route's own total: the X-Total-Count header of a one-row read (`?limit=1`), counted by the route over exactly the
+ * set it serves. The picker's posts count (PO 55050): reading 55k posts in full to count them stalled REST's event loop for
+ * ~1.2 s (one sample, 2026-11-18T11:10Z). Returns { n } or { why }; a failed call or a non-integer header is a why.
+ */
+export async function routeTotalOf(base, path, { fetch: get = globalThis.fetch } = {}) {
+  try {
+    const r = await get(`${base}${path}`);
+    if (!r.ok) return { why: `${path} answered ${r.status}` };
+    const h = r.headers?.get?.('x-total-count');
+    if (typeof h !== 'string' || !/^\d+$/.test(h)) return { why: `${path} answered without an X-Total-Count` };
+    return { n: Number(h) };
+  } catch (err) { return { why: `${path} could not be read: ${err.message}` }; }
 }
 
 /**

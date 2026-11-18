@@ -36,7 +36,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { isOpenDelivery, classifyDeliveries } from './core/delivery.mjs';   // #1346; classifyDeliveries: #1902's report
-import { exportableSpaces, resolveSpaces, describeExportSet, readRouteSources, graphCountOf } from './core/export-spaces.mjs';   // #1321
+import { exportableSpaces, resolveSpaces, describeExportSet, readRouteSources, graphCountOf, routeTotalOf } from './core/export-spaces.mjs';   // #1321
 import { loadDomain, loadDomainShared, saveDomain } from './core/store.mjs';
 import { validateCompare, evaluateCompareAsync } from './core/check-compare.mjs';   // #1610; #1643 one async form serves both sources
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -6073,20 +6073,27 @@ async function handleExportSpaces(req, res) {
     // collections out, and counting the document said 0 for 55k posts. A route that cannot be read is null ("not read").
     // Deliveries are the exception (PO 55038): walking their pages took 42.8 s on the live board, so they are counted by the
     // graph COUNT the exporter recounts with, and say so (`countedBy: 'graph'`).
+    // The posts are the other exception (PO 55050): reading 55k of them in full, inside REST, stalled the event loop ~1.2 s,
+    // so they are counted by the route's own X-Total-Count over a one-row read, and say so (`countedBy: 'route-total'`).
     const base = `http://127.0.0.1:${BOUND_PORT}`;
     const BY_GRAPH = new Set(['deliveries']);
-    const { overrides, unread } = await readRouteSources(base, all.map((x) => x.space).filter((x) => !BY_GRAPH.has(x)));
-    const graphCounts = {};
+    const BY_TOTAL = { commons: '/api/conversations?limit=1' };
+    const { overrides, unread } = await readRouteSources(base, all.map((x) => x.space), { skip: [...BY_GRAPH, ...Object.keys(BY_TOTAL)] });
+    const other = {};
     for (const sp of all.filter((x) => BY_GRAPH.has(x.space))) {
       const g = await graphCountOf(base, sp.kind);
-      if (g.why) unread[sp.space] = g.why; else graphCounts[sp.space] = g.n;
+      if (g.why) unread[sp.space] = g.why; else other[sp.space] = { n: g.n, by: 'graph' };
+    }
+    for (const [space, path] of Object.entries(BY_TOTAL)) {
+      const t = await routeTotalOf(base, path);
+      if (t.why) unread[space] = t.why; else other[space] = { n: t.n, by: 'route-total' };
     }
     const d = describeExportSet(data, [], overrides, { unreadIfAbsent: true });
     const spaces = all.map((sp) => {
       const row = d.excluded.find((x) => x.space === sp.space) || d.included.find((x) => x.space === sp.space);
-      const byGraph = sp.space in graphCounts;
-      const count = unread[sp.space] ? null : byGraph ? graphCounts[sp.space] : row ? row.count : null;
-      const countedBy = byGraph ? 'graph' : sp.source ? 'route' : 'document';
+      const o = other[sp.space];
+      const count = unread[sp.space] ? null : o ? o.n : row ? row.count : null;
+      const countedBy = o ? o.by : sp.source ? 'route' : 'document';
       return { ...menuOf(sp), count, countedBy, ...(unread[sp.space] ? { unread: unread[sp.space] } : {}) };
     });
     sendJSON(res, 200, { spaces, unregistered: d.unregistered });
