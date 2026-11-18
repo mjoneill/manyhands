@@ -342,7 +342,7 @@ test('#1825 P4: ?counts=0 answers the menu without reading any kind, so Settings
   } finally { await s.stop(); }
 });
 
-test('#1825 P5: Settings shows "counting…" until the counts arrive, then the number, and labels a graph count', async () => {
+test('#1825 P5: Settings shows "counting…" until the counts arrive, then a plain number, and says how it was counted on hover', async () => {
   const { withBrowserServer } = await import('./helpers/harness.mjs');
   await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
@@ -363,9 +363,14 @@ test('#1825 P5: Settings shows "counting…" until the counts arrive, then the n
     release();
     await page.waitForFunction((q) => document.querySelector(q).parentElement.querySelector('.n').textContent !== 'counting…', { timeout: 15000 }, sel);
     const after = await page.$eval(sel, (i) => i.parentElement.querySelector('.n').textContent);
-    assert.match(after, /^\d+ · counted in the graph$/, `the deliveries count is labelled as a graph count (got "${after}")`);
+    // PO 55054: the page is read by a person, not by us — the count is a plain number, and how it was counted is said in
+    // plain words on hover, never in our vocabulary ("route", "graph").
+    assert.match(after, /^\d+$/, `the deliveries count is a plain number (got "${after}")`);
     const commonsShown = await page.$eval('#export-panel [data-export-include] input[value=commons]', (i) => i.parentElement.querySelector('.n').textContent);
-    assert.match(commonsShown, /^\d+ · the route's total$/, `the posts count is labelled as the route's total (got "${commonsShown}")`);
+    assert.match(commonsShown, /^\d+$/, `the posts count is a plain number (got "${commonsShown}")`);
+    const hover = await page.$eval(sel, (i) => i.parentElement.title);
+    assert.match(hover, /^Counted without reading each one/, `the hover says how the count was taken, in plain words (got "${hover.slice(0, 80)}")`);
+    assert.doesNotMatch(hover.split('\n')[0], /route|graph/i, 'and without our vocabulary');
   }, { server: {}, launch: { headless: 'new', args: ['--no-sandbox'] } });
 });
 

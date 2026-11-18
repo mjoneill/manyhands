@@ -1393,11 +1393,12 @@ load();
     }, 250);
   };
 
-  // #1825 — a count is text beside its box. null is "not read": the route could not be read, so there is no number, and 0
-  // would be a claim. A count taken by the graph (deliveries, PO 55038) says so.
-  const countText = (sp) => (sp.count === null ? 'not read'
-    : sp.countedBy === 'graph' ? `${sp.count} · counted in the graph`
-    : sp.countedBy === 'route-total' ? `${sp.count} · the route's total` : `${sp.count}`);
+  // #1825 — a count is text beside its box. null is "not read": the kind could not be read, so there is no number, and 0
+  // would be a claim. A count taken without reading every row (deliveries and posts, PO 55038/55050) says so on hover, in
+  // words for the person reading the page, not ours (PO 55054).
+  const countText = (sp) => (sp.count === null ? 'not read' : `${sp.count}`);
+  const howCounted = (sp) => (sp.count !== null && (sp.countedBy === 'graph' || sp.countedBy === 'route-total')
+    ? 'Counted without reading each one, so this page opens quickly. The export itself reads every one.\n' : '');
   try {
     // The boxes first, from the menu alone (?counts=0, nothing read), each saying "counting…"; then the counts, which read
     // every kind from where it lives and take seconds on a large board.
@@ -1427,7 +1428,7 @@ load();
       for (const sp of full.spaces) {
         const el = countEl.get(sp.space); if (!el) continue;
         el.n.textContent = countText(sp);
-        if (sp.unread) el.label.title = `Not read: ${sp.unread}\n${el.label.title}`;
+        el.label.title = (sp.unread ? `Not read: ${sp.unread}\n` : howCounted(sp)) + el.label.title;
       }
     } catch (e) {
       for (const { n } of countEl.values()) n.textContent = 'not read';
