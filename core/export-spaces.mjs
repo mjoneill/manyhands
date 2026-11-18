@@ -70,6 +70,62 @@ export function rowsOfResponse(space, json) {
   return new Error(`${where} answered without an array, under \`${space.space}\`, or under \`rows\``);
 }
 
+/**
+ * #1825 — read every selected kind that lives outside the document from its own route: the exporter's read, and the Settings
+ * picker's count, are this one function, so the number beside a checkbox is the number the archive will hold. `spaces` is the
+ * selection (resolved space names); the registry's own three are always read, and the posts are read whenever cards are,
+ * because a card carries its thread. A `paged` source is walked (#1826): its cursor field is sent back as `after` until null.
+ * Returns { overrides, unread }: overrides[space] holds the rows of every kind read in full; unread[space] holds the reason for
+ * every kind that could not be, and that kind has NO override. A short read is unread, never a smaller number.
+ */
+export async function readRouteSources(base, spaces, { fetch: get = globalThis.fetch } = {}) {
+  const overrides = {}; const unread = {};
+  const wanted = (sp) => sp.key === undefined || spaces.includes(sp.space) || (sp.space === 'commons' && spaces.includes('cards'));
+  for (const sp of exportableSpaces().filter((x) => x.source && wanted(x))) {
+    const all = [];
+    let after = null; let why = null;
+    for (let pages = 0; ; pages += 1) {
+      if (pages > 100000) { why = `${sp.source} kept answering a next page — refusing to export ${sp.space}`; break; }
+      const url = `${sp.source}${after ? `&after=${encodeURIComponent(after)}` : ''}`;
+      let j;
+      try {
+        const r = await get(`${base}${url}`);
+        if (!r.ok) { why = `${url} answered ${r.status} — refusing to export ${sp.space} as empty`; break; }
+        j = await r.json();
+      } catch (err) { why = `could not read ${url} — ${err.message}`; break; }
+      const rows = rowsOfResponse(sp, j);
+      if (rows instanceof Error) { why = `${rows.message} — refusing to export ${sp.space} as empty`; break; }
+      all.push(...rows);
+      if (!sp.paged) break;
+      if (!(sp.paged in (j || {}))) { why = `${url} answered without its \`${sp.paged}\` cursor — refusing to export ${sp.space} short`; break; }
+      if (j[sp.paged] === null) break;
+      if (j[sp.paged] === after) { why = `${url} answered the same cursor twice — refusing to export ${sp.space}`; break; }
+      after = j[sp.paged];
+    }
+    if (why) unread[sp.space] = why; else overrides[sp.space] = all;
+  }
+  return { overrides, unread };
+}
+
+/**
+ * #1825 — a kind's count from the graph: COUNT(DISTINCT ?e) of its registered type through POST /api/graph. The exporter's
+ * second count (its recount), and the Settings picker's deliveries count (PO 55038: walking ~51 pages took 42.8 s on the live
+ * board, 2026-11-18T09:59Z). Returns { n } or { why }; a truncated or non-numeric answer is a why, never a number.
+ */
+export const TYPE_RE = /^[a-z][a-z0-9]*:[A-Za-z][A-Za-z0-9]*$/;
+export async function graphCountOf(base, kind, { fetch: get = globalThis.fetch } = {}) {
+  if (!TYPE_RE.test(String(kind || ''))) return { why: 'no registered type to count it by' };
+  try {
+    const r = await get(`${base}/api/graph`, { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ query: `SELECT (COUNT(DISTINCT ?e) AS ?n) WHERE { ?e a ${kind} }` }) });
+    if (!r.ok) return { why: `/api/graph answered ${r.status}` };
+    const j = await r.json();
+    if (j?.truncated) return { why: '/api/graph says its answer was truncated' };
+    const n = Number(j?.rows?.[0]?.n);
+    return Number.isSafeInteger(n) && n >= 0 ? { n } : { why: 'the count came back without a number' };
+  } catch (err) { return { why: `/api/graph could not be read: ${err.message}` }; }
+}
+
 const kebab = (s) => String(s).replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
 
 /**

@@ -87,7 +87,7 @@ const DEFAULTS = {
 // and `conversations` stay as aliases; `all` means everything registered. The
 // INDEX names what was included, what was excluded (with counts), and anything
 // present on the board that the registry does not know.
-import { exportableSpaces, resolveSpaces, describeExportSet, rowsFor, rowsOfResponse } from './core/export-spaces.mjs';
+import { exportableSpaces, resolveSpaces, describeExportSet, rowsFor, readRouteSources, graphCountOf, TYPE_RE } from './core/export-spaces.mjs';
 
 /**
  * Where EXPORT_TRANSFORMS.json comes from — the same rule as export-wiki.mjs,
@@ -308,33 +308,11 @@ async function main() {
   // Spaces that live outside the document are read from their own endpoint (#1321: the registry's own three, always; #1825:
   // the kinds whose record is the graph, when selected, and the posts whenever cards are, because a card carries its thread).
   // A source is held to the key it declares: a response without it REFUSES the export, never reads as [] (rowsOfResponse).
-  const overrides = {};
-  const wanted = (sp) => sp.key === undefined || args.spaces.includes(sp.space) || (sp.space === 'commons' && args.spaces.includes('cards'));
-  for (const sp of exportableSpaces().filter((x) => x.source && wanted(x))) {
-    // #1826 — a `paged` source is walked: its cursor field is sent back as `after` until it is null. A page that answers
-    // without that field refuses, like a missing key: stopping early would be the same silent short count.
-    const all = [];
-    let after = null;
-    for (let pages = 0; ; pages += 1) {
-      if (pages > 100000) die(`${sp.source} kept answering a next page — refusing to export ${sp.space}`);
-      const url = `${sp.source}${after ? `&after=${encodeURIComponent(after)}` : ''}`;
-      let j;
-      try {
-        const r = await fetch(`${args.base}${url}`);
-        if (!r.ok) die(`${url} answered ${r.status} — refusing to export ${sp.space} as empty`);
-        j = await r.json();
-      } catch (err) { die(`could not read ${url} — ${err.message}`); }
-      const rows = rowsOfResponse(sp, j);
-      if (rows instanceof Error) die(`${rows.message} — refusing to export ${sp.space} as empty`);
-      all.push(...rows);
-      if (!sp.paged) break;
-      if (!(sp.paged in (j || {}))) die(`${url} answered without its \`${sp.paged}\` cursor — refusing to export ${sp.space} short`);
-      if (j[sp.paged] === null) break;
-      if (j[sp.paged] === after) die(`${url} answered the same cursor twice — refusing to export ${sp.space}`);
-      after = j[sp.paged];
-    }
-    overrides[sp.space] = all;
-  }
+  // #1826 — a `paged` source is walked; a page without its cursor refuses, like a missing key. The read is shared with the
+  // Settings picker's counts (readRouteSources), so the menu and the archive cannot disagree about how many there are.
+  const { overrides, unread } = await readRouteSources(args.base, args.spaces);
+  const firstUnread = Object.values(unread)[0];
+  if (firstUnread) die(firstUnread);
   // #1825 — the posts come from their own route. GET /api/board omits them under the graph conversations unit, and reading the
   // document's absent key as [] is exactly how an archive of 0 messages called itself complete.
   const allMessages = Array.isArray(overrides.commons) ? overrides.commons : (board.conversations || []);
@@ -562,19 +540,7 @@ async function main() {
   const exportedOf = (space) => (space === 'commons'
     ? (args.spaces.includes('commons') ? boardLevel.length : 0) + (args.spaces.includes('cards') ? homedCount : 0)
     : space === 'cards' ? allCards.length : records.filter((r) => sectionKind(r.section) === space).length);
-  const TYPE_RE = /^[a-z][a-z0-9]*:[A-Za-z][A-Za-z0-9]*$/;
-  const recount = async (kind) => {
-    if (!TYPE_RE.test(String(kind || ''))) return { why: 'no registered type to count it by' };
-    try {
-      const r = await fetch(`${args.base}/api/graph`, { method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ query: `SELECT (COUNT(DISTINCT ?e) AS ?n) WHERE { ?e a ${kind} }` }) });
-      if (!r.ok) return { why: `/api/graph answered ${r.status}` };
-      const j = await r.json();
-      if (j?.truncated) return { why: '/api/graph says its answer was truncated' };
-      const n = Number(j?.rows?.[0]?.n);
-      return Number.isSafeInteger(n) && n >= 0 ? { n } : { why: 'the count came back without a number' };
-    } catch (err) { return { why: `/api/graph could not be read: ${err.message}` }; }
-  };
+  const recount = (kind) => graphCountOf(args.base, kind);
   const coverage = [];
   // A collection can hold more than one type: agent prompts and procedures carry their heads AND their versions (found on the
   // live board, 2026-11-07T20:22Z: 11 rows against 2 heads). Where every written row names its own @type, the second count is

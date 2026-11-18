@@ -1393,19 +1393,27 @@ load();
     }, 250);
   };
 
+  // #1825 — a count is text beside its box. null is "not read": the route could not be read, so there is no number, and 0
+  // would be a claim. A count taken by the graph (deliveries, PO 55038) says so.
+  const countText = (sp) => (sp.count === null ? 'not read'
+    : sp.countedBy === 'graph' ? `${sp.count} · counted in the graph` : `${sp.count}`);
   try {
-    const r = await fetch('/api/export/spaces');
+    // The boxes first, from the menu alone (?counts=0, nothing read), each saying "counting…"; then the counts, which read
+    // every kind from where it lives and take seconds on a large board.
+    const r = await fetch('/api/export/spaces?counts=0');
     const j = await r.json();
     kindsEl.replaceChildren();
+    const countEl = new Map();
     for (const sp of j.spaces) {
       const label = document.createElement('label');
       if (!sp.prose) label.className = 'machine';
       const box = document.createElement('input'); box.type = 'checkbox'; box.value = sp.space; box.checked = !!sp.defaultOn;
       const name = document.createElement('span'); name.textContent = sp.space;
-      const n = document.createElement('span'); n.className = 'n'; n.textContent = `${sp.count}`;
+      const n = document.createElement('span'); n.className = 'n'; n.textContent = 'counting…';
       label.title = `${sp.kind || sp.collection} — ${sp.definition}`.slice(0, 300);
       label.append(box, name, n);
       kindsEl.append(label);
+      countEl.set(sp.space, { n, label });
     }
     kindsEl.addEventListener('change', preview);
     preview();
@@ -1413,6 +1421,16 @@ load();
     unregEl.textContent = u.length
       ? `Present but unregistered — not exportable until registered (#1215): ${u.map((x) => `${x.type} ×${x.count}`).join(', ')}`
       : 'Every entity on this board belongs to a registered kind.';
+    try {
+      const full = await (await fetch('/api/export/spaces')).json();
+      for (const sp of full.spaces) {
+        const el = countEl.get(sp.space); if (!el) continue;
+        el.n.textContent = countText(sp);
+        if (sp.unread) el.label.title = `Not read: ${sp.unread}\n${el.label.title}`;
+      }
+    } catch (e) {
+      for (const { n } of countEl.values()) n.textContent = 'not read';
+    }
   } catch (e) {
     kindsEl.textContent = `could not read the exportable kinds: ${e && e.message ? e.message : e}`;
   }

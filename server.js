@@ -36,7 +36,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { isOpenDelivery, classifyDeliveries } from './core/delivery.mjs';   // #1346; classifyDeliveries: #1902's report
-import { exportableSpaces, resolveSpaces, describeExportSet } from './core/export-spaces.mjs';   // #1321
+import { exportableSpaces, resolveSpaces, describeExportSet, readRouteSources, graphCountOf } from './core/export-spaces.mjs';   // #1321
 import { loadDomain, loadDomainShared, saveDomain } from './core/store.mjs';
 import { validateCompare, evaluateCompareAsync } from './core/check-compare.mjs';   // #1610; #1643 one async form serves both sources
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -6061,12 +6061,33 @@ function exportArgsFrom(body) {
 async function handleExportSpaces(req, res) {
   try {
     const data = readBoard();
-    let decisions = [];
-    try { decisions = await liveDecisions(); } catch { /* counted as 0 below; the exporter itself refuses if it cannot read them */ }
-    const d = describeExportSet(data, [], { decisions });
-    const spaces = exportableSpaces().map((sp) => {
+    const all = exportableSpaces();
+    const menuOf = (sp) => ({ space: sp.space, kind: sp.kind, collection: sp.collection, prose: sp.prose, aliases: sp.aliases, definition: sp.definition, defaultOn: sp.prose });
+    // #1825 — `?counts=0`: the menu alone, nothing read and so no count claimed. Settings draws the boxes from it, then asks again.
+    if (parseQuery(req.url).counts === '0') {
+      const d0 = describeExportSet(data, [], {}, { unreadIfAbsent: true });
+      return sendJSON(res, 200, { spaces: all.map(menuOf), unregistered: d0.unregistered });
+    }
+    // #1825 — every kind that lives outside the document is counted from its own route, by the exporter's own read, so the
+    // number beside a checkbox is the number the archive will hold. Under the graph units GET /api/board leaves those
+    // collections out, and counting the document said 0 for 55k posts. A route that cannot be read is null ("not read").
+    // Deliveries are the exception (PO 55038): walking their pages took 42.8 s on the live board, so they are counted by the
+    // graph COUNT the exporter recounts with, and say so (`countedBy: 'graph'`).
+    const base = `http://127.0.0.1:${BOUND_PORT}`;
+    const BY_GRAPH = new Set(['deliveries']);
+    const { overrides, unread } = await readRouteSources(base, all.map((x) => x.space).filter((x) => !BY_GRAPH.has(x)));
+    const graphCounts = {};
+    for (const sp of all.filter((x) => BY_GRAPH.has(x.space))) {
+      const g = await graphCountOf(base, sp.kind);
+      if (g.why) unread[sp.space] = g.why; else graphCounts[sp.space] = g.n;
+    }
+    const d = describeExportSet(data, [], overrides, { unreadIfAbsent: true });
+    const spaces = all.map((sp) => {
       const row = d.excluded.find((x) => x.space === sp.space) || d.included.find((x) => x.space === sp.space);
-      return { space: sp.space, kind: sp.kind, collection: sp.collection, prose: sp.prose, aliases: sp.aliases, definition: sp.definition, count: row ? row.count : 0, defaultOn: sp.prose };
+      const byGraph = sp.space in graphCounts;
+      const count = unread[sp.space] ? null : byGraph ? graphCounts[sp.space] : row ? row.count : null;
+      const countedBy = byGraph ? 'graph' : sp.source ? 'route' : 'document';
+      return { ...menuOf(sp), count, countedBy, ...(unread[sp.space] ? { unread: unread[sp.space] } : {}) };
     });
     sendJSON(res, 200, { spaces, unregistered: d.unregistered });
   } catch (e) {
