@@ -127,7 +127,7 @@ node server.js
 
 On first start the server logs that it seeded the default columns (Backlog, In Progress, Done), and the board is ready at `http://localhost:3141`. Later starts drop `--create` from step 1 and use the same dataset id. Things that refuse, on purpose, with a message saying why:
 
-- **The unit flags depend on each other.** Every other `SCRUM_GRAPH_UNIT_*` flag needs `SCRUM_GRAPH_UNIT_CONVERSATIONS=1`; turning on columns alone, for instance, refuses. Turning on the full set above avoids this.
+- **The unit flags depend on each other.** Cards, columns, deliveries and small-kinds each need `SCRUM_GRAPH_UNIT_CONVERSATIONS=1` (turning on columns alone refuses); log-born needs only the executor URL and dataset id. Turning on the full set above avoids this.
 - **Keep `SCRUM_BOARD_DOCUMENT` at its default.** Our own board runs with it `off`, but `off` on a brand-new dataset currently refuses until a card-reference index is backfilled by hand. That step is being removed.
 - **A second board on one machine** (any `SCRUM_PORT` other than 3141) must say where its notifications go. `SCRUM_MCP_NOTIFY_URL=''` notifies nobody. Without it, the server refuses, rather than post into another board's room.
 - A graph that already holds data but no columns, or a JSON board not yet migrated, still refuses. Only an empty dataset is seeded.
