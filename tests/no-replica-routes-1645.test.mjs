@@ -95,7 +95,7 @@ for (const [label, route, serves] of LOGBORN_ROUTES) {
 }
 
 // ---- 2d: the meter on an ALREADY-WARM copy (the branch a fresh REST cannot reach) ----
-test('#1645 (NR-M, meter on a warm copy) with the copy already built by another route, /api/checks still reports the meter disabled and causes no further sync', { skip: SKIP, timeout: 240000 }, async () => {
+test('#1645 (NR-M, meter on a warm copy) with the copy already built by another route, /api/checks does not list the retired meter (#1979) and causes no further sync', { skip: SKIP, timeout: 240000 }, async () => {
   const w = await wholeBoardWorld({ env: PROD });
   try {
     const h = async () => (await (await fetch(`${w.rest.baseUrl}/api/health`, { signal: AbortSignal.timeout(5000) })).json()).graph;
@@ -106,8 +106,7 @@ test('#1645 (NR-M, meter on a warm copy) with the copy already built by another 
     const r = await send(w, 'GET', '/api/checks?fresh=1'); const t = await r.text();
     assert.equal(r.status, 200, `checks answered 200 (${t.slice(0, 200)})`);
     const meter = (JSON.parse(t).standing ?? []).find((s) => s.id === 'graph-store-meter');
-    assert.ok(meter && meter.disabled === true && typeof meter.reason === 'string' && /#1645/.test(meter.reason) && !meter.error && !('rows' in meter),
-      `the meter on the executor pass is disabled with a reason naming #1645, no error and no rows, even with a warm copy to measure (${JSON.stringify(meter)})`);
+    assert.equal(meter, undefined, `the meter is retired from the executor pass (#1979): not listed, even with a warm copy to measure (${JSON.stringify(meter)})`);
     await new Promise((res) => setTimeout(res, 1500));
     const h1 = await h();
     assert.equal(h1.syncs, h0.syncs, `and the checks call caused no further sync of the copy (syncs ${h0.syncs} -> ${h1.syncs})`);

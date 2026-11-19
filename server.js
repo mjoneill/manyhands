@@ -8588,7 +8588,11 @@ async function evaluateChecks() {
     // because nobody would think to". Summing them would make `stale` mean two
     // things at once, which is the confusion this endpoint exists to refuse.
     const standing = [];
-    for (const c of STANDING_CHECKS) standing.push(await (async () => {
+    // #1979 (#1885 option 2) — a check that measures the in-process copy ITSELF is RETIRED from the executor pass, not paused:
+    // that pass never builds the copy, so the check cannot run there, and a check that cannot run on a pass isn't a check on
+    // it. Listing it as `disabled` put it on the digest's ⏸ line every day for something no one will ever re-enable there.
+    // The replica pass still runs it, and the hourly meter log line still records the copy's readings whenever one exists.
+    for (const c of STANDING_CHECKS) if (!(onExecutor && c.measuresReplica)) standing.push(await (async () => {
       // #1574 — A DECISION-MAKER THAT CANNOT SEE GRAPH POSTS IS SWITCHED OFF, SAYING SO. With the conversations unit on,
       // a seat may post only to the graph; a check that reads the document's posts would read it as silent and nudge it
       // (stale-claims) or act on its role (role-expiry). It answers `disabled` with the reason, never an empty "nothing
@@ -8600,12 +8604,6 @@ async function evaluateChecks() {
       try {
         // #1643 — on the executor pass, role-expiry's declarations come from liveSeatDecls() (the log-born reader when
         // that unit is on), fetched once, here.
-        // #1645 2d — on the executor pass the meter that measures the old copy is NOT RUN: running it would mean building
-        // the copy it measures, and the copy is being retired. It answers `disabled` with the reason, never an error and
-        // never an empty "nothing crossed" (#792). Always, not "only when no copy exists": an answer that depended on which
-        // route happened to build the copy first would differ between two identical boards. The hourly meter log line
-        // still records the copy's readings whenever one exists.
-        if (onExecutor && c.measuresReplica) return { id: c.id, claim: c.claim, disabled: true, reason: REPLICA_NOT_MEASURED };
         // #1885 — re-enabled, role-expiry reads the declarations through liveSeatDecls(), which without the log-born unit (#1561)
         // WARMS THE IN-PROCESS COPY. On the executor pass that copy is being retired (#1645): the check says so instead of building
         // it. Production runs log-born, so there it runs.
@@ -12447,7 +12445,6 @@ async function checkPostsFromGraph(kind, { cards, decls }) {
   if (!q.ok) throw new Error(`the graph's posts could not be read for this check (${q.reason || 'unreadable'})`);
   return kind === 'holders' ? CPG.holderCardPostsFrom(q.rows) : CPG.postsSinceFrom(q.rows);
 }
-const REPLICA_NOT_MEASURED = 'not measured on the executor pass (#1645 2d): it measures the in-process copy, which checks no longer build or read';
 
 function decidePublish(data, obligationId) {
   const { origins, entries } = outboxOf(data);

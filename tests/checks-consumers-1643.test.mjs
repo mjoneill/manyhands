@@ -89,9 +89,12 @@ test('#1643 (K1) the digest rendered from the executor\'s standing checks has th
     const extra = pausedIds(db.firstSeen).filter((id) => !pausedIds(da.firstSeen).includes(id));
     // #1885 — role-expiry now RUNS under the unit, but on the executor pass without the log-born unit (this world has none) it
     // would build the in-process copy to read the declarations, so it is paused there with its own reason. Production runs log-born.
-    assert.deepEqual(extra.sort(), ['graph-store-meter', 'role-expiry'], `the ONLY checks the executor pass does not run that the replica pass does are graph-store-meter and (without log-born) role-expiry (replica ⏸ ${pausedIds(da.firstSeen)}, executor ⏸ ${pausedIds(db.firstSeen)})`);
+    assert.deepEqual(extra.sort(), ['role-expiry'], `the ONLY check the executor pass pauses that the replica pass runs is (without log-born) role-expiry; graph-store-meter is retired from that pass, not paused (#1979) (replica ⏸ ${pausedIds(da.firstSeen)}, executor ⏸ ${pausedIds(db.firstSeen)})`);
     assert.ok(pausedIds(da.firstSeen).every((id) => pausedIds(db.firstSeen).includes(id)), 'and nothing the replica pass skips is run by the executor pass');
-    assert.match(db.body, /graph-store-meter \(not measured on the executor pass \(#1645 2d\)/, 'the executor digest says so, with its reason');
+    // #1979 — graph-store-meter is RETIRED from the executor pass: not on its standing list, so the digest's ⏸ line does not name it
+    assert.equal(b.standing.find((s) => s.id === 'graph-store-meter'), undefined, 'the executor pass does not list the retired meter');
+    assert.doesNotMatch(db.body, /graph-store-meter/, 'and the executor digest does not name it');
+    assert.ok(a.standing.some((s) => s.id === 'graph-store-meter' && !s.disabled), 'CONTROL: the replica pass still runs the meter');
   });
 });
 
