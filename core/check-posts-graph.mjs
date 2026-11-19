@@ -59,7 +59,8 @@ export function lapsedSeats(decls = [], now, windowMs = 7 * 24 * 3.6e6) {
     if (!d || !d.role || !d.seat || !SAFE.test(d.seat)) continue;
     const exp = Date.parse(d.expiresAt);
     if (!Number.isFinite(exp) || exp > t || t - exp > windowMs) continue;
-    out.push({ seat: d.seat, since: d.expiresAt });
+    // review of 359df8d: the query compares as strings and expiresAt is stored as declared; hand it the instant in UTC
+    out.push({ seat: d.seat, since: new Date(exp).toISOString() });
   }
   return out;
 }
