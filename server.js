@@ -15166,6 +15166,24 @@ if (CARDS_UNIT) {
   // #1744 finding 6 — THE BOOT GATE. Where the index is required (executor-owned, or SCRUM_CARD_REF_INDEX=enforce), a board
   // whose index is absent, unfinished or damaged would refuse every create and delete at runtime; boot is the cheapest place
   // to say so, once, to the operator. A check that cannot run is a refusal too: an unproven index is not a healthy one.
+  // #1981 — A BRAND-NEW DATASET GETS ITS (EMPTY) INDEX THE SUPPORTED WAY, then passes the same gate. Measured in #1977: a
+  // --create'd dataset with the document off refused here until the index was backfilled by hand. Only when the marker is
+  // ABSENT (a latched `false` is never re-opened) and the dataset holds NOTHING outside bookkeeping (#1679's test of "new"):
+  // the server runs the backfill script itself, before it serves, so writers are quiesced by construction. The script writes
+  // and verifies an explicit empty index ("a fresh empty board", its F3); the unchanged full verification below then decides.
+  if (CARD_REF_INDEX_ENFORCE) {
+    const gc = createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 30000, label: 'card-ref-index-fresh' });
+    const markerRows = await gc.query(`SELECT ?v WHERE { GRAPH <${BOOKKEEPING_GRAPH}> { <urn:ex:card-ref-index/coverage> ?p ?v } }`).then((r) => (r.ok ? r.rows : null), () => null);
+    const datasetEmpty = markerRows && markerRows.length === 0
+      ? await gc.ask(`ASK { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } FILTER(?g != <${BOOKKEEPING_GRAPH}>) } }`).then((r) => (r.ok ? !r.boolean : null), () => null)
+      : false;
+    if (datasetEmpty === true) {
+      const { spawnSync } = await import('node:child_process');
+      const r = spawnSync(process.execPath, [path.join(PROJECT_DIR, 'scripts', 'card-ref-index-1744.mjs'), '--executor', process.env.SCRUM_GRAPH_EXECUTOR_URL, '--dataset', process.env.SCRUM_GRAPH_DATASET_ID, '--backfill'], { encoding: 'utf8', timeout: 120000 });
+      const out = `${r.stdout || ''}${r.stderr || ''}`.trim().split('\n').pop();
+      console.error(`${new Date().toISOString()} #1981 a new dataset (nothing outside bookkeeping, no index marker) — initialised its empty card reference index: ${out || `exit ${r.status}`}`);
+    }
+  }
   if (CARD_REF_INDEX_ENFORCE) {
     // the FULL JSON verification before every enforced start (contract amendment, rulings 46773/46781): the health query
     // below proves the index internally consistent; this proves its name sets match the cards' stored JSON
