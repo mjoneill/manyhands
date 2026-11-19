@@ -18,10 +18,12 @@
  *   F3a LOST COLUMNS STILL REFUSE: a seeded board with a card whose column nodes are then deleted refuses to serve, naming #1639.
  *   F3b ANY DATA STILL REFUSES: a --create'd dataset holding one stray triple and no columns or cards (an interrupted import)
  *       refuses to serve; it is not seeded.
+ *   F3c AN UNMIGRATED BOARD STILL REFUSES: an empty --create'd graph under a document holding cards and a non-default column.
+ *   F4  NO REPLAYED SEED: a dataset seeded once that later lost everything outside bookkeeping refuses on restart. The seed's op is
+ *       replayed as APPLIED without writing, and the commit fills its cache from what it sent, so only a re-read of the graph tells.
  *
  * Without a python with pyoxigraph every row is SKIPPED, and a skip is NOT a pass (GRAPH_EXECUTOR_PYTHON names one).
- * NOT COVERED, by name: the CARDS unit off with cards in the document (the columns unit's own precondition, unchanged here);
- * concurrent first boots of two servers on one fresh dataset.
+ * NOT COVERED, by name: concurrent first boots of two servers on one fresh dataset.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -128,6 +130,31 @@ test('#1679 F3a a dataset that LOST its columns but holds a card still refuses t
   const s2 = await rest(d);
   if (!s2.refused) { await s2.r.stop(); assert.fail('a dataset with a card and no columns was served (it was re-seeded)'); }
   assert.match(s2.refused, /#1639 columns unit: the graph holds no columns/);
+  assert.deepEqual(await columnNodes(d.x), [], 'the refused start wrote columns anyway');
+});
+
+// review of a6d831b (non-builder, 55471): the seed's op id is fixed per dataset. A dataset seeded once that later lost everything
+// outside bookkeeping looks new again, and replaying that op must not leave the server serving columns the graph does not hold.
+test('#1679 F4 a dataset seeded ONCE that later lost everything outside bookkeeping refuses on restart: the seed is never replayed into a board the graph does not hold', T, async (t) => {
+  const d = await freshDataset(t, 'f4');
+  const s1 = await rest(d);
+  assert.ok(!s1.refused, (s1.refused || '').slice(0, 400));
+  await s1.r.stop();
+  await rawUpdate(d.x, 'DELETE WHERE { ?s ?p ?o }');
+  await rawUpdate(d.x, `DELETE { GRAPH ?g { ?s ?p ?o } } WHERE { GRAPH ?g { ?s ?p ?o } FILTER(?g != <${BOOKKEEPING_GRAPH}>) }`);
+  assert.equal((await sparql(d.x, `ASK { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } FILTER(?g != <${BOOKKEEPING_GRAPH}>) } }`)).boolean, false, 'setup: something is still outside bookkeeping');
+  const s2 = await rest(d);
+  if (!s2.refused) {
+    const cols = await api(s2.base, 'GET', '/api/columns');
+    const nodes = await columnNodes(d.x);
+    await s2.r.stop();
+    assert.equal(nodes.length, (cols.body || []).length, `the server serves ${(cols.body || []).length} column(s) while the graph holds ${nodes.length}`);
+    assert.fail(`a once-seeded dataset was served after losing its data (graph now holds ${nodes.length} column node(s))`);
+  }
+  // the refusal must be the COLUMNS' own, before anything else refuses for its own reasons (measured: without the guard the seed
+  // "succeeds" by replay, writes nothing, and the server dies later on an unrelated precondition, which hid the bug)
+  assert.doesNotMatch(s2.refused, /seeded the default columns/, 'the seed was replayed and reported as written');
+  assert.match(s2.refused, /#1679 columns unit: .*refusing to serve/);
   assert.deepEqual(await columnNodes(d.x), [], 'the refused start wrote columns anyway');
 });
 

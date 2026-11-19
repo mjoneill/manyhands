@@ -15305,6 +15305,17 @@ if (COLUMNS_UNIT) {
       console.error(`#1679 columns unit: a new dataset's default columns could not be written — refusing to serve: ${e.message}`);
       process.exit(1);
     }
+    // review of a6d831b: on APPLIED the commit fills the cache from what it SENT, and a replayed op (a dataset seeded once, which
+    // has since lost everything outside bookkeeping) answers APPLIED without writing. So the graph, not the cache, says whether
+    // the seed landed: re-read it, and a dataset still without columns refuses (a receipt for this seed means it is not new).
+    try { await COLUMNS.load(); } catch (e) {
+      console.error(`#1679 columns unit: the seeded columns could not be read back — refusing to serve: ${e.message}`);
+      process.exit(1);
+    }
+    if (!COLUMNS.snapshot().length) {
+      console.error('#1679 columns unit: the seed wrote nothing (this dataset was seeded before, so it is not new) — refusing to serve. Run scripts/migrate-columns-1639.mjs --apply (with the server stopped) first.');
+      process.exit(1);
+    }
     console.error(`${new Date().toISOString()} #1679 columns unit: a new dataset (nothing outside bookkeeping) — seeded the default columns: ${COLUMNS.snapshot().map((c) => c.name).join(', ')}`);
   }
   console.error(`${new Date().toISOString()} #1639 columns unit ON: columns are read from and written to the graph executor; the document's columns are not read or written`);
