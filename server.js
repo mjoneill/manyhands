@@ -83,6 +83,7 @@ import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, auditOutbox, mode
 import * as U3 from './core/unit3-graph.mjs';   // #1582 — deliveries and model calls in the graph
 import { seatIndex as seatInboxIndex, concernedSeats, createSeatInboxReconciler, createRetrievalMarker } from './core/seat-inbox.mjs';   // #1902 — every seat's inbox
 import { createGraphClient, setExecutorMeter } from './core/graph-client.mjs';   // #1574 C3b — the conversations unit's executor door
+import { BOOKKEEPING_GRAPH } from './core/graph-vocab.mjs';   // #1679 — already loaded through graph-client; no new dependency
 import { decideIntention as linkDecideIntention, attachIntention as linkAttachIntention, claimIriOf, spanKey as linkSpanKey, linkIri as linkIriOf, linkCountsQuery, countLinkUse, linkDecisionsQuery, decisionsOfRows, retiringDecision, dismissalCount } from './core/knowledge-linking.mjs';   // #1851, #1850, #1852
 import { deliveryQuery, linksOfDeliveryRows, selectDeliverySet, firstShowings, deliverySourcesQuery, sourcesOfRows, deliveryBlock, showIntention, DELIVERY_DEADLINE_MS } from './core/knowledge-delivery.mjs';   // #1852
 import * as READING from './core/knowledge-reading.mjs';   // #1894
@@ -15273,8 +15274,38 @@ if (COLUMNS_UNIT) {
     process.exit(1);
   }
   if (!COLUMNS.snapshot().length) {
-    console.error('#1639 columns unit: the graph holds no columns — refusing to serve. Run scripts/migrate-columns-1639.mjs --apply (with the server stopped) first.');
-    process.exit(1);
+    // #1679 — a NEW dataset gets the default columns; anything else with no columns still refuses. "New" is the operator's
+    // choice, made at the executor's --create (a store without a dataset marker never serves), so the server only reads it:
+    // the dataset holds NOTHING outside the executor's bookkeeping graph. A store that lost its columns still holds its cards,
+    // and an interrupted import still holds what it imported; both refuse as before. A failed read refuses too (fail closed).
+    // The DOCUMENT counts too (columns-graph-c1 C10): a board whose document holds cards, or columns other than the defaults, is
+    // an unmigrated board, never a new one. No document file at all is a fresh clone; an unreadable one refuses. Not under
+    // read-off/off, where the document is never read (#1563).
+    let docHolds = null;   // null: nothing; otherwise why the document is not a new board's
+    if (DOCUMENT_READS && fs.existsSync(BOARD_DATA_FILE)) {
+      try {
+        const doc = domainToBoard(loadDomain(BOARD_DATA_FILE));
+        const defaultIds = new Set(DEFAULT_COLUMNS.map((c) => c.id));
+        if ((doc.cards || []).length) docHolds = `the document holds ${doc.cards.length} card(s)`;
+        else if ((doc.columns || []).some((c) => !defaultIds.has(c?.id))) docHolds = 'the document holds columns other than the defaults';
+      } catch (e) { docHolds = `the document could not be read (${e.message})`; }
+    }
+    const graphEmpty = await createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 30000, label: 'columns-fresh' })
+      .ask(`ASK { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } FILTER(?g != <${BOOKKEEPING_GRAPH}>) } }`)
+      .then((r) => (r.ok ? !r.boolean : null), () => null);
+    if (graphEmpty !== true || docHolds) {
+      const why = graphEmpty === null ? ' (#1679: whether the dataset is new could not be read.)' : docHolds ? ` (#1679: not a new board: ${docHolds}.)` : '';
+      console.error(`#1639 columns unit: the graph holds no columns — refusing to serve.${why} Run scripts/migrate-columns-1639.mjs --apply (with the server stopped) first.`);
+      process.exit(1);
+    }
+    try {
+      // one guarded write; the op id is the dataset's own, so two first boots racing on one new dataset write it once
+      await COLUMNS.commit(DEFAULT_COLUMNS.map((c) => ({ ...c })), { actor: 'board', opId: `urn:ex:op/columns/fresh-seed/${encodeURIComponent(process.env.SCRUM_GRAPH_DATASET_ID || 'unnamed')}` });
+    } catch (e) {
+      console.error(`#1679 columns unit: a new dataset's default columns could not be written — refusing to serve: ${e.message}`);
+      process.exit(1);
+    }
+    console.error(`${new Date().toISOString()} #1679 columns unit: a new dataset (nothing outside bookkeeping) — seeded the default columns: ${COLUMNS.snapshot().map((c) => c.name).join(', ')}`);
   }
   console.error(`${new Date().toISOString()} #1639 columns unit ON: columns are read from and written to the graph executor; the document's columns are not read or written`);
 }
