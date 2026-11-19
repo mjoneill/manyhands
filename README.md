@@ -107,7 +107,32 @@ The step-by-step above is the one harness we have run cold. For the rest, many h
 
 **2. The graph-backed board: what we actually run.** Our own board keeps its cards, columns, conversations, deliveries, memories, decisions and seat state in an RDF graph held by one Python process, `graph-executor/executor.py` (pyoxigraph on RocksDB, bound to `127.0.0.1`). The Node server talks to it over HTTP, and each collection is switched over by its own flag (`SCRUM_GRAPH_UNIT_*`). This is where the project is going: the reason it is a graph at all is that context you cannot query is an archive, not context. It is also **mid-migration**: a few things still live only in the JSON file, and collections move across one at a time.
 
-What it is not yet is a documented newcomer install. We tried it from a fresh clone on 2026-10-11: the executor started, but a brand-new graph had no columns, and the server refused to serve until a migration script was run by hand. That gap is fixed: a dataset created with the executor's `--create`, holding nothing yet, now gets the default columns on first start. A graph that already holds data but no columns, or a JSON board not yet migrated, still refuses. We have not yet walked the whole graph-backed install cold since that fix, so the path is still undocumented. The graph store is backed up as RocksDB checkpoints that `scripts/graph-store-backup.mjs` copies to an independent directory. A checkpoint covers the graph only: attachment bytes, the state still held in the JSON file and a few side files must be backed up separately, and we have not yet validated a complete restore end to end. If you want to run graph-backed today, expect to read code and ask your agents; we will document the path once we have walked it cold.
+**Starting a new graph-backed board.** Walked cold on 2026-11-19 from a `git archive` of main, with a fresh `HOME`, npm cache and Python venv, by someone who did not build the parts involved. It took under 30 seconds. One more cold walk, following only these steps, is still to come.
+
+```sh
+npm ci
+python3 -m venv venv && venv/bin/pip install -r graph-executor/requirements.txt
+
+# 1. the graph store: --create initialises an EMPTY store (it refuses a non-empty one)
+venv/bin/python graph-executor/executor.py --store ./graph-store --port 3900 --dataset-id my-board --create
+
+# 2. the server, in a second terminal, pointed at it with every collection on the graph
+SCRUM_GRAPH_EXECUTOR_URL=http://127.0.0.1:3900 SCRUM_GRAPH_DATASET_ID=my-board \
+SCRUM_GRAPH_UNIT_CARDS=1 SCRUM_GRAPH_UNIT_COLUMNS=1 SCRUM_GRAPH_UNIT_CONVERSATIONS=1 \
+SCRUM_GRAPH_UNIT_DELIVERIES=1 SCRUM_GRAPH_UNIT_LOGBORN=1 SCRUM_GRAPH_UNIT_SMALLKINDS=1 \
+SCRUM_GRAPH_CHECKS_SOURCE=executor SCRUM_GRAPH_QUERY_SOURCE=executor \
+SCRUM_GRAPH_NEIGHBORS_SOURCE=executor SCRUM_GRAPH_READY_SOURCE=executor \
+node server.js
+```
+
+On first start the server logs that it seeded the default columns (Backlog, In Progress, Done), and the board is ready at `http://localhost:3141`. Later starts drop `--create` from step 1 and use the same dataset id. Things that refuse, on purpose, with a message saying why:
+
+- **The unit flags depend on each other.** `SCRUM_GRAPH_UNIT_CARDS=1` needs `SCRUM_GRAPH_UNIT_CONVERSATIONS=1`. Turning on the full set above avoids this.
+- **Keep `SCRUM_BOARD_DOCUMENT` at its default.** Our own board runs with it `off`, but `off` on a brand-new dataset currently refuses until a card-reference index is backfilled by hand. That step is being removed.
+- **A second board on one machine** (any `SCRUM_PORT` other than 3141) must say where its notifications go. `SCRUM_MCP_NOTIFY_URL=''` notifies nobody. Without it, the server refuses, rather than post into another board's room.
+- A graph that already holds data but no columns, or a JSON board not yet migrated, still refuses. Only an empty dataset is seeded.
+
+The graph store is backed up as RocksDB checkpoints that `scripts/graph-store-backup.mjs` copies to an independent directory. A checkpoint covers the graph only: attachment bytes, the state still held in the JSON file and a few side files must be backed up separately, and we have not yet validated a complete restore end to end.
 
 ---
 
