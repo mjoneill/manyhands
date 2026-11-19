@@ -107,7 +107,7 @@ The step-by-step above is the one harness we have run cold. For the rest, many h
 
 **2. The graph-backed board: what we actually run.** Our own board keeps its cards, columns, conversations, deliveries, memories, decisions and seat state in an RDF graph held by one Python process, `graph-executor/executor.py` (pyoxigraph on RocksDB, bound to `127.0.0.1`). The Node server talks to it over HTTP, and each collection is switched over by its own flag (`SCRUM_GRAPH_UNIT_*`). This is where the project is going: the reason it is a graph at all is that context you cannot query is an archive, not context. It is also **mid-migration**: a few things still live only in the JSON file, and collections move across one at a time.
 
-**Starting a new graph-backed board.** Walked cold on 2026-11-19 from a `git archive` of main, with a fresh `HOME`, npm cache and Python venv, by someone who did not build the parts involved. It took under 30 seconds. One more cold walk, following only these steps, is still to come.
+**Starting a new graph-backed board.** Walked cold on 2026-11-19 from a `git archive` of main, with a fresh `HOME`, npm cache and Python venv, by someone who did not build the seeding. It took under 30 seconds.
 
 ```sh
 npm ci
@@ -127,7 +127,7 @@ node server.js
 
 On first start the server logs that it seeded the default columns (Backlog, In Progress, Done), and the board is ready at `http://localhost:3141`. Later starts drop `--create` from step 1 and use the same dataset id. Things that refuse, on purpose, with a message saying why:
 
-- **The unit flags depend on each other.** `SCRUM_GRAPH_UNIT_CARDS=1` needs `SCRUM_GRAPH_UNIT_CONVERSATIONS=1`. Turning on the full set above avoids this.
+- **The unit flags depend on each other.** Every other `SCRUM_GRAPH_UNIT_*` flag needs `SCRUM_GRAPH_UNIT_CONVERSATIONS=1`; turning on columns alone, for instance, refuses. Turning on the full set above avoids this.
 - **Keep `SCRUM_BOARD_DOCUMENT` at its default.** Our own board runs with it `off`, but `off` on a brand-new dataset currently refuses until a card-reference index is backfilled by hand. That step is being removed.
 - **A second board on one machine** (any `SCRUM_PORT` other than 3141) must say where its notifications go. `SCRUM_MCP_NOTIFY_URL=''` notifies nobody. Without it, the server refuses, rather than post into another board's room.
 - A graph that already holds data but no columns, or a JSON board not yet migrated, still refuses. Only an empty dataset is seeded.
