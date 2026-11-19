@@ -17,7 +17,7 @@
  * names either engine, and /api/checks shows both rows running (#1885 DONE WHEN 2). On the executor pass WITHOUT log-born, role-expiry is paused
  * with its own reason rather than build the in-process copy (#1645); checks-consumers-1643 K1 and no-replica-routes-1645 pin that.
  */
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -37,6 +37,8 @@ const ROSTER_FILE = path.join(os.tmpdir(), `g1885-roster-${process.pid}.json`);
 fs.writeFileSync(ROSTER_FILE, JSON.stringify({ seats: {
   ada: { name: 'Ada', glyph: 'a', color: '#7cc4a0' }, bea: { name: 'Bea', glyph: 'b', color: '#c48ab0' }, cy: { name: 'Cy', glyph: 'c', color: '#e0b060' },
   board: { name: 'Board', glyph: 'o', color: '#8899aa', kind: 'system' } } }));
+
+after(() => fs.rmSync(ROSTER_FILE, { force: true }));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const sha = (f) => crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
@@ -63,7 +65,8 @@ async function scenario(body, { unit, roleInMs = 2 * H, extraEnv = {} }) {
   const stateFile = path.join(dir, 'stale-claim-state.json');
   fs.writeFileSync(stateFile, JSON.stringify({ asked: { [GHOST]: '2026-09-01T00:10:00.000Z' } }, null, 2));
   let exec = null;
-  if (unit) exec = await startExecutor({ store: tmpStore('g1885-store-'), datasetId: DSID, create: true });
+  const store = unit ? tmpStore('g1885-store-') : null;
+  if (unit) exec = await startExecutor({ store, datasetId: DSID, create: true });
   const rest = await startRestServer({ board: fixture(), env: { SCRUM_ROSTER_FILE: ROSTER_FILE, ...(unit ? { SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: exec.baseUrl, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1' } : {}), ...extraEnv } });
   let mcp = null;
   try {
@@ -90,6 +93,8 @@ async function scenario(body, { unit, roleInMs = 2 * H, extraEnv = {} }) {
     return await body(ctx);
   } finally {
     if (mcp) await mcp.stop(); await rest.stop(); if (exec) await killExecutor(exec);
+    // this file leaves nothing behind (the suite fails a NEW temp leak by name)
+    fs.rmSync(dir, { recursive: true, force: true }); if (store) fs.rmSync(store, { recursive: true, force: true });
   }
 }
 
