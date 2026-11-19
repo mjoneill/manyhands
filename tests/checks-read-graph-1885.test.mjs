@@ -10,6 +10,12 @@
  *   G2 LAPSED BUT ACTING, FROM A GRAPH POST  unit on: a role that has just lapsed, and a graph-only post by its holder AFTER the lapse, makes a
  *                `lapsed-but-acting` row whose lastWriteAt is that post. This is the branch DM's header names as not covered.
  *   G3 CONTROL  unit on: the same lapsed role with NO post after the lapse makes no row (the row in G2 comes from the post, not from the lapse).
+ *
+ * NOT COVERED, by name: production's exact pass (SCRUM_GRAPH_CHECKS_SOURCE=executor with SCRUM_GRAPH_UNIT_LOGBORN=1). There the declarations come
+ * from the log-born reader (liveSeatDecls, unchanged code) and the posts from the same graph read as here; a log-born world needs credentials on
+ * every write (SCRUM_AUTH=required), which this harness does not carry. It is checked LIVE after deploy instead: the next digest's ⏸ line no longer
+ * names either engine, and /api/checks shows both rows running (#1885 DONE WHEN 2). On the executor pass WITHOUT log-born, role-expiry is paused
+ * with its own reason rather than build the in-process copy (#1645); checks-consumers-1643 K1 and no-replica-routes-1645 pin that.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -52,13 +58,13 @@ function fixture() {
 
 /** REST + MCP (tending on, 400 ms ticks) on one fixture. `unit` on = the flag and a real executor; off = neither. Then the SCENARIO: bea (the working holder)
  *  posts on her card, ada holds a role expiring in two hours. Returns what every row needs. */
-async function scenario(body, { unit, roleInMs = 2 * H }) {
+async function scenario(body, { unit, roleInMs = 2 * H, extraEnv = {} }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'g1885-'));
   const stateFile = path.join(dir, 'stale-claim-state.json');
   fs.writeFileSync(stateFile, JSON.stringify({ asked: { [GHOST]: '2026-09-01T00:10:00.000Z' } }, null, 2));
   let exec = null;
   if (unit) exec = await startExecutor({ store: tmpStore('g1885-store-'), datasetId: DSID, create: true });
-  const rest = await startRestServer({ board: fixture(), env: { SCRUM_ROSTER_FILE: ROSTER_FILE, ...(unit ? { SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: exec.baseUrl, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1' } : {}) } });
+  const rest = await startRestServer({ board: fixture(), env: { SCRUM_ROSTER_FILE: ROSTER_FILE, ...(unit ? { SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: exec.baseUrl, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1' } : {}), ...extraEnv } });
   let mcp = null;
   try {
     // the scenario is written BEFORE the adapter starts, so its first tick already sees it
@@ -130,3 +136,4 @@ test('G3 CONTROL — unit on: the same lapsed grant with no post after the lapse
     assert.deepEqual((role.rows || []).filter((r) => r.seat === 'ada'), [], `no row: a lapse nobody acts on is not a row: ${JSON.stringify(role)}`);
   }, { unit: true, roleInMs: 2000 });
 });
+

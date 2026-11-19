@@ -81,6 +81,7 @@ import { moveFenceIds, moveFenceEntity } from './core/move-fences.mjs';   // #17
 import { labelAliasRows, labelAliasEntity, labelAliasIri } from './core/label-aliases.mjs';   // #1640
 import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, auditOutbox, modeProblem, legacyProof, postMatchesEntry, opIdFor, announcePostId, postCreateIntention, obligationIdOf } from './core/announce-outbox.mjs';   // #1574 C3a/C3b/C3c
 import * as U3 from './core/unit3-graph.mjs';   // #1582 — deliveries and model calls in the graph
+import * as CPG from './core/check-posts-graph.mjs';   // #1885 — the decision-makers' posts, from the graph
 import { seatIndex as seatInboxIndex, concernedSeats, createSeatInboxReconciler, createRetrievalMarker } from './core/seat-inbox.mjs';   // #1902 — every seat's inbox
 import { createGraphClient, setExecutorMeter } from './core/graph-client.mjs';   // #1574 C3b — the conversations unit's executor door
 import { BOOKKEEPING_GRAPH } from './core/graph-vocab.mjs';   // #1679 — already loaded through graph-client; no new dependency
@@ -8221,12 +8222,14 @@ const STANDING_CHECKS = [
     // only when some claim is old enough to be stale, and only from the
     // oldest such claim forward.
     id: 'stale-claims',
-    readsDocumentPosts: true,   // #1574 — disabled under the graph conversations unit (see the standing loop)
+    // #1885 — under the graph conversations unit a post may live only in the graph, so the holders' posts on their cards are
+    // read from it (the standing loop prefetches them into ctx.graphPosts). Unit off: the document's posts, unchanged.
+    postsFromGraph: 'holders',
     claim: `every held card has a write from its holder on it within the last ${STALE_CLAIM_HOURS} h — `
       + 'or the holder has said when the next one comes; a silent claim is asked about, never reclaimed (#455)',
-    run: (data) => staleClaims({
+    run: (data, ctx = {}) => staleClaims({
       cards: data.cards || [],
-      conversations: data.conversations || [],
+      conversations: ctx.graphPosts ?? data.conversations ?? [],
       events: (since) => readEvents(EVENT_LOG_DIR, { sinceDate: since }),
       now: new Date().toISOString(),
     }),
@@ -8237,13 +8240,14 @@ const STANDING_CHECKS = [
     // within 24 h; declarations that expired within 7 d whose holder has
     // posted since. A lapsed role nobody acts on is not a row — it ended.
     id: 'role-expiry',
-    readsDocumentPosts: true,   // #1574 — disabled under the graph conversations unit (see the standing loop)
+    // #1885 — under the unit, each lapsed holder's posts after the lapse are read from the graph (ctx.graphPosts).
+    postsFromGraph: 'lapsed',
     claim: 'no held role is within 24 h of lapsing unannounced, and no seat is acting on a role that lapsed in the last 7 days (#1400)',
     run: (data, ctx) => roleExpiryRows({
       // #1643 — on the executor pass the declarations come from liveSeatDecls() (the log-born reader when that unit is
       // on), prefetched by the caller because this runner is synchronous; on the old path, the replica as before.
       decls: ctx.seatDecls ?? seatDeclsFromGraph(ctx.queryGraphAll, ctx.store),
-      conversations: data.conversations || [],
+      conversations: ctx.graphPosts ?? data.conversations ?? [],
       now: new Date().toISOString(),
     }),
   },
@@ -8589,7 +8593,8 @@ async function evaluateChecks() {
       // a seat may post only to the graph; a check that reads the document's posts would read it as silent and nudge it
       // (stale-claims) or act on its role (role-expiry). It answers `disabled` with the reason, never an empty "nothing
       // found" (#792), and its consumers treat that as unreadable: ask nothing, forget nothing. Unit off: unchanged.
-      if (c.readsDocumentPosts && ANNOUNCE_EXECUTOR) return { id: c.id, claim: c.claim, disabled: true, reason: DOC_POST_CHECK_DISABLED };
+      // #1885 — they are no longer switched off: under the unit they read the graph's posts instead (prefetched below, inside
+      // the try, so a failed read is an ERROR row, never an empty "nothing found").
       const t0 = performance.now();
       const priced = (row) => { const ms = Math.round(performance.now() - t0); return { ...row, ms, ...(ms > CHECK_CEILING_MS ? { slow: true } : {}) }; };   // #1404
       try {
@@ -8601,10 +8606,19 @@ async function evaluateChecks() {
         // route happened to build the copy first would differ between two identical boards. The hourly meter log line
         // still records the copy's readings whenever one exists.
         if (onExecutor && c.measuresReplica) return { id: c.id, claim: c.claim, disabled: true, reason: REPLICA_NOT_MEASURED };
+        // #1885 — re-enabled, role-expiry reads the declarations through liveSeatDecls(), which without the log-born unit (#1561)
+        // WARMS THE IN-PROCESS COPY. On the executor pass that copy is being retired (#1645): the check says so instead of building
+        // it. Production runs log-born, so there it runs.
+        if (onExecutor && c.id === 'role-expiry' && !LOGBORN) return { id: c.id, claim: c.claim, disabled: true, reason: ROLE_DECLS_NEED_LOGBORN };
         if (onExecutor && c.id === 'role-expiry' && seatDecls === undefined) seatDecls = (await liveSeatDecls()).decls;
+        let graphPosts;
+        if (c.postsFromGraph && ANNOUNCE_EXECUTOR) graphPosts = await checkPostsFromGraph(c.postsFromGraph, {
+          cards: data.cards || [],
+          decls: c.postsFromGraph === 'lapsed' ? (seatDecls ?? seatDeclsFromGraph(queryGraphAll, store)) : [],
+        });
         // #1381 — a check may READ A FILE instead of the replica (`run`); same
         // shape out, same digest line, same "an error is not an empty result".
-        if (typeof c.run === 'function') return priced({ id: c.id, claim: c.claim, rows: c.run(data, { store, queryGraph, queryGraphAll, seatDecls }) ?? [] });   // #1400 — a check may read the replica too; #1405 — folds use queryGraphAll
+        if (typeof c.run === 'function') return priced({ id: c.id, claim: c.claim, rows: c.run(data, { store, queryGraph, queryGraphAll, seatDecls, graphPosts }) ?? [] });   // #1400 — a check may read the replica too; #1405 — folds use queryGraphAll
         const r = await runQuery(c.query);
         return priced({ id: c.id, claim: c.claim, query: c.query, rows: r.rows ?? [] });
       } catch (e) {
@@ -12420,7 +12434,19 @@ const POSTS_BULK_READ_TIMEOUT_MS = 10000;
 // ~47 s on the real board under load, so it gets its own long budget instead of the bulk reader's 10 s, which it never met.
 const POSTS_SNAPSHOT_READ_TIMEOUT_MS = 180000;
 let POSTS_SNAPSHOT_READER = null;
-const DOC_POST_CHECK_DISABLED = 'disabled under the graph conversations unit (#1574): it reads document posts and would misread a seat that posts only to the graph';
+const ROLE_DECLS_NEED_LOGBORN = 'not run on the executor pass without the log-born unit (#1561): reading the seat declarations would build the in-process copy (#1645)';
+// #1885 — the posts the two decision-makers read, from the graph (core/check-posts-graph.mjs). A failed read THROWS: the standing
+// loop reports it as an error row, never as "nothing found" (#792), and the stale-claim ask treats an error as unreadable.
+async function checkPostsFromGraph(kind, { cards, decls }) {
+  const reader = POSTS_BULK_READER || ANNOUNCE_EXECUTOR;
+  const sparql = kind === 'holders'
+    ? CPG.holderCardPostsQuery(CPG.heldPairs(cards))
+    : CPG.postsSinceQuery(CPG.lapsedSeats(decls, new Date().toISOString()));
+  if (sparql == null) return [];   // no held card / no lapsed role: nothing to ask
+  const q = await reader.query(sparql);
+  if (!q.ok) throw new Error(`the graph's posts could not be read for this check (${q.reason || 'unreadable'})`);
+  return kind === 'holders' ? CPG.holderCardPostsFrom(q.rows) : CPG.postsSinceFrom(q.rows);
+}
 const REPLICA_NOT_MEASURED = 'not measured on the executor pass (#1645 2d): it measures the in-process copy, which checks no longer build or read';
 
 function decidePublish(data, obligationId) {
@@ -15117,7 +15143,7 @@ if (process.env.SCRUM_GRAPH_UNIT_CONVERSATIONS === '1') {
   POSTS_BULK_READER = gate.reader(raw, POSTS_BULK_READ_TIMEOUT_MS);
   POSTS_SNAPSHOT_READER = gate.reader(raw, POSTS_SNAPSHOT_READ_TIMEOUT_MS);   // #1779
   console.error(`${new Date().toISOString()} #1574 conversations unit ON: publisher-mode announcements go through the graph executor (lock released during the call)`);
-  console.error(`${new Date().toISOString()} #1574 conversations unit ON: standing checks stale-claims and role-expiry are DISABLED (${DOC_POST_CHECK_DISABLED})`);
+  console.error(`${new Date().toISOString()} #1574 conversations unit ON: standing checks stale-claims and role-expiry read their posts from the graph (#1885)`);
 }
 // #1582 C7′ — deliveries and model calls in the graph need the conversations unit: a delivery's "the post exists" check
 // and a model call's redaction guard read POSTS from the graph, so with that unit off there is no graph to read.
