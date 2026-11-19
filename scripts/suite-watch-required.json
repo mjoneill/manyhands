@@ -38,6 +38,7 @@
   "tests/changes-graph-posts-c1.test.mjs",
   "tests/channel-config-graph-1784.test.mjs",
   "tests/checks-consumers-1643.test.mjs",
+  "tests/checks-read-graph-1885.test.mjs",
   "tests/checks-verdict-diff-1643.test.mjs",
   "tests/collection-retire-lineage-1624.test.mjs",
   "tests/collection-uncertain-1624.test.mjs",
