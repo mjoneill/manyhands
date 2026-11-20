@@ -143,6 +143,7 @@ import { setCursorsDataDir, setCursorsOwnedFile, cursorsPath, loadCursors, CURSO
 import { lanePageFromHistory } from './core/history-lane.mjs';   // #1762 S4 — the proven lane log half past F   // #1762 S4 — the relocated lane state
 import { configureIdentities, usingDefaultRoster } from './core/identity.mjs';
 import { hostAllowed, parseAllowedHosts, refuseHost } from './core/host-guard.mjs';
+import { parseGa4Id, ga4PageName, ga4Snippet } from './core/ga4-tag.mjs';
 import { createSessionReader, cookieValue, originAllowed, updateStore as updateSessionStore, redeemCode, addSession, endSession, findSession, listSessions, readSessionEvents, appendSessionEvent, isHumanSeat, sessionCookie, clearedCookie, HONEST_LIMIT } from './core/browser-sessions.mjs';   // #1906
 import { agentConstraints, unseenLayers } from './core/agent-constraints.mjs';   // #1350
 import { assembleMemories } from './core/memory-assemble.mjs';   // #1406
@@ -264,6 +265,10 @@ if (process.env.SCRUM_REQUIRE_LAUNCHD_MARKER && !process.env.SCRUM_LAUNCHD) {
 // #1338 — extra local names this board may be reached by. Loopback names need
 // no entry. See core/host-guard.mjs.
 const ALLOWED_HOSTS = parseAllowedHosts(process.env.SCRUM_ALLOWED_HOSTS);
+// #2004 — the instance owner's OWN GA4 tag. Unset (the default) = pages byte-identical and no request to Google.
+// A malformed value is refused (an ID is code once it is in a <script>), with one log line that never echoes it.
+const GA4 = parseGa4Id(process.env.SCRUM_GA4_MEASUREMENT_ID);
+if (GA4.error) console.error(`[ga4] ${GA4.error}`);
 // The port the guard compares against is the one we are BOUND to, not the one
 // we were configured with: SCRUM_PORT=0 (the test harness, and anyone letting
 // the OS pick) binds somewhere else, and a guard keyed to 0 would refuse every
@@ -15547,7 +15552,8 @@ function serveStaticFile(req, res) {
       // page's conversation poll uses `afterCommit=tip` only when this is true, so a board without the unit never sends an
       // afterCommit request (which it would refuse with a 400 the browser logs as an error).
       const commitFeed = `<script>window.__SCRUM_COMMIT_FEED__=${ANNOUNCE_EXECUTOR ? 'true' : 'false'};</script>`;
-      const injected = `${rosterScript()}${deployWatchScript()}${commitFeed}`;
+      const ga4 = GA4.id ? ga4Snippet(GA4.id, ga4PageName(urlPath)) : '';   // #2004 — empty unless the owner set an ID
+      const injected = `${rosterScript()}${deployWatchScript()}${commitFeed}${ga4}`;
       content = Buffer.from(
         html.includes(marker) ? html.replace(marker, () => `${injected}${marker}`) : injected + html,
         'utf8',

@@ -176,6 +176,21 @@ SCRUM_PORT=3999 MCP_PORT=3998 node mcp-server.mjs
 
 Each process reads the other's port to find it, and each refuses to start on a non-default port without being told — because the failure the other way is silent: an adapter that quietly attaches to the board on `3141` reports every write as a success, on a board you did not mean. For a board on another host, give the adapter `SCRUM_BOARD_API=http://host:port` instead of `SCRUM_PORT`.
 
+**Your own Google Analytics (optional, off by default).** To see how people use *your* board in *your* GA4 property, start the server with your measurement ID:
+
+```bash
+SCRUM_GA4_MEASUREMENT_ID=G-XXXXXXXXXX node server.js
+```
+
+Each page the board serves then loads Google's tag for that property. Leave it unset and nothing changes: the pages carry no tag and the browser never contacts Google. Nobody else's analytics is involved; the data goes only to the property you name.
+
+- **What is sent:** a page view per page, named by the page (`board`, `commons`, `wiki`…), with its address minus the query and fragment. Plus whatever Google's tag collects about the browser itself, such as device, language and approximate location.
+- **What is never handed to the tag:** card titles, card text, card or wiki ids, search terms, seat names or posts. The board's page titles and addresses carry those, so the tag gets the fixed page name and the bare path instead, and it gets them again each time the page changes its address.
+- **In GA, under Admin → Data streams → your stream → Enhanced measurement:** turn off *Page changes based on browser history events*, *Site search*, *Outbound clicks* and *Form interactions*. The board already sends what it needs, and those switches read things on the page that can be workspace content (link addresses, form fields).
+- **Only people in a browser are counted.** Agents work through the MCP adapter and the REST API and never load a page, so the numbers say nothing about how much your agents use the board.
+- **The ID belongs to your instance.** Put it in your environment or launch script, never in a committed file.
+- A value that isn't a GA4 measurement ID (`G-` followed by letters and digits) is ignored, with one line in the server log.
+
 ---
 
 ## Security — read this before you expose anything
