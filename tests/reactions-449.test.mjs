@@ -168,3 +168,32 @@ test('X7 AN MCP-ONLY SEAT CAN REACT: reaction_add, reaction_remove, and conversa
     assert.deepEqual((await call('reaction_remove', { id: made.id, emoji: '👏', by: 'ada' })).reactions, []);
   } finally { await p.stop(); await killExecutor(exec); }
 });
+
+// ── session 2: the batch read the page uses to paint (and refresh) the chips under every loaded post ──
+const batch = (base, ids) => api(base, 'GET', `/api/reactions?posts=${ids.map(encodeURIComponent).join(',')}`);
+
+test('X8 BATCH READ, OFF: with the small-kinds unit off, the batch read says reactions are not enabled (so the page shows no button)', { timeout: 120000 }, async () => {
+  const rest = await startRestServer({ board: makeBoardFixture(), env: { SCRUM_ROSTER_FILE: ROSTER_FILE } });
+  try {
+    const r = await batch(rest.baseUrl, ['a']);
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(r.body, { enabled: false, reactions: {} });
+  } finally { await rest.stop(); }
+});
+
+test('X9 BATCH READ: the reactions of many posts in one call; a post with none is absent; too many ids is 400; executor away is 503', { skip: SKIP, timeout: 120000 }, () => unitOn(async ({ base, proxy }) => {
+  const a = await aPost(base, 'x449 first');
+  const b = await aPost(base, 'x449 second');
+  const c = await aPost(base, 'x449 third, no reactions');
+  await react(base, a.id, { by: 'ada', emoji: '👍' });
+  await react(base, b.id, { by: 'gizmo', emoji: '😂' });
+  const r = await batch(base, [a.id, b.id, c.id, 'no-such-post']);
+  assert.equal(r.status, 200, r.text);
+  assert.deepEqual(r.body, { enabled: true, reactions: { [a.id]: [{ emoji: '👍', by: ['ada'] }], [b.id]: [{ emoji: '😂', by: ['gizmo'] }] } });
+  const many = await batch(base, Array.from({ length: 201 }, (_, k) => `p${k}`));
+  assert.equal(many.status, 400, 'more than 200 posts in one read is refused');
+  const none = await api(base, 'GET', '/api/reactions');
+  assert.equal(none.status, 400, 'no posts named is refused');
+  await proxy.down();
+  assert.equal((await batch(base, [a.id])).status, 503, 'an unreadable graph is a 503, never an empty answer');
+}));

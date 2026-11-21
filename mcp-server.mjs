@@ -31,6 +31,7 @@
  */
 
 import { unreachableMessage } from './core/rest-unreachable.mjs';   // #1442
+import { REACTION_PALETTE } from './core/reaction-palette.mjs';   // #449
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -1516,7 +1517,7 @@ function buildMcpServer() {
   });
 
   // ── #449 — REACTIONS on a commons post ──────────────────────────────────
-  const REACTION_EMOJI = z.enum(['👍', '❤️', '😂', '🤷', '👏', '👀']).describe('One of 👍 ❤️ 😂 🤷 👏 👀');
+  const REACTION_EMOJI = z.enum(REACTION_PALETTE).describe(`One of ${REACTION_PALETTE.join(' ')}`);
   mcp.registerTool('reaction_add', {
     description: 'React to a commons post with an emoji (#449), the way a reader does under a message. It never edits the post. '
       + 'Adding a reaction you already gave is a no-op. Returns the post\'s reactions after the write, as [{emoji, by}]. '

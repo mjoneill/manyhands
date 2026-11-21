@@ -54,6 +54,7 @@ import {
   Q_POSITION,   // #1643 — the executor's commit marker, read for the checks' stated currency
 } from './core/logborn-unit.mjs';
 import { createSmallkindsUnit, wakeCreateIntention, wakeIri, REACTION_PALETTE, reactionIntention, reactionIri } from './core/smallkinds-unit.mjs';   // #1624, #449
+import { REACTION_BATCH_MAX } from './core/reaction-palette.mjs';   // #449
 import { BOARD_TOOLS } from './core/board-tools.mjs';
 import { resolveAttachedTo } from './core/attached-to.mjs'; // #761
 import { withAttachmentFence, FENCE_BUSY, DEFAULT_WAIT_MS as DEFAULT_FENCE_WAIT_MS } from './core/attachment-fence.mjs';   // #1648
@@ -13790,6 +13791,28 @@ async function handleReactToConversation(req, res, id) {
   }
 }
 
+// #449 — GET /api/reactions?posts=a,b,… → 200 {enabled, reactions: {postId: [{emoji, by}]}}. The page reads the chips of every
+// loaded post in ONE call, and again on each poll, so a reaction on an OLD post shows without a new post arriving. A post
+// with no live reaction is absent. With the small-kinds unit off: {enabled: false, reactions: {}}, so the page offers no
+// button rather than one that always fails. An unreadable graph is a 503, never an empty map.
+async function handleBatchReactions(req, res) {
+  try {
+    const q = parseQuery(req.url);
+    const ids = typeof q.posts === 'string' ? [...new Set(q.posts.split(',').map((s) => s.trim()).filter(Boolean))] : [];
+    if (!ids.length) return sendJSON(res, 400, { error: 'posts is required: a comma-separated list of post ids', code: 'NO_POSTS' });
+    if (ids.length > REACTION_BATCH_MAX) return sendJSON(res, 400, { error: `at most ${REACTION_BATCH_MAX} posts per read (got ${ids.length})`, code: 'TOO_MANY_POSTS' });
+    if (!SMALLKINDS_UNIT) return sendJSON(res, 200, { enabled: false, reactions: {} });
+    const r = await SMALLKINDS.readReactions(ids);
+    if (r.unavailable) return sendJSON(res, 503, { error: `the graph could not be read: ${r.unavailable}`, code: 'GRAPH_UNAVAILABLE' });
+    const out = {};
+    for (const id of ids) { const chips = r.reactions.get(id); if (chips?.length) out[id] = chips; }
+    sendJSON(res, 200, { enabled: true, reactions: out });
+  } catch (e) {
+    console.error('GET /api/reactions:', e.message);
+    sendJSON(res, 500, { error: 'Failed to read reactions' });
+  }
+}
+
 async function handleCreateConversation(req, res) {
   try {
     const raw = await readBody(req);
@@ -15124,6 +15147,7 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/conversations$/,                fn: (req, res) => handleCreateConversation(req, res) },
   { method: 'GET',    re: /^\/api\/conversations\/([^\/]+)$/,      fn: (req, res, m) => handleGetConversation(req, res, m[1]) },
   { method: 'POST',   re: /^\/api\/conversations\/([^\/]+)\/reactions$/, fn: (req, res, m) => handleReactToConversation(req, res, decodeURIComponent(m[1])) },   // #449
+  { method: 'GET',    re: /^\/api\/reactions$/,                  fn: (req, res) => handleBatchReactions(req, res) },   // #449
   { method: 'POST',   re: /^\/api\/attachments$/,                  fn: (req, res) => handleCreateAttachment(req, res) },
   { method: 'GET',    re: /^\/api\/attachments\/([^\/]+)$/,        fn: (req, res, m) => serveAttachment(req, res, m[1]) },
   { method: 'GET',    re: /^\/api\/nodes$/,                        fn: (req, res) => handleListNodes(req, res) },

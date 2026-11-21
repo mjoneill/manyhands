@@ -25,6 +25,7 @@ import { mountEditor } from './editor.mjs';   // #1367 — one editor for every 
 import { mountComposerWatch } from './composer-watch.mjs';   // #1366 — a draft per thread
 import { installLeavingGuard, registerComposer } from './leaving-guard.mjs';
 import { recallBlock } from './recall-line.mjs';   // #1689 — what the room has read, under a post that touches it
+import { renderReactionRow, reactionsUrls } from './reactions-view.mjs';   // #449 — the chips under a post
 
 // ── pure helpers (node-testable) ───────────────────────────────────────────
 
@@ -222,6 +223,13 @@ export function mountConversationView(opts = {}) {
   let soloSeq = 0;        // a slow answer for an earlier solo must not land on a newer one
   let exhaustedOlder = false; // #303-6 — no more history behind the oldest loaded
   const renderedIds = new Set();
+  // #449 — REACTIONS. `reactionMap` holds each loaded post's chips as the server last answered them; every post node carries
+  // an empty `.cv-reactions-slot` that paintReactions fills. They are read in ONE batch per load and per poll tick, so a
+  // reaction on an OLD post shows without a new post arriving. `reactionsEnabled` is the server's own answer: false (no
+  // reaction store) means chips may show but nothing offers to react.
+  const reactionMap = new Map();
+  let reactionsEnabled = false;
+  let reactorSelect = null;   // the composer's "post as" select: the viewer's identity for marking and toggling
 
   // #303-6 — structure: <div.cv-root> <div.cv-toolbar> <div.cv-feed> <form> </div>
   const root = doc.createElement('div');
@@ -423,7 +431,59 @@ export function mountConversationView(opts = {}) {
     // never splits their words. A post without recall, or with recall unavailable, gets no node and keeps its old shape.
     const recall = recallBlock(doc, c);
     if (recall) msg.appendChild(recall);
+    const slot = el('div', 'cv-reactions-slot');   // #449 — filled from reactionMap, now and on every refresh
+    slot.dataset.post = c.id;
+    msg.appendChild(slot);
+    paintReactions(slot);
     return msg;
+  }
+
+  // ── #449 — reactions ───────────────────────────────────────────────────────────────────────────────────────────────
+  const currentReactor = () => (reactorSelect && reactorSelect.value) || author || null;
+  function paintReactions(slot) {
+    const id = slot.dataset.post;
+    slot.replaceChildren(renderReactionRow(doc, {
+      postId: id, chips: reactionMap.get(id) || [], me: currentReactor(), enabled: reactionsEnabled,
+      nameOf: (k) => identityOf(k).name || k,
+      onToggle: (emoji, on) => toggleReaction(id, emoji, on),
+    }));
+  }
+  function repaintReactions(onlyId) {
+    for (const slot of feed.querySelectorAll('.cv-reactions-slot')) if (!onlyId || slot.dataset.post === onlyId) paintReactions(slot);
+  }
+  async function refreshReactions() {
+    const ids = messages.map((m) => m && m.id).filter(Boolean);
+    let changed = false;
+    for (const url of reactionsUrls(baseUrl, ids)) {
+      try {
+        const res = await f(url);
+        if (!res.ok) continue;   // 503 / offline: keep what is shown; the next tick asks again
+        const body = await res.json();
+        if (body.enabled !== reactionsEnabled) { reactionsEnabled = !!body.enabled; changed = true; }
+        const asked = new URL(url, 'http://x').searchParams.get('posts').split(',');
+        for (const id of asked) {
+          const next = (body.reactions && body.reactions[id]) || null;
+          const prev = reactionMap.get(id) || null;
+          if (JSON.stringify(next) === JSON.stringify(prev)) continue;
+          if (next) reactionMap.set(id, next); else reactionMap.delete(id);
+          changed = true;
+        }
+      } catch (_) { /* offline: keep what is shown */ }
+    }
+    if (changed) repaintReactions();
+  }
+  async function toggleReaction(id, emoji, on) {
+    const by = currentReactor();
+    if (!by) return;
+    try {
+      const res = await f(`${baseUrl}/api/conversations/${encodeURIComponent(id)}/reactions`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ by, emoji, on }),
+      });
+      if (!res.ok) return;   // refused or unreadable: nothing changed on screen, the next refresh shows the truth
+      const body = await res.json();
+      if (Array.isArray(body.reactions) && body.reactions.length) reactionMap.set(id, body.reactions); else reactionMap.delete(id);
+      repaintReactions(id);
+    } catch (_) { /* offline */ }
   }
 
   // #294 — one compact line: "💬 <label> — <author>: <preview> →" linking to
@@ -802,6 +862,8 @@ export function mountConversationView(opts = {}) {
     const row = el('div', 'cv-form-row');
     const who = doc.createElement('select');
     who.className = 'cv-who';
+    reactorSelect = who;   // #449 — whoever you post as is who you react as
+    who.addEventListener('change', () => repaintReactions());
     for (const a of actors) {
       const o = el('option', '', a); o.value = a;
       if (a === author) o.selected = true;
@@ -952,6 +1014,7 @@ export function mountConversationView(opts = {}) {
     // Keep the same message under the viewport after prepending taller content.
     feed.scrollTop = prevTop + (feed.scrollHeight - prevH);
     olderBtn.disabled = false;
+    refreshReactions();   // #449 — the older posts' chips, now rather than at the next tick
   }
 
   // #1931 — the soloed seat's posts older than the oldest of theirs we hold.
@@ -1038,8 +1101,11 @@ export function mountConversationView(opts = {}) {
       (c && typeof c.createdAt === 'string' && (m === '' || c.createdAt < m) ? c.createdAt : m), '');
   }
 
+  // #449 — the reactions of everything loaded are read after the first load and on EVERY tick (pollOnce returns early when
+  // no new post arrived, so the refresh is not inside it).
   load().then(() => {
-    if (poll && doc.defaultView) timer = doc.defaultView.setInterval(pollOnce, pollMs);
+    refreshReactions();
+    if (poll && doc.defaultView) timer = doc.defaultView.setInterval(async () => { await pollOnce(); await refreshReactions(); }, pollMs);
   });
 
   return {

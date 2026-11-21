@@ -768,9 +768,11 @@ test('#1689 commons.html: a post with recall carries one quiet aside; without it
     await page.waitForSelector('.cv-msg[data-id="p-with"]', { timeout: 5000 });
 
     const shape = await page.evaluate(() => Object.fromEntries([...document.querySelectorAll('.cv-msg')].map((m) => [m.dataset.id, [...m.children].map((c) => c.className)])));
-    assert.deepEqual(shape['p-none'], ['cv-msg-meta', 'cv-msg-body prose'], 'a post with no recall is drawn exactly as before: meta, body');
-    assert.deepEqual(shape['p-down'], ['cv-msg-meta', 'cv-msg-body prose'], 'an unavailable recall draws nothing in the room');
-    assert.deepEqual(shape['p-with'], ['cv-msg-meta', 'cv-msg-body prose', 'cv-recall'], 'the aside sits directly under the body');
+    // #449 — every post now ends with its reactions slot (empty until the post has reactions or the store offers them). It
+    // comes LAST, after anything the author sent and after the recall aside, so the recall rules below are unchanged.
+    assert.deepEqual(shape['p-none'], ['cv-msg-meta', 'cv-msg-body prose', 'cv-reactions-slot'], 'a post with no recall is drawn exactly as before: meta, body (then its reactions slot)');
+    assert.deepEqual(shape['p-down'], ['cv-msg-meta', 'cv-msg-body prose', 'cv-reactions-slot'], 'an unavailable recall draws nothing in the room');
+    assert.deepEqual(shape['p-with'], ['cv-msg-meta', 'cv-msg-body prose', 'cv-recall', 'cv-reactions-slot'], 'the aside sits directly under the body');
 
     const w = await page.$eval('.cv-msg[data-id="p-with"] .cv-recall', (box) => ({
       tag: box.tagName, label: box.getAttribute('aria-label'),

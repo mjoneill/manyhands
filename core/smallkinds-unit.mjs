@@ -51,8 +51,8 @@ export function wakeCreateIntention({ actor, iri, seat, at, note, entityJson }) 
 }
 
 // ── #449 — REACTIONS. One append-only node per toggle; a post's reactions are the FOLD of its toggles. ──
-/** The palette of slice 1. A reaction outside it is refused at the route; the compiler stores any string. */
-export const REACTION_PALETTE = Object.freeze(['👍', '❤️', '😂', '🤷', '👏', '👀']);
+// The palette lives in core/reaction-palette.mjs (browser-safe, shared with the page). The compiler stores any string.
+export { REACTION_PALETTE } from './reaction-palette.mjs';
 export const REACTION_PREFIX = 'https://scrumboard.local/reaction/';
 const POST_ENTITY_PREFIX = 'https://scrumboard.local/entity/';
 export const postEntityIri = (postId) => `${POST_ENTITY_PREFIX}${postId}`;

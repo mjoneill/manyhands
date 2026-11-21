@@ -149,3 +149,36 @@ a.cv-recall-item:hover .cv-recall-title { text-decoration: underline; text-under
 .cv-recall-quote { -webkit-line-clamp: 1; line-clamp: 1; font-family: var(--serif); font-style: italic; }
 .cv-recall-quote::before { content: "\201C"; }
 .cv-recall-quote::after { content: "\201D"; }
+
+/* #449 — reaction chips under a post (core/reactions-view.mjs). A chip is emoji + count; yours is outlined in the accent.
+   Hover shows the names in the native tooltip; keyboard focus shows them inline (data-names), since a tooltip never
+   appears for a keyboard. The ☺+ button is quiet until the post is hovered or it is focused. */
+.cv-reactions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; position: relative; }
+.cv-reactions:empty { display: none; }
+.cv-reaction {
+  display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; min-height: 24px;
+  background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 999px;
+  font: inherit; font-size: 13px; line-height: 1.4; cursor: pointer; position: relative;
+}
+.cv-reaction:hover:not(:disabled) { border-color: var(--accent); }
+.cv-reaction:disabled { cursor: default; opacity: .85; }
+.cv-reaction-mine { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, var(--panel)); }
+.cv-reaction-count { font-variant-numeric: tabular-nums; color: var(--muted); }
+.cv-reaction-mine .cv-reaction-count { color: var(--ink); }
+.cv-reaction:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.cv-reaction:focus-visible::after {
+  content: attr(data-names); position: absolute; left: 0; top: calc(100% + 4px); z-index: 5; white-space: nowrap;
+  background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; font-size: 12px;
+}
+.cv-reaction-add {
+  background: none; border: 1px dashed var(--line); color: var(--muted); border-radius: 999px;
+  font: inherit; font-size: 12px; padding: 1px 8px; min-height: 24px; cursor: pointer; opacity: .55;
+}
+.cv-msg:hover .cv-reaction-add, .cv-reaction-add:focus-visible, .cv-reaction-add[aria-expanded="true"] { opacity: 1; }
+.cv-reaction-add:hover { color: var(--ink); border-color: var(--accent); }
+.cv-reaction-picker {
+  display: flex; gap: 2px; padding: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .18);
+}
+.cv-reaction-pick { background: none; border: 0; border-radius: 6px; font-size: 18px; line-height: 1; padding: 4px 6px; cursor: pointer; }
+.cv-reaction-pick:hover, .cv-reaction-pick:focus-visible { background: color-mix(in srgb, var(--accent) 18%, transparent); outline: none; }
