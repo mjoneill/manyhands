@@ -19,7 +19,7 @@
  * the same millisecond: latest-by-time, ties by IRI, harmless either way); posts held only in the document.
  * Without a python with pyoxigraph the unit-on rows are SKIPPED, and a skip is NOT a pass.
  */
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -31,6 +31,7 @@ import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-
 const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)';
 const ROSTER_FILE = path.join(os.tmpdir(), `x449-roster-${process.pid}.json`);
 fs.writeFileSync(ROSTER_FILE, JSON.stringify({ seats: { ada: { name: 'Ada', glyph: 'a', color: '#7cc4a0' }, gizmo: { name: 'Gizmo', glyph: 'g', color: '#c4a07c' }, board: { name: 'Board', glyph: 'o', color: '#8899aa', kind: 'system' } } }));
+after(() => { try { fs.unlinkSync(ROSTER_FILE); } catch { /* gone */ } });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const api = async (base, method, route, body) => {
   const res = await fetch(`${base}${route}`, { method, headers: { 'Content-Type': 'application/json' }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(40000) });
@@ -53,10 +54,11 @@ async function startProxy(execUrl) {
   return p;
 }
 async function unitOn(body, dsid = 'x449-test') {
-  const exec = await startExecutor({ store: tmpStore('x449-store-'), datasetId: dsid, create: true });
+  const store = tmpStore('x449-store-');
+  const exec = await startExecutor({ store, datasetId: dsid, create: true });
   const proxy = await startProxy(exec.baseUrl);
   const rest = await startRestServer({ board: makeBoardFixture(), env: { SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: dsid, SCRUM_GRAPH_EXECUTOR_URL: proxy.url, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_GRAPH_UNIT_SMALLKINDS: '1' } });
-  try { return await body({ base: rest.baseUrl, proxy }); } finally { await rest.stop(); try { await proxy.down(); } catch { /* down */ } await killExecutor(exec); }
+  try { return await body({ base: rest.baseUrl, proxy }); } finally { await rest.stop(); try { await proxy.down(); } catch { /* down */ } await killExecutor(exec); fs.rmSync(store, { recursive: true, force: true }); }
 }
 async function aPost(base, text = 'x449 a post to react to') {
   const p = await post(base, 'gizmo', text);
@@ -151,7 +153,8 @@ test('X6 FAIL LOUD: executor unreachable, reacting is 503 and never a 200', { sk
 
 test('X7 AN MCP-ONLY SEAT CAN REACT AND SEE: reaction_add, reaction_remove, conversation_get, reactions_recent', { skip: SKIP, timeout: 120000 }, async () => {
   const dsid = 'x449-mcp';
-  const exec = await startExecutor({ store: tmpStore('x449-mcp-store-'), datasetId: dsid, create: true });
+  const store = tmpStore('x449-mcp-store-');
+  const exec = await startExecutor({ store, datasetId: dsid, create: true });
   const env = { SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: dsid, SCRUM_GRAPH_EXECUTOR_URL: exec.baseUrl, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_GRAPH_UNIT_SMALLKINDS: '1' };
   const p = await startPair({ _startRest: (o) => startRestServer({ ...o, env: { ...(o.env || {}), ...env } }) });
   try {
@@ -171,7 +174,7 @@ test('X7 AN MCP-ONLY SEAT CAN REACT AND SEE: reaction_add, reaction_remove, conv
     assert.deepEqual(seen.reactions.map((x) => [x.emoji, x.by, x.postAuthor]), [['👏', 'ada', 'gizmo'], ['👀', 'ada', 'gizmo']], 'the post\'s author sees the reactions on it');
     await call('reaction_remove', { id: made.id, emoji: '👀', by: 'ada' });
     assert.deepEqual((await call('reaction_remove', { id: made.id, emoji: '👏', by: 'ada' })).reactions, []);
-  } finally { await p.stop(); await killExecutor(exec); }
+  } finally { await p.stop(); await killExecutor(exec); fs.rmSync(store, { recursive: true, force: true }); }
 });
 
 // ── session 2: the batch read the page uses to paint (and refresh) the chips under every loaded post ──
