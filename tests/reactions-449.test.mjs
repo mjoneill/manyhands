@@ -212,7 +212,7 @@ test('X10 RECENT, OFF: with the small-kinds unit off, the recent read says react
   try {
     const r = await recent(rest.baseUrl, '?since=2026-01-01T00:00:00Z');
     assert.equal(r.status, 200, r.text);
-    assert.deepEqual(r.body, { enabled: false, reactions: [] });
+    assert.deepEqual(r.body, { enabled: false, reactions: [], truncated: false, postsDropped: 0 });
   } finally { await rest.stop(); }
 });
 
@@ -247,4 +247,21 @@ test('X11 RECENT: live reactions since T, oldest first, each with its post\'s au
   assert.equal((await recent(base, '?since=yesterday')).status, 400, 'since must be an ISO timestamp');
   await proxy.down();
   assert.equal((await recent(base, `?since=${encodeURIComponent(since)}`)).status, 503);
+}));
+
+test('X12 RECENT, CUT OFF OUT LOUD: when more posts were reacted to than one read looks up, the answer says so (never a silent drop)', { skip: SKIP, timeout: 180000 }, () => unitOn(async ({ base }) => {
+  const since = new Date().toISOString();
+  await sleep(10);
+  const ids = [];
+  for (let k = 0; k < 52; k++) { const p = await aPost(base, `x449 post ${k}`); ids.push(p.id); }
+  for (const id of ids) assert.equal((await react(base, id, { by: 'ada', emoji: '👍' })).status, 200);
+  const r = await recent(base, `?since=${encodeURIComponent(since)}`);
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.body.truncated, true, 'the answer says it was cut off');
+  assert.equal(r.body.postsDropped, 2, 'and by how many posts');
+  assert.equal(r.body.reactions.length, 50);
+  assert.deepEqual(r.body.reactions.map((x) => x.post), ids.slice(2), 'the NEWEST posts are the ones kept');
+  const small = await recent(base, `?since=${encodeURIComponent(new Date().toISOString())}`);
+  assert.equal(small.body.truncated, false, 'an answer that is whole says so too');
+  assert.equal(small.body.postsDropped, 0);
 }));

@@ -13816,7 +13816,8 @@ async function handleBatchReactions(req, res) {
 // #449 — GET /api/reactions/recent?since=ISO[&author=seat] → 200 {enabled, reactions: [{post, postAuthor, excerpt, emoji, by, at}]}.
 // How a seat SEES the reactions it was given: the room update (or an MCP-only seat) asks what was reacted since it last
 // looked. Live reactions only, oldest first; `author` keeps the ones on that seat's posts. Posts are looked up for their
-// author and an excerpt (at most RECENT_POSTS_MAX distinct posts; a redacted or missing post's reactions are dropped).
+// author and an excerpt: at most RECENT_POSTS_MAX distinct posts, the most recently reacted-to kept. A cut is said out loud
+// (`truncated`, `postsDropped`), never silent (#449 review). A redacted or missing post's reactions are dropped.
 const RECENT_POSTS_MAX = 50;
 const ISO_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/;
 async function handleRecentReactions(req, res) {
@@ -13825,12 +13826,15 @@ async function handleRecentReactions(req, res) {
     if (typeof q.since !== 'string' || !ISO_INSTANT_RE.test(q.since) || Number.isNaN(Date.parse(q.since))) {
       return sendJSON(res, 400, { error: 'since is required: an ISO-8601 timestamp such as 2026-11-21T17:00:00Z', code: 'INVALID_SINCE' });
     }
-    if (!SMALLKINDS_UNIT) return sendJSON(res, 200, { enabled: false, reactions: [] });
+    if (!SMALLKINDS_UNIT) return sendJSON(res, 200, { enabled: false, reactions: [], truncated: false, postsDropped: 0 });
     const since = new Date(q.since).toISOString();
     const r = await SMALLKINDS.readRecentReactions(since);
     if (r.unavailable) return sendJSON(res, 503, { error: `the graph could not be read: ${r.unavailable}`, code: 'GRAPH_UNAVAILABLE' });
     const posts = new Map();
-    for (const id of [...new Set(r.reactions.map((x) => x.post))].slice(-RECENT_POSTS_MAX)) {
+    const reacted = [...new Set(r.reactions.map((x) => x.post))];
+    const kept = reacted.slice(-RECENT_POSTS_MAX);
+    const postsDropped = reacted.length - kept.length;
+    for (const id of kept) {
       const g = await readGraphPost(id);
       if (g.unavailable) return sendJSON(res, 503, { error: `the graph could not be read: ${g.unavailable}`, code: 'GRAPH_UNAVAILABLE' });
       if (g.post) posts.set(id, g.post);
@@ -13843,7 +13847,7 @@ async function handleRecentReactions(req, res) {
       if (!p || (author && p.author !== author)) continue;
       out.push({ post: x.post, postAuthor: p.author, excerpt: excerpt(p.body), emoji: x.emoji, by: x.seat, at: x.at });
     }
-    sendJSON(res, 200, { enabled: true, reactions: out });
+    sendJSON(res, 200, { enabled: true, reactions: out, truncated: postsDropped > 0, postsDropped });
   } catch (e) {
     console.error('GET /api/reactions/recent:', e.message);
     sendJSON(res, 500, { error: 'Failed to read recent reactions' });

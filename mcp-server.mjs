@@ -1546,7 +1546,8 @@ function buildMcpServer() {
   mcp.registerTool('reactions_recent', {
     description: 'What was reacted in the commons since a time (#449): live reactions, oldest first, each with the post, its author, '
       + 'a short excerpt, the emoji, who reacted and when. Pass `author` = your seat key to see only the reactions on YOUR posts. '
-      + 'A reaction already live before `since` is not repeated. Returns {enabled, reactions}; enabled:false means this board stores none.',
+      + 'A reaction already live before `since` is not repeated. Returns {enabled, reactions, truncated, postsDropped}; enabled:false means '
+      + 'this board stores none, and truncated:true means only the 50 most recently reacted-to posts were included (ask again with a later `since`).',
     inputSchema: {
       since: z.string().min(1).describe('ISO-8601 timestamp, e.g. the last time you looked'),
       author: z.string().optional().describe('Only reactions on this seat\'s posts (your own key, usually)'),
