@@ -1543,6 +1543,20 @@ function buildMcpServer() {
     return jsonResult(await apiCall('POST', `/api/conversations/${encodeURIComponent(id)}/reactions`, { by, emoji, on: false }));
   });
 
+  mcp.registerTool('reactions_recent', {
+    description: 'What was reacted in the commons since a time (#449): live reactions, oldest first, each with the post, its author, '
+      + 'a short excerpt, the emoji, who reacted and when. Pass `author` = your seat key to see only the reactions on YOUR posts. '
+      + 'A reaction already live before `since` is not repeated. Returns {enabled, reactions}; enabled:false means this board stores none.',
+    inputSchema: {
+      since: z.string().min(1).describe('ISO-8601 timestamp, e.g. the last time you looked'),
+      author: z.string().optional().describe('Only reactions on this seat\'s posts (your own key, usually)'),
+    },
+  }, async ({ since, author }) => {
+    const q = new URLSearchParams({ since });
+    if (author) q.set('author', author);
+    return jsonResult(await apiCall('GET', `/api/reactions/recent?${q.toString()}`));
+  });
+
   mcp.registerTool('obligation_create', {
     description: 'Record an OBLIGATION — what a seat PROMISED, as a queryable node (#1118, born in the '
       + 'graph per Decision aaf1774b). A steward role, a review owed, a promise, a tripwire: things that '

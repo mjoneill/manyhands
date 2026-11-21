@@ -13813,6 +13813,43 @@ async function handleBatchReactions(req, res) {
   }
 }
 
+// #449 — GET /api/reactions/recent?since=ISO[&author=seat] → 200 {enabled, reactions: [{post, postAuthor, excerpt, emoji, by, at}]}.
+// How a seat SEES the reactions it was given: the room update (or an MCP-only seat) asks what was reacted since it last
+// looked. Live reactions only, oldest first; `author` keeps the ones on that seat's posts. Posts are looked up for their
+// author and an excerpt (at most RECENT_POSTS_MAX distinct posts; a redacted or missing post's reactions are dropped).
+const RECENT_POSTS_MAX = 50;
+const ISO_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/;
+async function handleRecentReactions(req, res) {
+  try {
+    const q = parseQuery(req.url);
+    if (typeof q.since !== 'string' || !ISO_INSTANT_RE.test(q.since) || Number.isNaN(Date.parse(q.since))) {
+      return sendJSON(res, 400, { error: 'since is required: an ISO-8601 timestamp such as 2026-11-21T17:00:00Z', code: 'INVALID_SINCE' });
+    }
+    if (!SMALLKINDS_UNIT) return sendJSON(res, 200, { enabled: false, reactions: [] });
+    const since = new Date(q.since).toISOString();
+    const r = await SMALLKINDS.readRecentReactions(since);
+    if (r.unavailable) return sendJSON(res, 503, { error: `the graph could not be read: ${r.unavailable}`, code: 'GRAPH_UNAVAILABLE' });
+    const posts = new Map();
+    for (const id of [...new Set(r.reactions.map((x) => x.post))].slice(-RECENT_POSTS_MAX)) {
+      const g = await readGraphPost(id);
+      if (g.unavailable) return sendJSON(res, 503, { error: `the graph could not be read: ${g.unavailable}`, code: 'GRAPH_UNAVAILABLE' });
+      if (g.post) posts.set(id, g.post);
+    }
+    const excerpt = (body) => { const t = String(body || '').replace(/\s+/g, ' ').trim(); return t.length > 80 ? `${t.slice(0, 79)}…` : t; };
+    const author = typeof q.author === 'string' && q.author.trim() ? q.author.trim() : null;
+    const out = [];
+    for (const x of r.reactions) {
+      const p = posts.get(x.post);
+      if (!p || (author && p.author !== author)) continue;
+      out.push({ post: x.post, postAuthor: p.author, excerpt: excerpt(p.body), emoji: x.emoji, by: x.seat, at: x.at });
+    }
+    sendJSON(res, 200, { enabled: true, reactions: out });
+  } catch (e) {
+    console.error('GET /api/reactions/recent:', e.message);
+    sendJSON(res, 500, { error: 'Failed to read recent reactions' });
+  }
+}
+
 async function handleCreateConversation(req, res) {
   try {
     const raw = await readBody(req);
@@ -15148,6 +15185,7 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/conversations\/([^\/]+)$/,      fn: (req, res, m) => handleGetConversation(req, res, m[1]) },
   { method: 'POST',   re: /^\/api\/conversations\/([^\/]+)\/reactions$/, fn: (req, res, m) => handleReactToConversation(req, res, decodeURIComponent(m[1])) },   // #449
   { method: 'GET',    re: /^\/api\/reactions$/,                  fn: (req, res) => handleBatchReactions(req, res) },   // #449
+  { method: 'GET',    re: /^\/api\/reactions\/recent$/,           fn: (req, res) => handleRecentReactions(req, res) },   // #449
   { method: 'POST',   re: /^\/api\/attachments$/,                  fn: (req, res) => handleCreateAttachment(req, res) },
   { method: 'GET',    re: /^\/api\/attachments\/([^\/]+)$/,        fn: (req, res, m) => serveAttachment(req, res, m[1]) },
   { method: 'GET',    re: /^\/api\/nodes$/,                        fn: (req, res) => handleListNodes(req, res) },

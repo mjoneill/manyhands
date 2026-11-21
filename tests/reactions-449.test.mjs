@@ -149,7 +149,7 @@ test('X6 FAIL LOUD: executor unreachable, reacting is 503 and never a 200', { sk
   assert.equal(r.status, 503, r.text);
 }));
 
-test('X7 AN MCP-ONLY SEAT CAN REACT: reaction_add, reaction_remove, and conversation_get shows it', { skip: SKIP, timeout: 120000 }, async () => {
+test('X7 AN MCP-ONLY SEAT CAN REACT AND SEE: reaction_add, reaction_remove, conversation_get, reactions_recent', { skip: SKIP, timeout: 120000 }, async () => {
   const dsid = 'x449-mcp';
   const exec = await startExecutor({ store: tmpStore('x449-mcp-store-'), datasetId: dsid, create: true });
   const env = { SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: dsid, SCRUM_GRAPH_EXECUTOR_URL: exec.baseUrl, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_GRAPH_UNIT_SMALLKINDS: '1' };
@@ -165,6 +165,11 @@ test('X7 AN MCP-ONLY SEAT CAN REACT: reaction_add, reaction_remove, and conversa
     };
     assert.deepEqual((await call('reaction_add', { id: made.id, emoji: '👏', by: 'ada' })).reactions, [{ emoji: '👏', by: ['ada'] }]);
     assert.deepEqual((await call('conversation_get', { id: made.id })).reactions, [{ emoji: '👏', by: ['ada'] }], 'a seat reads its reactions where it reads the post');
+    const t0 = new Date(Date.now() - 60000).toISOString();
+    await call('reaction_add', { id: made.id, emoji: '👀', by: 'ada' });
+    const seen = await call('reactions_recent', { since: t0, author: 'gizmo' });
+    assert.deepEqual(seen.reactions.map((x) => [x.emoji, x.by, x.postAuthor]), [['👏', 'ada', 'gizmo'], ['👀', 'ada', 'gizmo']], 'the post\'s author sees the reactions on it');
+    await call('reaction_remove', { id: made.id, emoji: '👀', by: 'ada' });
     assert.deepEqual((await call('reaction_remove', { id: made.id, emoji: '👏', by: 'ada' })).reactions, []);
   } finally { await p.stop(); await killExecutor(exec); }
 });
@@ -196,4 +201,50 @@ test('X9 BATCH READ: the reactions of many posts in one call; a post with none i
   assert.equal(none.status, 400, 'no posts named is refused');
   await proxy.down();
   assert.equal((await batch(base, [a.id])).status, 503, 'an unreadable graph is a 503, never an empty answer');
+}));
+
+// ── session 3: a seat SEES the reactions it was given. The room update (and an MCP-only seat) asks "what was reacted
+// since T", and gets each live reaction with the post's author, so a seat can find the ones on its own posts.
+const recent = (base, q) => api(base, 'GET', `/api/reactions/recent${q}`);
+
+test('X10 RECENT, OFF: with the small-kinds unit off, the recent read says reactions are not enabled', { timeout: 120000 }, async () => {
+  const rest = await startRestServer({ board: makeBoardFixture(), env: { SCRUM_ROSTER_FILE: ROSTER_FILE } });
+  try {
+    const r = await recent(rest.baseUrl, '?since=2026-01-01T00:00:00Z');
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(r.body, { enabled: false, reactions: [] });
+  } finally { await rest.stop(); }
+});
+
+test('X11 RECENT: live reactions since T, oldest first, each with its post\'s author and a short excerpt; a removed one is gone; an earlier one is not repeated', { skip: SKIP, timeout: 120000 }, () => unitOn(async ({ base, proxy }) => {
+  const mine = await aPost(base, 'x449 gizmo wrote this sea shanty and it goes on for quite a while, verse after verse');
+  const other = await post(base, 'ada', 'x449 ada said a thing');
+  assert.equal(other.status, 201);
+  await react(base, mine.id, { by: 'board', emoji: '👀' });
+  await sleep(20);
+  const since = new Date().toISOString();
+  await sleep(20);
+  await react(base, mine.id, { by: 'ada', emoji: '👏' });
+  await sleep(15);
+  await react(base, other.body.id, { by: 'gizmo', emoji: '😂' });
+  await sleep(15);
+  await react(base, mine.id, { by: 'ada', emoji: '❤️' });
+  await sleep(15);
+  await react(base, mine.id, { by: 'ada', emoji: '❤️', on: false });
+  const r = await recent(base, `?since=${encodeURIComponent(since)}`);
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.body.enabled, true);
+  assert.deepEqual(r.body.reactions.map((x) => [x.post, x.postAuthor, x.emoji, x.by]), [
+    [mine.id, 'gizmo', '👏', 'ada'],
+    [other.body.id, 'ada', '😂', 'gizmo'],
+  ], 'the 👀 before T is not repeated, and the ❤️ added and removed after T is not shown');
+  assert.ok(r.body.reactions.every((x) => typeof x.at === 'string' && x.at >= since));
+  assert.ok(r.body.reactions[0].excerpt.startsWith('x449 gizmo wrote this sea shanty'));
+  assert.ok(r.body.reactions[0].excerpt.length <= 81, 'the excerpt is short');
+  const forGizmo = await recent(base, `?since=${encodeURIComponent(since)}&author=gizmo`);
+  assert.deepEqual(forGizmo.body.reactions.map((x) => x.emoji), ['👏'], 'author= narrows to reactions on that seat\'s posts');
+  assert.equal((await recent(base, '')).status, 400, 'since is required');
+  assert.equal((await recent(base, '?since=yesterday')).status, 400, 'since must be an ISO timestamp');
+  await proxy.down();
+  assert.equal((await recent(base, `?since=${encodeURIComponent(since)}`)).status, 503);
 }));

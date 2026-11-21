@@ -100,6 +100,32 @@ export function foldReactions(toggles) {
   return out;
 }
 
+/**
+ * Every toggle made AT OR AFTER `sinceIso` (an ISO instant the route has normalised with toISOString, the same form every
+ * toggle stores, so a string comparison is a time comparison).
+ */
+export function recentReactionsQuery(sinceIso) {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(sinceIso)) return null;
+  return `SELECT ?r ?j WHERE { ?r <${TM.type}> <${TM.Reaction}> ; <${TM.reactedAt}> ?at . FILTER(STR(?at) >= ${JSON.stringify(sinceIso)}) GRAPH ${BK} { ?r <${TM.entityJson}> ?j } }`;
+}
+
+/**
+ * "What was reacted since T": of the toggles made since T, the latest per (post, seat, emoji), kept only when it is ON,
+ * oldest first. A reaction live before T is not repeated (nothing is written for it after T); one added and removed
+ * after T does not show. Returns [{post, seat, emoji, at}].
+ */
+export function recentLive(toggles) {
+  const latest = new Map();
+  for (const t of toggles) {
+    const k = JSON.stringify([t.post, t.seat, t.emoji]);
+    const cur = latest.get(k);
+    if (!cur || t.at > cur.at || (t.at === cur.at && t.iri > cur.iri)) latest.set(k, t);
+  }
+  return [...latest.values()].filter((t) => t.state === 'on')
+    .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.iri < b.iri ? -1 : 1))
+    .map(({ post, seat, emoji, at }) => ({ post, seat, emoji, at }));
+}
+
 /** Bindings → a toggle, or null when the stored JSON is unreadable. */
 export function toggleFromRow(r) {
   let j;
@@ -186,6 +212,18 @@ export function createSmallkindsUnit({ slice }) {
       throw e;
     }
   }
+  /** #449 — live reactions since T: { unavailable } | { reactions: [{post, seat, emoji, at}] }. */
+  async function readRecentReactions(sinceIso) {
+    const q = recentReactionsQuery(sinceIso);
+    if (!q) throw new Error('readRecentReactions: since must be a normalised ISO instant');
+    try {
+      const rows = await select(q);
+      return { reactions: recentLive(rows.map(toggleFromRow).filter(Boolean)) };
+    } catch (e) {
+      if (e?.code === 'GRAPH_EXECUTOR_UNAVAILABLE') return { unavailable: e.message };
+      throw e;
+    }
+  }
   async function writeWake(intention) {
     const t0 = Date.now();
     const fenced = await slice.fence();
@@ -206,5 +244,5 @@ export function createSmallkindsUnit({ slice }) {
   }
   // #449 — a reaction toggle is the same shape of write as a wake (one fresh node through entity.put), so it takes the
   // same reconciliation: an undetermined outcome is UNAVAILABLE, never a guess.
-  return { readWakes, writeWake, readReactions, writeReaction: writeWake };
+  return { readWakes, writeWake, readReactions, readRecentReactions, writeReaction: writeWake };
 }
