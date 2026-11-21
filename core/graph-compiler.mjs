@@ -573,6 +573,10 @@ export const LOGBORN_TERMS = Object.freeze({
   // mirror the replica's existing projectWake (graph-replica.mjs), so a reader of either store
   // sees the same triples.
   Wake: `${RS}Wake`, wokeSeat: `${RS}wokeSeat`, wokeAt: `${RS}wokeAt`,
+  // #449 — a REACTION toggle: one append-only node per toggle (never an edit of the post). A post's reactions are the
+  // fold of these nodes: for each (reactor, emoji) the latest reactedAt wins, and its reactionState says on or off.
+  Reaction: `${RS}Reaction`, reactionTo: `${RS}reactionTo`, reactor: `${RS}reactor`, reactionEmoji: `${RS}reactionEmoji`,
+  reactionState: `${RS}reactionState`, reactedAt: `${RS}reactedAt`,
   // #1762 S2 — a refusal, content-free (core/refusal-record.mjs): identifiers and outcomes, never what was said
   RefusalRecord: `${RS}RefusalRecord`, refusedAction: `${RS}refusedAction`, route: `${RS}route`, status: `${RS}status`, code: `${RS}code`, rule: `${RS}rule`,
   entityKind: `${RS}entityKind`, entityId: `${RS}entityId`,
@@ -1096,6 +1100,18 @@ function canonicalizeRecord(i) {
       if (people.length) record.people = people;
       return { kind: i.kind, opId, actor, evidence, record, targets: [], newAssertion: null, authority: null, grant: null, rule: null };
     }
+    if (i.entity && i.entity.kind === 'reaction') {
+      // #449 — append-only, like wake. `post` is the post's entity IRI; the plan requires it to be a LIVE post (a
+      // Comment), so a reaction on an unknown or redacted post is PRECONDITION_FAILED and writes nothing.
+      const e = obj(i.entity, ['kind', 'iri', 'post', 'seat', 'emoji', 'state', 'at', 'entityJson'], 'entity');
+      const state = rStr(e.state, 'entity.state');
+      if (state !== 'on' && state !== 'off') fail(`entity.state must be on or off (got ${JSON.stringify(state)})`);
+      record = { entity: {
+        kind: 'reaction', iri: checkIri(e.iri, 'entity.iri'), post: checkIri(e.post, 'entity.post'),
+        seat: rStr(e.seat, 'entity.seat'), emoji: rStr(e.emoji, 'entity.emoji'), state,
+        at: rStr(e.at, 'entity.at'), entityJson: rStr(e.entityJson, 'entity.entityJson'),
+      } };
+    } else {
     const e = obj(i.entity, ['kind', 'iri', 'seat', 'at', 'note', 'entityJson'], 'entity');
     if (e.kind === 'wake') {
       record = { entity: {
@@ -1106,7 +1122,8 @@ function canonicalizeRecord(i) {
         entityJson: rStr(e.entityJson, 'entity.entityJson'),
       } };
     } else {
-      fail(`entity.kind must be one of wake (got ${JSON.stringify(e.kind)})`);
+      fail(`entity.kind must be one of wake, reaction, collection (got ${JSON.stringify(e.kind)})`);
+    }
     }
   } else if (i.kind === 'decision.relate') {
     const target = checkIri(i.target, 'target');
@@ -1544,6 +1561,19 @@ function planRecord(c) {
     // is the wire the document path would have answered).
     const W = R.entity;
     target = null;
+    if (W.kind === 'reaction') {
+      // #449 — ONE fresh node; the post must be a LIVE post (a redaction removes its Comment type, so this refuses it).
+      fresh.push(W.iri);
+      pre.push(`    ${I(W.post)} ${I(TM.type)} ${I(TM.Comment)} .`);
+      add(W.iri, TM.type, I(TM.Reaction));
+      add(W.iri, TM.reactionTo, I(W.post));
+      add(W.iri, TM.reactor, I(`${PERSON_IRI}${encodeURIComponent(W.seat)}`));
+      add(W.iri, TM.reactionEmoji, L(W.emoji));
+      add(W.iri, TM.reactionState, L(W.state));
+      add(W.iri, TM.reactedAt, L(W.at));
+      add(W.iri, TM.entityJson, L(W.entityJson));
+      add(W.iri, TM.recordedBy, ref(c.opId));
+    } else {
     fresh.push(W.iri);
     add(W.iri, TM.type, I(TM.Wake));
     add(W.iri, TM.wokeSeat, I(`${PERSON_IRI}${encodeURIComponent(W.seat)}`));
@@ -1551,6 +1581,7 @@ function planRecord(c) {
     add(W.iri, TM.text, W.note == null ? null : L(W.note));
     add(W.iri, TM.entityJson, L(W.entityJson));
     add(W.iri, TM.recordedBy, ref(c.opId));
+    }
   } else if (c.kind === 'post.redact') {
     // #1574 R4a — LOGICAL deletion only: every content triple of the post is deleted and the node is left as a tombstone
     // (RedactedPost, its original postSeq and recordedBy, and redactedBy = this operation). The precondition is a LIVE

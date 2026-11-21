@@ -1515,6 +1515,33 @@ function buildMcpServer() {
     return jsonResult(await apiCall('GET', `/api/wakes${qs ? '?' + qs : ''}`));
   });
 
+  // ── #449 — REACTIONS on a commons post ──────────────────────────────────
+  const REACTION_EMOJI = z.enum(['👍', '❤️', '😂', '🤷', '👏', '👀']).describe('One of 👍 ❤️ 😂 🤷 👏 👀');
+  mcp.registerTool('reaction_add', {
+    description: 'React to a commons post with an emoji (#449), the way a reader does under a message. It never edits the post. '
+      + 'Adding a reaction you already gave is a no-op. Returns the post\'s reactions after the write, as [{emoji, by}]. '
+      + 'Read a post\'s reactions with conversation_get (the `reactions` field is absent when it has none).',
+    inputSchema: {
+      id: z.string().min(1).describe('The post id (conversation id)'),
+      emoji: REACTION_EMOJI,
+      by: z.string().min(1).describe('Your seat key. Declared, not authenticated.'),
+    },
+  }, async ({ id, emoji, by }) => {
+    return jsonResult(await apiCall('POST', `/api/conversations/${encodeURIComponent(id)}/reactions`, { by, emoji, on: true }));
+  });
+
+  mcp.registerTool('reaction_remove', {
+    description: 'Take back your emoji reaction on a commons post (#449). Removing one you never gave is a no-op. '
+      + 'Returns the post\'s reactions after the write.',
+    inputSchema: {
+      id: z.string().min(1).describe('The post id (conversation id)'),
+      emoji: REACTION_EMOJI,
+      by: z.string().min(1).describe('Your seat key. Declared, not authenticated.'),
+    },
+  }, async ({ id, emoji, by }) => {
+    return jsonResult(await apiCall('POST', `/api/conversations/${encodeURIComponent(id)}/reactions`, { by, emoji, on: false }));
+  });
+
   mcp.registerTool('obligation_create', {
     description: 'Record an OBLIGATION — what a seat PROMISED, as a queryable node (#1118, born in the '
       + 'graph per Decision aaf1774b). A steward role, a review owed, a promise, a tripwire: things that '

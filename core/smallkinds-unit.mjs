@@ -50,6 +50,65 @@ export function wakeCreateIntention({ actor, iri, seat, at, note, entityJson }) 
     entity: { kind: 'wake', iri, seat, at, note: note == null ? '' : String(note), entityJson } };
 }
 
+// ── #449 — REACTIONS. One append-only node per toggle; a post's reactions are the FOLD of its toggles. ──
+/** The palette of slice 1. A reaction outside it is refused at the route; the compiler stores any string. */
+export const REACTION_PALETTE = Object.freeze(['👍', '❤️', '😂', '🤷', '👏', '👀']);
+export const REACTION_PREFIX = 'https://scrumboard.local/reaction/';
+const POST_ENTITY_PREFIX = 'https://scrumboard.local/entity/';
+export const postEntityIri = (postId) => `${POST_ENTITY_PREFIX}${postId}`;
+export function reactionIri() { return `${REACTION_PREFIX}${crypto.randomUUID()}`; }
+export function reactionOpIri(seat) { return `urn:ex:op/smallkinds/reaction/${encodeURIComponent(seat)}/${crypto.randomUUID()}`; }
+
+/** One toggle's intention. `state` is 'on' or 'off'; the post must be live when it lands (the compiler's precondition). */
+export function reactionIntention({ actor, iri, postId, seat, emoji, state, at }) {
+  const entityJson = JSON.stringify({ post: postId, seat, emoji, state, at });
+  return { kind: 'entity.put', opId: reactionOpIri(seat), actor,
+    entity: { kind: 'reaction', iri, post: postEntityIri(postId), seat, emoji, state, at, entityJson } };
+}
+
+/** Every toggle on the given posts, in ONE query. Post ids ride a VALUES block, each checked to be an id-shaped token. */
+export function reactionsForQuery(postIds) {
+  const ids = postIds.filter((id) => /^[A-Za-z0-9-]{1,64}$/.test(String(id)));
+  if (!ids.length) return null;
+  const values = ids.map((id) => `<${postEntityIri(id)}>`).join(' ');
+  return `SELECT ?r ?j WHERE { VALUES ?post { ${values} } ?r <${TM.type}> <${TM.Reaction}> ; <${TM.reactionTo}> ?post . GRAPH ${BK} { ?r <${TM.entityJson}> ?j } }`;
+}
+
+/**
+ * The fold. `toggles` are {iri, post, seat, emoji, state, at}. For each (post, seat, emoji) the LATEST toggle wins (by `at`,
+ * ties by iri, so the answer never depends on row order); the live ones are kept. Per post: emoji in the order of their
+ * earliest live reaction, and each emoji's reactors in the order they reacted. Returns Map(postId → [{emoji, by}]).
+ */
+export function foldReactions(toggles) {
+  const latest = new Map();
+  const later = (a, b) => (a.at > b.at || (a.at === b.at && a.iri > b.iri));
+  for (const t of toggles) {
+    const k = JSON.stringify([t.post, t.seat, t.emoji]);
+    const cur = latest.get(k);
+    if (!cur || later(t, cur)) latest.set(k, t);
+  }
+  const live = [...latest.values()].filter((t) => t.state === 'on')
+    .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.iri < b.iri ? -1 : a.iri > b.iri ? 1 : 0));
+  const out = new Map();
+  for (const t of live) {
+    if (!out.has(t.post)) out.set(t.post, []);
+    const list = out.get(t.post);
+    let chip = list.find((c) => c.emoji === t.emoji);
+    if (!chip) { chip = { emoji: t.emoji, by: [] }; list.push(chip); }
+    chip.by.push(t.seat);
+  }
+  return out;
+}
+
+/** Bindings → a toggle, or null when the stored JSON is unreadable. */
+export function toggleFromRow(r) {
+  let j;
+  try { j = JSON.parse(String(r.j.value)); } catch { return null; }
+  if (!j || typeof j !== 'object' || typeof j.post !== 'string' || typeof j.seat !== 'string' || typeof j.emoji !== 'string' || typeof j.at !== 'string') return null;
+  if (j.state !== 'on' && j.state !== 'off') return null;
+  return { iri: String(r.r.value), post: j.post, seat: j.seat, emoji: j.emoji, state: j.state, at: j.at };
+}
+
 /** A seat key → the same canonical person IRI the compiler writes for `wokeSeat`. */
 const seatIriForFilter = (seat) => `<${PERSON_IRI}${encodeURIComponent(String(seat))}>`;
 
@@ -115,6 +174,18 @@ export function createSmallkindsUnit({ slice }) {
    * the SAME opId is an `intent-collision` receipt (the duplicate guard), never a
    * new intention.
    */
+  /** #449 — the folded reactions of these posts: { unavailable } | { reactions: Map(postId → [{emoji, by}]) }. */
+  async function readReactions(postIds) {
+    const q = reactionsForQuery(postIds);
+    if (!q) return { reactions: new Map() };
+    try {
+      const rows = await select(q);
+      return { reactions: foldReactions(rows.map(toggleFromRow).filter(Boolean)) };
+    } catch (e) {
+      if (e?.code === 'GRAPH_EXECUTOR_UNAVAILABLE') return { unavailable: e.message };
+      throw e;
+    }
+  }
   async function writeWake(intention) {
     const t0 = Date.now();
     const fenced = await slice.fence();
@@ -133,5 +204,7 @@ export function createSmallkindsUnit({ slice }) {
     // intention and could land a second wake. Map to UNAVAILABLE so the route 503s.
     return { status: 'UNAVAILABLE', reason: r.reason ?? `outcome=${r.outcome}` };
   }
-  return { readWakes, writeWake };
+  // #449 — a reaction toggle is the same shape of write as a wake (one fresh node through entity.put), so it takes the
+  // same reconciliation: an undetermined outcome is UNAVAILABLE, never a guess.
+  return { readWakes, writeWake, readReactions, writeReaction: writeWake };
 }

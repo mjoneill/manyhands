@@ -53,7 +53,7 @@ import {
   collapseIdentities, identitiesFromEvents, identityOf,
   Q_POSITION,   // #1643 — the executor's commit marker, read for the checks' stated currency
 } from './core/logborn-unit.mjs';
-import { createSmallkindsUnit, wakeCreateIntention, wakeIri } from './core/smallkinds-unit.mjs';   // #1624
+import { createSmallkindsUnit, wakeCreateIntention, wakeIri, REACTION_PALETTE, reactionIntention, reactionIri } from './core/smallkinds-unit.mjs';   // #1624, #449
 import { BOARD_TOOLS } from './core/board-tools.mjs';
 import { resolveAttachedTo } from './core/attached-to.mjs'; // #761
 import { withAttachmentFence, FENCE_BUSY, DEFAULT_WAIT_MS as DEFAULT_FENCE_WAIT_MS } from './core/attachment-fence.mjs';   // #1648
@@ -13724,7 +13724,17 @@ async function handleGetConversation(req, res, id) {
         if (_recall) setImmediate(() => recallForget([id]));
         return;
       }
-      if (g.post) { const shown = withRecall(g.post); sendJSON(res, 200, shown); noteSeatFetch(req, shown); return noteRecallRead(req, shown); }   // #1689, #1902
+      if (g.post) {
+        // #449 — a post's live reactions ride its read, and only when it has some: a post with none is byte-for-byte as before.
+        let post = g.post;
+        if (SMALLKINDS_UNIT) {
+          const r = await SMALLKINDS.readReactions([id]);
+          if (r.unavailable) return sendJSON(res, 503, { error: `the graph could not be read: ${r.unavailable}`, code: 'GRAPH_UNAVAILABLE' });
+          const chips = r.reactions.get(id);
+          if (chips?.length) post = { ...post, reactions: chips };
+        }
+        const shown = withRecall(post); sendJSON(res, 200, shown); noteSeatFetch(req, shown); return noteRecallRead(req, shown);   // #1689, #1902
+      }
     }
     const data = readBoard();
     const idx = findConversationIndex(data, id);
@@ -13736,6 +13746,47 @@ async function handleGetConversation(req, res, id) {
   } catch (e) {
     console.error('GET /api/conversations/:id:', e.message);
     sendJSON(res, 500, { error: 'Failed to read conversation' });
+  }
+}
+
+// ── #449 — REACT TO A POST ─────────────────────────────────────────────────────────────────────────────────────────────
+// POST /api/conversations/:id/reactions {by, emoji, on?} → 200 {id, reactions}. A reaction is never an edit of the post:
+// each toggle is its own append-only node in the graph (the small-kinds unit), and the answer is the post's reactions
+// folded AFTER the write. Adding a reaction that is already live, or removing one that is not, writes nothing and is a 200.
+// Graph-only: with the small-kinds unit off this is a 400 REACTIONS_NEED_GRAPH, never a silent no-op. `by` is declared,
+// not authenticated, like every seat field here.
+async function handleReactToConversation(req, res, id) {
+  try {
+    let body;
+    try { body = JSON.parse(await readBody(req)); } catch { return sendJSON(res, 400, { error: 'the body must be JSON: {by, emoji, on?}' }); }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return sendJSON(res, 400, { error: 'the body must be a JSON object: {by, emoji, on?}' });
+    const by = typeof body.by === 'string' ? body.by.trim() : '';
+    if (!by) return sendJSON(res, 400, { error: 'by is required: the seat (or person) reacting. Declared, not authenticated.', code: 'INVALID_REACTOR' });
+    if (!REACTION_PALETTE.includes(body.emoji)) return sendJSON(res, 400, { error: `emoji must be one of ${REACTION_PALETTE.join(' ')}`, code: 'INVALID_EMOJI', palette: REACTION_PALETTE });
+    if (body.on !== undefined && typeof body.on !== 'boolean') return sendJSON(res, 400, { error: 'on must be true (react) or false (remove your reaction); omit it to react', code: 'INVALID_ON' });
+    const on = body.on !== false;
+    if (!SMALLKINDS_UNIT) return sendJSON(res, 400, { error: 'reactions are stored in the graph: they need the small-kinds unit on (SCRUM_GRAPH_UNIT_SMALLKINDS=1)', code: 'REACTIONS_NEED_GRAPH' });
+    const g = await readGraphPost(id);
+    if (g.unavailable) return sendJSON(res, 503, { error: `the graph could not be read: ${g.unavailable}`, code: 'GRAPH_UNAVAILABLE' });
+    if (g.redacted) return sendJSON(res, 409, { error: 'this post has been redacted; it cannot be reacted to', code: 'POST_REDACTED' });
+    if (!g.post) return sendJSON(res, 404, { error: `no post ${id} in the graph`, code: 'NO_SUCH_POST' });
+    const answer = async () => {
+      const r = await SMALLKINDS.readReactions([id]);
+      if (r.unavailable) return sendJSON(res, 503, { error: `the graph could not be read: ${r.unavailable}`, code: 'GRAPH_UNAVAILABLE' });
+      return sendJSON(res, 200, { id, reactions: r.reactions.get(id) ?? [] });
+    };
+    const now = await SMALLKINDS.readReactions([id]);
+    if (now.unavailable) return sendJSON(res, 503, { error: `the graph could not be read: ${now.unavailable}`, code: 'GRAPH_UNAVAILABLE' });
+    const live = !!(now.reactions.get(id) ?? []).find((c) => c.emoji === body.emoji)?.by.includes(by);
+    if (live === on) return sendJSON(res, 200, { id, reactions: now.reactions.get(id) ?? [] });
+    const w = await SMALLKINDS.writeReaction(reactionIntention({ actor: graphActor(by), iri: reactionIri(), postId: id, seat: by, emoji: body.emoji, state: on ? 'on' : 'off', at: new Date().toISOString() }));
+    if (w.status === 'APPLIED') return await answer();
+    if (w.status === 'PRECONDITION_FAILED') return sendJSON(res, 404, { error: `post ${id} is no longer a live post in the graph`, code: 'NO_SUCH_POST' });
+    if (w.status === 'UNAVAILABLE') return sendJSON(res, 503, { error: `the graph could not be written, so the reaction was refused: ${w.reason}`, code: 'GRAPH_UNAVAILABLE' });
+    return sendJSON(res, 500, { error: `the graph refused the reaction: ${w.reason ?? 'rejected'}` });
+  } catch (e) {
+    console.error('POST /api/conversations/:id/reactions:', e.message);
+    sendJSON(res, 500, { error: 'Failed to record the reaction' });
   }
 }
 
@@ -15072,6 +15123,7 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/conversations$/,                fn: (req, res) => handleListConversations(req, res) },
   { method: 'POST',   re: /^\/api\/conversations$/,                fn: (req, res) => handleCreateConversation(req, res) },
   { method: 'GET',    re: /^\/api\/conversations\/([^\/]+)$/,      fn: (req, res, m) => handleGetConversation(req, res, m[1]) },
+  { method: 'POST',   re: /^\/api\/conversations\/([^\/]+)\/reactions$/, fn: (req, res, m) => handleReactToConversation(req, res, decodeURIComponent(m[1])) },   // #449
   { method: 'POST',   re: /^\/api\/attachments$/,                  fn: (req, res) => handleCreateAttachment(req, res) },
   { method: 'GET',    re: /^\/api\/attachments\/([^\/]+)$/,        fn: (req, res, m) => serveAttachment(req, res, m[1]) },
   { method: 'GET',    re: /^\/api\/nodes$/,                        fn: (req, res) => handleListNodes(req, res) },
