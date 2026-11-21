@@ -227,5 +227,7 @@
   "tests/outbox-summary-1751.test.mjs",
   "tests/one-memory-read-1865.test.mjs",
   "tests/seat-inbox-1902.test.mjs",
-  "tests/seat-inbox-rest-1902.test.mjs"
+  "tests/seat-inbox-rest-1902.test.mjs",
+  "tests/reactions-449.test.mjs",
+  "tests/reactions-commons-449.test.mjs"
 ]

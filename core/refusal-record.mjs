@@ -38,8 +38,10 @@ SINGLE_SEAT SOURCE_UNAVAILABLE TALK_CLOSED TOKEN_EXPIRED TOKEN_REVOKED TOKEN_UNK
 UNKNOWN_NODE UNKNOWN_PREFIX UNKNOWN_ROLE UNKNOWN_SEAT UNKNOWN_TERM UNSUPPORTED_RETURN_SHAPE WRITE_CONFLICT LINKS_UNAVAILABLE LINK_NOT_FOUND LINK_EXISTS CLAIM_NOT_FOUND
 BAD_LIMIT BAD_RUN_ID READINGS_UNAVAILABLE READING_NOT_FOUND
 BAD_TEXT BAD_K BAD_POST_ID BAD_SINCE RECALL_UNAVAILABLE RECALL_POST_NOT_FOUND RECALL_OFFER_NOT_FOUND
-AUTH_AMBIGUOUS CODE_MISSING CSRF_CONTENT_TYPE CSRF_ORIGIN`.split(/\s+/)));
-// (#1894: the second-last line's four codes are the readings routes' own; #1689: the last line's are the recall routes'.)
+AUTH_AMBIGUOUS CODE_MISSING CSRF_CONTENT_TYPE CSRF_ORIGIN
+INVALID_EMOJI INVALID_ON INVALID_REACTOR INVALID_SINCE NO_POSTS NO_SUCH_POST REACTIONS_NEED_GRAPH TOO_MANY_POSTS`.split(/\s+/)));
+// (#1894: the readings routes' four codes are BAD_LIMIT…READING_NOT_FOUND; #1689: the recall routes' are BAD_TEXT…RECALL_OFFER_NOT_FOUND;
+// #449: the last line's are the reaction routes'.)
 // The adapter's rails (POST /api/refusals `rule`), verbatim; any other rule is `unlisted`.
 export const REFUSAL_RULES = Object.freeze(new Set(['#755 work gate', '#755 claim cooldown']));
 // The adapter's labels (POST /api/refusals `route`) → the action each one refused. Closed: any other label is `unlisted`.
@@ -53,7 +55,7 @@ export const ROUTE_TEMPLATES = Object.freeze(new Set([
   'PATCH /api/roles/:p', 'PATCH /api/talks/:p', 'PATCH /api/tending/whispers/:p', 'POST /api/agents',
   'POST /api/agents/:p/prompt', 'POST /api/artifacts', 'POST /api/assert', 'POST /api/attachments', 'POST /api/cards',
   'POST /api/cards/:p/claim', 'POST /api/cards/:p/move-fence', 'POST /api/columns', 'POST /api/config',
-  'POST /api/conversations', 'POST /api/cursors/ack', 'POST /api/cursors/inbound', 'POST /api/cursors/register',
+  'POST /api/conversations', 'POST /api/conversations/:p/reactions', 'POST /api/cursors/ack', 'POST /api/cursors/inbound', 'POST /api/cursors/register',
   'POST /api/cursors/served', 'POST /api/decisions', 'POST /api/decisions/:p/relations', 'POST /api/links/attach', 'POST /api/links/:p/decide', 'POST /api/deliveries',
   'POST /api/deliveries/:p/events', 'POST /api/deliveries/events', 'POST /api/export', 'POST /api/export/preview',
   'POST /api/graph', 'POST /api/kinds', 'POST /api/labels/aliases', 'POST /api/memories', 'POST /api/model-calls',
