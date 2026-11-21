@@ -1,0 +1,11 @@
+server suite	Run the server suite	2026-11-21T20:14:22.7804990Z # tmp: ⛔ tests/reactions-449.test.mjs left 11 entries, 3709928 bytes: a NEW leak (not on the baseline) — fails the run
+server suite	Run the server suite	2026-11-21T20:14:22.7921622Z # tests 6825
+server suite	Run the server suite	2026-11-21T20:14:22.7921900Z # suites 0
+server suite	Run the server suite	2026-11-21T20:14:22.7922117Z # pass 6755
+server suite	Run the server suite	2026-11-21T20:14:22.7922328Z # fail 0
+server suite	Run the server suite	2026-11-21T20:14:22.7922536Z # cancelled 0
+server suite	Run the server suite	2026-11-21T20:14:22.7922761Z # skipped 27
+server suite	Run the server suite	2026-11-21T20:14:22.7922970Z # todo 43
+server suite	Run the server suite	2026-11-21T20:14:22.8398773Z ##[error]Process completed with exit code 1.
+server suite	Platform-only skips equal the manifest	2026-11-21T20:16:30.5371536Z ⛔ the suite exited 1, not 0
+server suite	Platform-only skips equal the manifest	2026-11-21T20:16:30.5454874Z ##[error]Process completed with exit code 1.

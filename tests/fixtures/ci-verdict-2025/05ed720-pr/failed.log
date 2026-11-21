@@ -1,0 +1,196 @@
+server suite	Run the server suite	2026-11-21T19:30:25.9980576Z not ok 5317 - \#1762 G1 every literal error code in the server and core is a registered refusal code
+server suite	Run the server suite	2026-11-21T19:30:25.9981461Z   ---
+server suite	Run the server suite	2026-11-21T19:30:25.9981844Z   duration_ms: 36.127398
+server suite	Run the server suite	2026-11-21T19:30:25.9982248Z   type: 'test'
+server suite	Run the server suite	2026-11-21T19:30:25.9983051Z   location: '/home/runner/work/manyhands/manyhands/tests/refusal-record-1762.test.mjs:19:1'
+server suite	Run the server suite	2026-11-21T19:30:25.9983932Z   failureType: 'testCodeFailure'
+server suite	Run the server suite	2026-11-21T19:30:25.9984369Z   error: |-
+server suite	Run the server suite	2026-11-21T19:30:25.9985679Z     register these in core/refusal-record.mjs REFUSAL_CODES: INVALID_EMOJI INVALID_ON INVALID_REACTOR INVALID_SINCE NO_POSTS NO_SUCH_POST REACTIONS_NEED_GRAPH TOO_MANY_POSTS
+server suite	Run the server suite	2026-11-21T19:30:25.9987544Z     + actual - expected
+server suite	Run the server suite	2026-11-21T19:30:25.9987948Z     
+server suite	Run the server suite	2026-11-21T19:30:25.9988246Z     + [
+server suite	Run the server suite	2026-11-21T19:30:25.9988466Z     +   'INVALID_EMOJI',
+server suite	Run the server suite	2026-11-21T19:30:25.9988856Z     +   'INVALID_ON',
+server suite	Run the server suite	2026-11-21T19:30:25.9989263Z     +   'INVALID_REACTOR',
+server suite	Run the server suite	2026-11-21T19:30:25.9989688Z     +   'INVALID_SINCE',
+server suite	Run the server suite	2026-11-21T19:30:25.9990071Z     +   'NO_POSTS',
+server suite	Run the server suite	2026-11-21T19:30:25.9990422Z     +   'NO_SUCH_POST',
+server suite	Run the server suite	2026-11-21T19:30:25.9990864Z     +   'REACTIONS_NEED_GRAPH',
+server suite	Run the server suite	2026-11-21T19:30:25.9991284Z     +   'TOO_MANY_POSTS'
+server suite	Run the server suite	2026-11-21T19:30:25.9991649Z     + ]
+server suite	Run the server suite	2026-11-21T19:30:25.9991964Z     - []
+server suite	Run the server suite	2026-11-21T19:30:25.9992259Z     
+server suite	Run the server suite	2026-11-21T19:30:25.9992577Z   code: 'ERR_ASSERTION'
+server suite	Run the server suite	2026-11-21T19:30:25.9992971Z   name: 'AssertionError'
+server suite	Run the server suite	2026-11-21T19:30:25.9993357Z   expected:
+server suite	Run the server suite	2026-11-21T19:30:25.9993670Z   actual:
+server suite	Run the server suite	2026-11-21T19:30:25.9994012Z     0: 'INVALID_EMOJI'
+server suite	Run the server suite	2026-11-21T19:30:25.9994388Z     1: 'INVALID_ON'
+server suite	Run the server suite	2026-11-21T19:30:25.9994747Z     2: 'INVALID_REACTOR'
+server suite	Run the server suite	2026-11-21T19:30:25.9995137Z     3: 'INVALID_SINCE'
+server suite	Run the server suite	2026-11-21T19:30:25.9995499Z     4: 'NO_POSTS'
+server suite	Run the server suite	2026-11-21T19:30:25.9995851Z     5: 'NO_SUCH_POST'
+server suite	Run the server suite	2026-11-21T19:30:26.0001803Z     6: 'REACTIONS_NEED_GRAPH'
+server suite	Run the server suite	2026-11-21T19:30:26.0009590Z     7: 'TOO_MANY_POSTS'
+server suite	Run the server suite	2026-11-21T19:30:26.0010121Z   operator: 'deepStrictEqual'
+server suite	Run the server suite	2026-11-21T19:30:26.0010543Z   stack: |-
+server suite	Run the server suite	2026-11-21T19:30:26.0011297Z     TestContext.<anonymous> (file:///home/runner/work/manyhands/manyhands/tests/refusal-record-1762.test.mjs:29:10)
+server suite	Run the server suite	2026-11-21T19:30:26.0012490Z     Test.runInAsyncScope (node:async_hooks:214:14)
+server suite	Run the server suite	2026-11-21T19:30:26.0013165Z     Test.run (node:internal/test_runner/test:1047:25)
+server suite	Run the server suite	2026-11-21T19:30:26.0013848Z     Test.start (node:internal/test_runner/test:944:17)
+server suite	Run the server suite	2026-11-21T19:30:26.0014706Z     startSubtestAfterBootstrap (node:internal/test_runner/harness:296:17)
+server suite	Run the server suite	2026-11-21T19:30:26.0015399Z   ...
+server suite	Run the server suite	2026-11-21T19:30:26.0035201Z not ok 5321 - \#1762 G5 every write route in server.js is in the closed template table, and the table names no route that is gone
+server suite	Run the server suite	2026-11-21T19:30:26.0036149Z   ---
+server suite	Run the server suite	2026-11-21T19:30:26.0036687Z   duration_ms: 6.967033
+server suite	Run the server suite	2026-11-21T19:30:26.0037071Z   type: 'test'
+server suite	Run the server suite	2026-11-21T19:30:26.0037823Z   location: '/home/runner/work/manyhands/manyhands/tests/refusal-record-1762.test.mjs:79:1'
+server suite	Run the server suite	2026-11-21T19:30:26.0038623Z   failureType: 'testCodeFailure'
+server suite	Run the server suite	2026-11-21T19:30:26.0039547Z   error: 'register POST /api/conversations/:p/reactions in core/refusal-record.mjs ROUTE_TEMPLATES'
+server suite	Run the server suite	2026-11-21T19:30:26.0040415Z   code: 'ERR_ASSERTION'
+server suite	Run the server suite	2026-11-21T19:30:26.0040842Z   name: 'AssertionError'
+server suite	Run the server suite	2026-11-21T19:30:26.0041267Z   expected: true
+server suite	Run the server suite	2026-11-21T19:30:26.0041630Z   actual: false
+server suite	Run the server suite	2026-11-21T19:30:26.0041953Z   operator: '=='
+server suite	Run the server suite	2026-11-21T19:30:26.0042277Z   stack: |-
+server suite	Run the server suite	2026-11-21T19:30:26.0043151Z     TestContext.<anonymous> (file:///home/runner/work/manyhands/manyhands/tests/refusal-record-1762.test.mjs:86:14)
+server suite	Run the server suite	2026-11-21T19:30:26.0044192Z     Test.runInAsyncScope (node:async_hooks:214:14)
+server suite	Run the server suite	2026-11-21T19:30:26.0044834Z     Test.run (node:internal/test_runner/test:1047:25)
+server suite	Run the server suite	2026-11-21T19:30:26.0045627Z     Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+server suite	Run the server suite	2026-11-21T19:30:26.0046712Z     Test.postRun (node:internal/test_runner/test:1173:19)
+server suite	Run the server suite	2026-11-21T19:30:26.0047411Z     Test.run (node:internal/test_runner/test:1101:12)
+server suite	Run the server suite	2026-11-21T19:30:26.0048240Z     async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+server suite	Run the server suite	2026-11-21T19:30:26.0048890Z   ...
+server suite	Run the server suite	2026-11-21T19:33:15.0830578Z not ok 6111 - T14 THE CHECKED-IN MANIFEST EQUALS THE DISCOVERED EXECUTOR-BACKED TESTS (and covers the 10-08 skips, which are a seed, not the inventory)
+server suite	Run the server suite	2026-11-21T19:33:15.0831848Z   ---
+server suite	Run the server suite	2026-11-21T19:33:15.0832273Z   duration_ms: 102.348595
+server suite	Run the server suite	2026-11-21T19:33:15.0832746Z   type: 'test'
+server suite	Run the server suite	2026-11-21T19:33:15.0833596Z   location: '/home/runner/work/manyhands/manyhands/tests/suite-watch-three-state-1637.test.mjs:286:1'
+server suite	Run the server suite	2026-11-21T19:33:15.0834582Z   failureType: 'testCodeFailure'
+server suite	Run the server suite	2026-11-21T19:33:15.0848539Z   error: |-
+server suite	Run the server suite	2026-11-21T19:33:15.0849939Z     executor-backed tests missing from the manifest: tests/reactions-449.test.mjs, tests/reactions-commons-449.test.mjs; manifest entries that are not files: 
+server suite	Run the server suite	2026-11-21T19:33:15.0851247Z     + actual - expected
+server suite	Run the server suite	2026-11-21T19:33:15.0851663Z     
+server suite	Run the server suite	2026-11-21T19:33:15.0852027Z       {
+server suite	Run the server suite	2026-11-21T19:33:15.0852415Z         stale: [],
+server suite	Run the server suite	2026-11-21T19:33:15.0852882Z     +   unlisted: [
+server suite	Run the server suite	2026-11-21T19:33:15.0853354Z     +     'tests/reactions-449.test.mjs',
+server suite	Run the server suite	2026-11-21T19:33:15.0853996Z     +     'tests/reactions-commons-449.test.mjs'
+server suite	Run the server suite	2026-11-21T19:33:15.0854526Z     +   ]
+server suite	Run the server suite	2026-11-21T19:33:15.0856865Z     -   unlisted: []
+server suite	Run the server suite	2026-11-21T19:33:15.0857296Z       }
+server suite	Run the server suite	2026-11-21T19:33:15.0857634Z     
+server suite	Run the server suite	2026-11-21T19:33:15.0858739Z   code: 'ERR_ASSERTION'
+server suite	Run the server suite	2026-11-21T19:33:15.0859213Z   name: 'AssertionError'
+server suite	Run the server suite	2026-11-21T19:33:15.0859659Z   expected:
+server suite	Run the server suite	2026-11-21T19:33:15.0860026Z     unlisted:
+server suite	Run the server suite	2026-11-21T19:33:15.0860398Z     stale:
+server suite	Run the server suite	2026-11-21T19:33:15.0860749Z   actual:
+server suite	Run the server suite	2026-11-21T19:33:15.0861094Z     unlisted:
+server suite	Run the server suite	2026-11-21T19:33:15.0861550Z       0: 'tests/reactions-449.test.mjs'
+server suite	Run the server suite	2026-11-21T19:33:15.0862181Z       1: 'tests/reactions-commons-449.test.mjs'
+server suite	Run the server suite	2026-11-21T19:33:15.0862698Z     stale:
+server suite	Run the server suite	2026-11-21T19:33:15.0863076Z   operator: 'deepStrictEqual'
+server suite	Run the server suite	2026-11-21T19:33:15.0863515Z   stack: |-
+server suite	Run the server suite	2026-11-21T19:33:15.0864556Z     TestContext.<anonymous> (file:///home/runner/work/manyhands/manyhands/tests/suite-watch-three-state-1637.test.mjs:295:10)
+server suite	Run the server suite	2026-11-21T19:33:15.0865735Z     Test.runInAsyncScope (node:async_hooks:214:14)
+server suite	Run the server suite	2026-11-21T19:33:15.0866930Z     Test.run (node:internal/test_runner/test:1047:25)
+server suite	Run the server suite	2026-11-21T19:33:15.0867801Z     Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+server suite	Run the server suite	2026-11-21T19:33:15.0868675Z     Test.postRun (node:internal/test_runner/test:1173:19)
+server suite	Run the server suite	2026-11-21T19:33:15.0869422Z     Test.run (node:internal/test_runner/test:1101:12)
+server suite	Run the server suite	2026-11-21T19:33:15.0870325Z     process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+server suite	Run the server suite	2026-11-21T19:33:15.0871392Z     async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+server suite	Run the server suite	2026-11-21T19:33:15.0872109Z   ...
+server suite	Run the server suite	2026-11-21T19:36:49.9068408Z not ok 6799 - \#1163 LIVE — every MCP write tool reaches every body field its REST handler depends on (n printed; unmapped = fail)
+server suite	Run the server suite	2026-11-21T19:36:49.9069422Z   ---
+server suite	Run the server suite	2026-11-21T19:36:49.9069781Z   duration_ms: 863.091763
+server suite	Run the server suite	2026-11-21T19:36:49.9070206Z   type: 'test'
+server suite	Run the server suite	2026-11-21T19:36:49.9070982Z   location: '/home/runner/work/manyhands/manyhands/tests/write-tool-reach.test.mjs:53:1'
+server suite	Run the server suite	2026-11-21T19:36:49.9071846Z   failureType: 'testCodeFailure'
+server suite	Run the server suite	2026-11-21T19:36:49.9072295Z   error: |-
+server suite	Run the server suite	2026-11-21T19:36:49.9073503Z     UNREACHABLE FIELDS (a `body.<f>` read is a dependency unless every read sits in an || chain beside a field the tool declares):
+server suite	Run the server suite	2026-11-21T19:36:49.9075647Z       reaction_add → POST /api/conversations/${encodeURIComponent(id)}/reactions (handleReactToConversation) reads body.on, the tool cannot send it:
+server suite	Run the server suite	2026-11-21T19:36:49.9078256Z         if (body.on !== undefined && typeof body.on !== 'boolean') return sendJSON(res, 400, { error: 'on must be true (react) or false (remove your reaction); omit it to react', code: 'INVALID_ON' });
+server suite	Run the server suite	2026-11-21T19:36:49.9079680Z         const on = body.on !== false;
+server suite	Run the server suite	2026-11-21T19:36:49.9081244Z       reaction_remove → POST /api/conversations/${encodeURIComponent(id)}/reactions (handleReactToConversation) reads body.on, the tool cannot send it:
+server suite	Run the server suite	2026-11-21T19:36:49.9083527Z         if (body.on !== undefined && typeof body.on !== 'boolean') return sendJSON(res, 400, { error: 'on must be true (react) or false (remove your reaction); omit it to react', code: 'INVALID_ON' });
+server suite	Run the server suite	2026-11-21T19:36:49.9084954Z         const on = body.on !== false;
+server suite	Run the server suite	2026-11-21T19:36:49.9085450Z     + actual - expected
+server suite	Run the server suite	2026-11-21T19:36:49.9085851Z     
+server suite	Run the server suite	2026-11-21T19:36:49.9086166Z     + [
+server suite	Run the server suite	2026-11-21T19:36:49.9086666Z     +   {
+server suite	Run the server suite	2026-11-21T19:36:49.9087016Z     +     field: 'on',
+server suite	Run the server suite	2026-11-21T19:36:49.9087734Z     +     handler: 'handleReactToConversation',
+server suite	Run the server suite	2026-11-21T19:36:49.9088267Z     +     lines: [
+server suite	Run the server suite	2026-11-21T19:36:49.9089862Z     +       "if (body.on !== undefined && typeof body.on !== 'boolean') return sendJSON(res, 400, { error: 'on must be true (react) or false (remove your reaction); omit it to react', code: 'INVALID_ON' });",
+server suite	Run the server suite	2026-11-21T19:36:49.9091361Z     +       'const on = body.on !== false;'
+server suite	Run the server suite	2026-11-21T19:36:49.9091855Z     +     ],
+server suite	Run the server suite	2026-11-21T19:36:49.9092210Z     +     method: 'POST',
+server suite	Run the server suite	2026-11-21T19:36:49.9092827Z     +     path: '/api/conversations/${encodeURIComponent(id)}/reactions',
+server suite	Run the server suite	2026-11-21T19:36:49.9093517Z     +     tool: 'reaction_add'
+server suite	Run the server suite	2026-11-21T19:36:49.9093924Z     +   },
+server suite	Run the server suite	2026-11-21T19:36:49.9094234Z     +   {
+server suite	Run the server suite	2026-11-21T19:36:49.9094553Z     +     field: 'on',
+server suite	Run the server suite	2026-11-21T19:36:49.9095083Z     +     handler: 'handleReactToConversation',
+server suite	Run the server suite	2026-11-21T19:36:49.9095597Z     +     lines: [
+server suite	Run the server suite	2026-11-21T19:36:49.9097184Z     +       "if (body.on !== undefined && typeof body.on !== 'boolean') return sendJSON(res, 400, { error: 'on must be true (react) or false (remove your reaction); omit it to react', code: 'INVALID_ON' });",
+server suite	Run the server suite	2026-11-21T19:36:49.9098614Z     +       'const on = body.on !== false;'
+server suite	Run the server suite	2026-11-21T19:36:49.9099129Z     +     ],
+server suite	Run the server suite	2026-11-21T19:36:49.9099493Z     +     method: 'POST',
+server suite	Run the server suite	2026-11-21T19:36:49.9100143Z     +     path: '/api/conversations/${encodeURIComponent(id)}/reactions',
+server suite	Run the server suite	2026-11-21T19:36:49.9100852Z     +     tool: 'reaction_remove'
+server suite	Run the server suite	2026-11-21T19:36:49.9101278Z     +   }
+server suite	Run the server suite	2026-11-21T19:36:49.9101599Z     + ]
+server suite	Run the server suite	2026-11-21T19:36:49.9101920Z     - []
+server suite	Run the server suite	2026-11-21T19:36:49.9102231Z     
+server suite	Run the server suite	2026-11-21T19:36:49.9102566Z   code: 'ERR_ASSERTION'
+server suite	Run the server suite	2026-11-21T19:36:49.9102992Z   name: 'AssertionError'
+server suite	Run the server suite	2026-11-21T19:36:49.9103402Z   expected:
+server suite	Run the server suite	2026-11-21T19:36:49.9103736Z   actual:
+server suite	Run the server suite	2026-11-21T19:36:49.9104043Z     0:
+server suite	Run the server suite	2026-11-21T19:36:49.9104408Z       tool: 'reaction_add'
+server suite	Run the server suite	2026-11-21T19:36:49.9104834Z       method: 'POST'
+server suite	Run the server suite	2026-11-21T19:36:49.9105454Z       path: '/api/conversations/${encodeURIComponent(id)}/reactions'
+server suite	Run the server suite	2026-11-21T19:36:49.9106187Z       handler: 'handleReactToConversation'
+server suite	Run the server suite	2026-11-21T19:36:49.9106873Z       field: 'on'
+server suite	Run the server suite	2026-11-21T19:36:49.9107232Z       lines:
+server suite	Run the server suite	2026-11-21T19:36:49.9108636Z         0: "if (body.on !== undefined && typeof body.on !== 'boolean') return sendJSON(res, 400, { error: 'on must be true (react) or false (remove your reaction); omit it to react', code: 'INVALID_ON' });"
+server suite	Run the server suite	2026-11-21T19:36:49.9110032Z         1: 'const on = body.on !== false;'
+server suite	Run the server suite	2026-11-21T19:36:49.9110503Z     1:
+server suite	Run the server suite	2026-11-21T19:36:49.9110861Z       tool: 'reaction_remove'
+server suite	Run the server suite	2026-11-21T19:36:49.9111283Z       method: 'POST'
+server suite	Run the server suite	2026-11-21T19:36:49.9111885Z       path: '/api/conversations/${encodeURIComponent(id)}/reactions'
+server suite	Run the server suite	2026-11-21T19:36:49.9112767Z       handler: 'handleReactToConversation'
+server suite	Run the server suite	2026-11-21T19:36:49.9113275Z       field: 'on'
+server suite	Run the server suite	2026-11-21T19:36:49.9113765Z       lines:
+server suite	Run the server suite	2026-11-21T19:36:49.9115184Z         0: "if (body.on !== undefined && typeof body.on !== 'boolean') return sendJSON(res, 400, { error: 'on must be true (react) or false (remove your reaction); omit it to react', code: 'INVALID_ON' });"
+server suite	Run the server suite	2026-11-21T19:36:49.9116761Z         1: 'const on = body.on !== false;'
+server suite	Run the server suite	2026-11-21T19:36:49.9117277Z   operator: 'deepStrictEqual'
+server suite	Run the server suite	2026-11-21T19:36:49.9117722Z   stack: |-
+server suite	Run the server suite	2026-11-21T19:36:49.9118639Z     TestContext.<anonymous> (file:///home/runner/work/manyhands/manyhands/tests/write-tool-reach.test.mjs:66:12)
+server suite	Run the server suite	2026-11-21T19:36:49.9119927Z     process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+server suite	Run the server suite	2026-11-21T19:36:49.9120850Z     async Test.run (node:internal/test_runner/test:1054:7)
+server suite	Run the server suite	2026-11-21T19:36:49.9121733Z     async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+server suite	Run the server suite	2026-11-21T19:36:49.9122436Z   ...
+server suite	Run the server suite	2026-11-21T19:36:54.0409275Z # tmp: ⛔ tests/reactions-449.test.mjs left 11 entries, 3710017 bytes: a NEW leak (not on the baseline) — fails the run
+server suite	Run the server suite	2026-11-21T19:36:54.0523007Z # tests 6825
+server suite	Run the server suite	2026-11-21T19:36:54.0523290Z # suites 0
+server suite	Run the server suite	2026-11-21T19:36:54.0523482Z # pass 6751
+server suite	Run the server suite	2026-11-21T19:36:54.0523671Z # fail 4
+server suite	Run the server suite	2026-11-21T19:36:54.0523861Z # cancelled 0
+server suite	Run the server suite	2026-11-21T19:36:54.0524132Z # skipped 27
+server suite	Run the server suite	2026-11-21T19:36:54.0524325Z # todo 43
+server suite	Run the server suite	2026-11-21T19:36:54.0524725Z # ⛔ FILE EXITED with code 1: tests/refusal-record-1762.test.mjs
+server suite	Run the server suite	2026-11-21T19:36:54.0525316Z # ⛔ FILE EXITED with code 1: tests/suite-watch-three-state-1637.test.mjs
+server suite	Run the server suite	2026-11-21T19:36:54.0525875Z # ⛔ FILE EXITED with code 1: tests/write-tool-reach.test.mjs
+server suite	Run the server suite	2026-11-21T19:36:54.0738218Z # ⛔ FILE EXITED with code 1: tests/refusal-record-1762.test.mjs
+server suite	Run the server suite	2026-11-21T19:36:54.0739521Z # ⛔ FILE EXITED with code 1: tests/suite-watch-three-state-1637.test.mjs
+server suite	Run the server suite	2026-11-21T19:36:54.0740834Z # ⛔ FILE EXITED with code 1: tests/write-tool-reach.test.mjs
+server suite	Run the server suite	2026-11-21T19:36:54.0832255Z ##[error]Process completed with exit code 1.
+server suite	Platform-only skips equal the manifest	2026-11-21T19:38:52.8219756Z ⛔ the suite exited 1, not 0
+server suite	Platform-only skips equal the manifest	2026-11-21T19:38:52.8220181Z ⛔ the TAP reports failures: # fail 4
+server suite	Platform-only skips equal the manifest	2026-11-21T19:38:52.8220922Z ⛔ test failed: #1762 G1 every literal error code in the server and core is a registered refusal code
+server suite	Platform-only skips equal the manifest	2026-11-21T19:38:52.8221885Z ⛔ test failed: #1762 G5 every write route in server.js is in the closed template table, and the table names no route that is gone
+server suite	Platform-only skips equal the manifest	2026-11-21T19:38:52.8223094Z ⛔ test failed: T14 THE CHECKED-IN MANIFEST EQUALS THE DISCOVERED EXECUTOR-BACKED TESTS (and covers the 10-08 skips, which are a seed, not the inventory)
+server suite	Platform-only skips equal the manifest	2026-11-21T19:38:52.8224389Z ⛔ test failed: #1163 LIVE — every MCP write tool reaches every body field its REST handler depends on (n printed; unmapped = fail)
+server suite	Platform-only skips equal the manifest	2026-11-21T19:38:52.8291022Z ##[error]Process completed with exit code 1.

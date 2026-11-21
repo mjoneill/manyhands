@@ -1,0 +1,31 @@
+server suite	Run the server suite	2026-11-21T21:19:29.2628726Z not ok 6595 - ⛔ F3 — a malformed or non-boolean config is CLOSED, never enabled by accident
+server suite	Run the server suite	2026-11-21T21:19:29.2694617Z   ---
+server suite	Run the server suite	2026-11-21T21:19:29.2738661Z   duration_ms: 656.240832
+server suite	Run the server suite	2026-11-21T21:19:29.2781625Z   type: 'test'
+server suite	Run the server suite	2026-11-21T21:19:29.2783297Z   location: '/home/runner/work/manyhands/manyhands/tests/whisper-enable-flag.test.mjs:128:1'
+server suite	Run the server suite	2026-11-21T21:19:29.2784695Z   failureType: 'testCodeFailure'
+server suite	Run the server suite	2026-11-21T21:19:29.2785284Z   error: 'fetch failed'
+server suite	Run the server suite	2026-11-21T21:19:29.2785815Z   code: 'ERR_TEST_FAILURE'
+server suite	Run the server suite	2026-11-21T21:19:29.2786328Z   name: 'TypeError'
+server suite	Run the server suite	2026-11-21T21:19:29.2787925Z   stack: |-
+server suite	Run the server suite	2026-11-21T21:19:29.2788836Z     node:internal/deps/undici/undici:15456:13
+server suite	Run the server suite	2026-11-21T21:19:29.2789854Z     process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+server suite	Run the server suite	2026-11-21T21:19:29.2791395Z     async toolNamesWithEnv (file:///home/runner/work/manyhands/manyhands/tests/whisper-enable-flag.test.mjs:79:18)
+server suite	Run the server suite	2026-11-21T21:19:29.2793155Z     async TestContext.<anonymous> (file:///home/runner/work/manyhands/manyhands/tests/whisper-enable-flag.test.mjs:131:19)
+server suite	Run the server suite	2026-11-21T21:19:29.2794486Z     async Test.run (node:internal/test_runner/test:1054:7)
+server suite	Run the server suite	2026-11-21T21:19:29.2795517Z     async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+server suite	Run the server suite	2026-11-21T21:19:29.2796360Z   ...
+server suite	Run the server suite	2026-11-21T21:20:05.9668152Z # tests 6825
+server suite	Run the server suite	2026-11-21T21:20:05.9668358Z # suites 0
+server suite	Run the server suite	2026-11-21T21:20:05.9668555Z # pass 6754
+server suite	Run the server suite	2026-11-21T21:20:05.9668753Z # fail 1
+server suite	Run the server suite	2026-11-21T21:20:05.9668945Z # cancelled 0
+server suite	Run the server suite	2026-11-21T21:20:05.9669149Z # skipped 27
+server suite	Run the server suite	2026-11-21T21:20:05.9669354Z # todo 43
+server suite	Run the server suite	2026-11-21T21:20:05.9669775Z # ⛔ FILE EXITED with code 1: tests/whisper-enable-flag.test.mjs
+server suite	Run the server suite	2026-11-21T21:20:05.9928418Z # ⛔ FILE EXITED with code 1: tests/whisper-enable-flag.test.mjs
+server suite	Run the server suite	2026-11-21T21:20:06.0019257Z ##[error]Process completed with exit code 1.
+server suite	Platform-only skips equal the manifest	2026-11-21T21:22:06.4695468Z ⛔ the suite exited 1, not 0
+server suite	Platform-only skips equal the manifest	2026-11-21T21:22:06.4696299Z ⛔ the TAP reports failures: # fail 1
+server suite	Platform-only skips equal the manifest	2026-11-21T21:22:06.4697770Z ⛔ test failed: ⛔ F3 — a malformed or non-boolean config is CLOSED, never enabled by accident
+server suite	Platform-only skips equal the manifest	2026-11-21T21:22:06.4758621Z ##[error]Process completed with exit code 1.
