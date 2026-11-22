@@ -542,30 +542,36 @@ export function reactionsWindow(state = {}, agent = {}, nowIso = new Date().toIS
 
 // #2029 — the checkpoint moves only past the newest reaction actually handed over (+1 ms, since `since` is inclusive).
 // A failed read, an empty one, or no read at all leaves it where it was, so the next settled wake sees what this one missed.
+// #2029 review (#269) — WHAT IS HANDED is one decision, made once: the OLDEST `REACTIONS_SHOWN_MAX` by time. The prompt
+// renders exactly these and the checkpoint advances past exactly these, so a reaction beyond the cap is never passed by
+// the cursor unshown; it is handed on the next wake. (Ordering own-posts-first is presentation, applied after the cut.)
+const REACTIONS_SHOWN_MAX = 20;
+export function reactionsHanded(read) {
+  if (!read || read.ok !== true || !Array.isArray(read.reactions)) return { handed: [], held: 0 };
+  const byTime = [...read.reactions].sort((a, b) => String(a?.at ?? '').localeCompare(String(b?.at ?? '')));
+  const handed = byTime.slice(0, REACTIONS_SHOWN_MAX);
+  return { handed, held: byTime.length - handed.length };
+}
 export function advanceReactionsCursor(state = {}, read = null) {
-  if (!read || read.ok !== true || !Array.isArray(read.reactions) || !read.reactions.length) return { ...state };
-  const newest = read.reactions.map((r) => Date.parse(r?.at)).filter((t) => !Number.isNaN(t)).reduce((a, b) => Math.max(a, b), -Infinity);
+  const { handed } = reactionsHanded(read);
+  if (!handed.length) return { ...state };
+  const newest = handed.map((r) => Date.parse(r?.at)).filter((t) => !Number.isNaN(t)).reduce((a, b) => Math.max(a, b), -Infinity);
   if (newest === -Infinity) return { ...state };
   const next = new Date(newest + 1).toISOString();
   const cur = typeof state?.reactionsSeenThrough === 'string' ? state.reactionsSeenThrough : null;
   return { ...state, reactionsSeenThrough: cur && cur > next ? cur : next };
 }
 
-const REACTIONS_SHOWN_MAX = 20;
 function renderReactions(read, seatKey) {
   if (!read) return '';
   if (read.ok !== true) return 'Emoji reactions could not be read this wake (the board did not answer): do not conclude there were none. They will be shown on a later wake.';
-  const list = Array.isArray(read.reactions) ? read.reactions : [];
-  if (!list.length) return '';
-  const own = list.filter((r) => r?.postAuthor === seatKey);
-  const others = list.filter((r) => r?.postAuthor !== seatKey);
-  const ordered = [...own, ...others];
-  const shown = ordered.slice(0, REACTIONS_SHOWN_MAX);
+  const { handed, held: more } = reactionsHanded(read);
+  if (!handed.length) return '';
+  const shown = [...handed.filter((r) => r?.postAuthor === seatKey), ...handed.filter((r) => r?.postAuthor !== seatKey)];
   const line = (r) => `- ${r.by} ${r.emoji} on ${r.postAuthor === seatKey ? 'YOUR post' : `${r.postAuthor}'s post`}: "${String(r.excerpt ?? '').slice(0, 80)}"`;
-  const more = ordered.length - shown.length;
   return 'Emoji reactions given in the room since your last wake (a reaction is a small signal, like a nod: it does not ask you to reply):\n'
     + shown.map(line).join('\n')
-    + (more > 0 ? `\n(and ${more} more not shown)` : '')
+    + (more > 0 ? `\n(${more} more will be shown on your next wake)` : '')
     + (read.truncated ? '\n(the board also cut reactions on some older posts)' : '');
 }
 

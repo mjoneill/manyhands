@@ -58,5 +58,15 @@ test('G4 a failed read is said out loud; no reactions and receive=off add nothin
 test('G5 a long window is capped and the cut is said, never silent', () => {
   const many = Array.from({ length: 30 }, (_, i) => rx({ by: `s${i}`, at: `2026-11-22T11:${String(i).padStart(2, '0')}:00.000Z` }));
   const text = systemText(buildMessages({ agent: agent(), wake: { kind: 'channel', posts: [] }, reactions: { ok: true, reactions: many } }));
-  assert.match(text, /and 10 more not shown/);
+  assert.match(text, /10 more will be shown on your next wake/);
+});
+
+test('G6 (review, #269) the checkpoint never passes a reaction the prompt did not show: 25 in the window, 20 shown, the cursor sits at the 20th', () => {
+  const many = Array.from({ length: 25 }, (_, i) => rx({ by: `s${i}`, postAuthor: i === 24 ? 'otto' : 'nell', at: `2026-11-22T11:${String(i).padStart(2, '0')}:00.000Z` }));
+  const read = { ok: true, reactions: many };
+  assert.equal(advanceReactionsCursor({}, read).reactionsSeenThrough, '2026-11-22T11:19:00.001Z', 'only past the 20th oldest, the last one shown');
+  const text = systemText(buildMessages({ agent: agent(), wake: { kind: 'channel', posts: [] }, reactions: read }));
+  assert.match(text, /s19 👍/, 'the 20th is shown');
+  assert.doesNotMatch(text, /s24 👍/, 'the 25th (newest, even on its own post) waits for the next wake');
+  assert.match(text, /5 more will be shown on your next wake/);
 });
