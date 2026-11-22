@@ -26,6 +26,7 @@ import { mountComposerWatch } from './composer-watch.mjs';   // #1366 — a draf
 import { installLeavingGuard, registerComposer } from './leaving-guard.mjs';
 import { recallBlock } from './recall-line.mjs';   // #1689 — what the room has read, under a post that touches it
 import { renderReactionRow, reactionsUrls } from './reactions-view.mjs';   // #449 — the chips under a post
+import { expandComposerCommands } from './composer-commands.mjs';   // #2026 — /shrug
 
 // ── pure helpers (node-testable) ───────────────────────────────────────────
 
@@ -950,7 +951,7 @@ export function mountConversationView(opts = {}) {
       e.preventDefault();
       if (sending) return;
       if (held.length || uploading.length) { guardShown = true; refreshGuard(); return; }   // #1648 — never post without a file still in play
-      const body = ta.value.trim();
+      const body = expandComposerCommands(ta.value.trim());   // #2026 — "/shrug …" is sent as the shrug
       if (!body && pending.length === 0) return;   // body OR attachment required
       sending = true; send.disabled = true;
       let ok = false;
