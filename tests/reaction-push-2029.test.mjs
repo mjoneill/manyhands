@@ -38,7 +38,7 @@ const api = async (base, method, route, body) => {
 };
 const reactionNotes = (stream) => stream.messages.filter((m) => m?.method === 'notifications/claude/channel' && m?.params?.meta?.kind === 'reaction');
 
-async function withRoom(body) {
+async function withRoom(body, { mode = null } = {}) {
   const dsid = `p2029-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
   const store = tmpStore('p2029-store-');
   let exec = null, pair = null, tokensFile = null; const streams = [];
@@ -48,7 +48,9 @@ async function withRoom(body) {
     // Sessions are BOUND by a bearer token (#703), as the live Claude Code seats are; a declared author is not a binding.
     tokensFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'p2029-tok-')), 'seat-tokens.json');
     fs.writeFileSync(tokensFile, JSON.stringify({ tokens: Object.fromEntries(['ada', 'grace', 'otto', 'pip'].map((n) => [`tok-${n}`, { seat: n }])) }));
-    pair = await startPair({ mcpEnv: { SCRUM_SEAT_TOKENS: tokensFile }, _startRest: (o) => startRestServer({ ...o, env: { ...(o.env || {}), ...env } }) });
+    let cfg = null;
+    if (mode) { cfg = path.join(path.dirname(tokensFile), 'channel-config.json'); fs.writeFileSync(cfg, JSON.stringify({ mode, soft: { minMs: 60000, maxMs: 120000 }, hard: { timeoutMs: 300000 }, tokenRing: { timeoutMs: 90000, bearerSeats: ['ada', 'grace'] } })); }
+    pair = await startPair({ mcpEnv: { SCRUM_SEAT_TOKENS: tokensFile, MCP_CHANNEL_CONFIG_REFRESH_MS: '100' }, _startRest: (o) => startRestServer({ ...o, ...(cfg ? { channelConfigFile: cfg } : {}), env: { ...(o.env || {}), ...env } }) });
     const seat = async (name) => {
       const s = await mcpSession(pair.mcp.mcpUrl, name ? { headers: { Authorization: `Bearer tok-${name}` } } : undefined);
       const st = await openChannelStream(pair.mcp.mcpUrl, s.sessionId); streams.push(st);
@@ -103,15 +105,43 @@ test('P3 reacting to your own post sends nothing; P4 no delivery row is written 
   assert.equal(afterN, before, 'the push wrote no delivery row (it bypasses the scheduler)');
 }));
 
-test('P5 a guest author gets no push: the ride-along covers them', { skip: SKIP, timeout: 180000 }, () => withRoom(async ({ base, mcp, seat }) => {
-  const ada = await seat('ada'); const pip = await seat('pip');
+test('P5 a guest author (no bound session) gets no push, and the log says 0 sessions: the ride-along covers them', { skip: SKIP, timeout: 180000 }, () => withRoom(async ({ base, mcp, seat }) => {
+  const ada = await seat('ada');
   assert.equal((await api(base, 'POST', '/api/agents', { seatKey: 'pip', prompt: 'You are pip.', model: { model: 'fake', protocol: 'openai-completions', baseUrl: 'http://127.0.0.1:1' }, residency: 'guest', by: 'ada' })).status, 201);
   const p = await api(base, 'POST', '/api/conversations', { author: 'pip', body: 'a guest post' });
   await api(base, 'POST', `/api/conversations/${p.body.id}/reactions`, { by: 'ada', emoji: '👍' }); await sleep(1200);
-  assert.equal(reactionNotes(pip.st).length, 0, 'the guest seat is not pushed');
-  assert.equal(reactionNotes(ada.st).length, 0);
-  assert.match(mcp.stdoutText(), /reaction push: .*guest/i, 'and the skip is logged, not silent');
+  assert.equal(reactionNotes(ada.st).length, 0, 'the reactor is not pushed');
+  assert.match(mcp.stdoutText(), /reaction push: ada 👍 on pip's post -> 0 bound session\(s\)/, 'nothing to aim at, and the log says so');
 }));
+
+test('P7 (review) a seat WITH an agent record and a bound stream still gets the note: "has a record" is not "is a guest"', { skip: SKIP, timeout: 180000 }, () => withRoom(async ({ base, seat }) => {
+  const otto = await seat('otto'); await seat('grace');
+  assert.equal((await api(base, 'POST', '/api/agents', { seatKey: 'otto', prompt: 'You are otto.', model: { model: 'fake', protocol: 'openai-completions', baseUrl: 'http://127.0.0.1:1' }, residency: 'guest', by: 'grace' })).status, 201);
+  const p = await api(base, 'POST', '/api/conversations', { author: 'otto', body: 'otto has a record and a session' });
+  await api(base, 'POST', `/api/conversations/${p.body.id}/reactions`, { by: 'grace', emoji: '👏' }); await sleep(1200);
+  assert.equal(reactionNotes(otto.st).length, 1);
+}));
+
+test('P8 (review) the push marks nothing served for the author\'s lane; CONTROL: an ordinary post through the scheduler does', { skip: SKIP, timeout: 180000 }, () => withRoom(async ({ base, seat }) => {
+  await seat('ada'); await seat('grace');
+  const lanes = async () => JSON.stringify((await api(base, 'GET', '/api/cursors')).body);
+  const mine = await api(base, 'POST', '/api/conversations', { author: 'ada', body: 'ada posts' });
+  await sleep(800);
+  const before = await lanes();
+  await api(base, 'POST', '/api/conversations', { author: 'grace', body: 'an ordinary post ada receives' }); await sleep(1500);
+  const mid = await lanes();
+  assert.notEqual(mid, before, `CONTROL: the scheduler path marks a lane (else this row proves nothing): ${mid.slice(0, 300)}`);
+  await api(base, 'POST', `/api/conversations/${mine.body.id}/reactions`, { by: 'grace', emoji: '👍' }); await sleep(1500);
+  assert.equal(await lanes(), mid, 'the reaction push marked no lane served');
+}));
+
+test('P9 (review) the note still arrives with the channel in token-ring mode', { skip: SKIP, timeout: 180000 }, () => withRoom(async ({ base, seat }) => {
+  const ada = await seat('ada'); await seat('grace');
+  await sleep(500);
+  const p = await api(base, 'POST', '/api/conversations', { author: 'ada', body: 'in a ring' });
+  await api(base, 'POST', `/api/conversations/${p.body.id}/reactions`, { by: 'grace', emoji: '🎶' }); await sleep(1500);
+  assert.equal(reactionNotes(ada.st).length, 1, `the push bypasses the ring: ${JSON.stringify(ada.st.messages.slice(-2)).slice(0, 300)}`);
+}, { mode: 'token-ring' }));
 
 test('P6 the excerpt is one line, cut on a code-point boundary', { skip: SKIP, timeout: 180000 }, () => withRoom(async ({ base, seat }) => {
   const ada = await seat('ada'); await seat('grace');

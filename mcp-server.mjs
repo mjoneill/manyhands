@@ -2612,7 +2612,9 @@ const hintContent = (id) => `New post ${id}: read it with conversation_get.`;
 //   1. STRAIGHT to the author's transports, never through channelScheduler/broadcastChannel: the scheduler keys its
 //      bookkeeping on meta.message_id and would mark the author's own post push-served, write a fanout delivery for a
 //      resident, and be held by an armed token ring. A direct send records nothing.
-//   2. never to a guest/resident author: their ride-along (guest-once) already carries every reaction.
+//   2. never to a guest/resident author: their ride-along (guest-once) carries every reaction, and a guest holds no BOUND
+//      MCP stream, so the bound-session filter below already excludes it. Deliberately NOT decided by "has an agent
+//      record": slice 3 may give every seat one, and that test would silence the push for Claude Code seats (review).
 //   3. routeHint's refusals (redacted or unreadable = no one); the excerpt is one line, cut on a code-point boundary.
 //   4. no coalescing yet: un-react then re-react is a fresh note.
 // Only BOUND sessions (#703) with an open stream are aimed at: a declared author tag is not an identity. It is a nudge,
@@ -2631,10 +2633,6 @@ async function routeReaction(ev) {
   if (!r.route) return { skip: r.skip };
   const author = r.route.author;
   if (author === by) return { skip: 'a reaction on your own post' };
-  try {
-    const agents = await apiCall('GET', `/api/agents?seat=${encodeURIComponent(author)}`);
-    if (Array.isArray(agents) && agents.length) return { skip: `${author} is a guest/resident seat (its ride-along carries reactions)` };
-  } catch { /* unreadable: fall through; only BOUND sessions are aimed at, and a guest has none */ }
   let body = '';
   try { body = (await apiCall('GET', `/api/conversations/${encodeURIComponent(post)}`))?.body ?? ''; } catch { return { skip: 'the post could not be read' }; }
   const targets = [...transports.entries()].filter(([sid]) => (sessionMeta.get(sid)?.openStreamCount ?? 0) > 0
