@@ -214,17 +214,24 @@ test('A3 NO RETRY: a card read with the executor held 6 s is refused and the exe
   });
 });
 
-test('A4 SHED: with the executor held 10 s, 300 distinct reads at once: a fast 503 exists, every answer is a 200 or a 503, and a route that needs no graph still answers', { skip: SKIP, timeout: 180000 }, async () => {
+// #1680 — CHANGED TEST CONTRACT (2026-11-22, the test's author as contract owner). A4 sent 300 reads at once; on a macOS
+// host, kern.ipc.somaxconn = 128 clamps Node's listen backlog (511), so beyond ~128 pending connections the OS resets them
+// before the server sees them: status-0 `fetch failed` (cause ECONNRESET), measured at 300, never at 150 or 120. That is
+// the HOST's ceiling, not the server's shed. The load is now sized under the smallest backlog we run on, so the shed path
+// is still exercised (fast 503s were seen at 120 and 150) and a reset is again a real failure: a status-0 is NEVER counted
+// as shedding. This is a changed test contract, not evidence that the server is correct at 300.
+const A4_READS = 120;
+test('A4 SHED: with the executor held 10 s, A4_READS (120) distinct reads at once: a fast 503 exists, every answer is a 200 or a 503, and a route that needs no graph still answers', { skip: SKIP, timeout: 180000 }, async () => {
   await stack(async ({ base, proxy }) => {
     proxy.holdMs = 10000; proxy.resetCounts();
-    const flood = distinctReads(base, 300, 'a4');
+    const flood = distinctReads(base, A4_READS, 'a4');
     await sleep(1000);
     const cols = await call(base, 'GET', '/api/columns');
     const rs = await Promise.all(flood);
     const statuses = [...new Set(rs.map((r) => r.status))].sort();
     assert.ok(statuses.every((s) => s === 200 || s === 503), `every answer is a 200 or a 503: got ${statuses.join(',')} (${rs.filter((r) => r.status !== 200 && r.status !== 503).slice(0, 2).map((r) => r.text.slice(0, 100)).join(' | ')})`);
     const fast = rs.filter((r) => r.status === 503 && r.ms < 1500).length;
-    assert.ok(fast >= 1, `the waiting queue is bounded: at least one of 300 reads is refused inside 1.5 s (fastest 503: ${Math.min(...rs.filter((r) => r.status === 503).map((r) => r.ms), Infinity)} ms; ${rs.filter((r) => r.status === 503).length} refusals)`);
+    assert.ok(fast >= 1, `the waiting queue is bounded: at least one of ${A4_READS} reads is refused inside 1.5 s (fastest 503: ${Math.min(...rs.filter((r) => r.status === 503).map((r) => r.ms), Infinity)} ms; ${rs.filter((r) => r.status === 503).length} refusals)`);
     assert.equal(cols.status, 200, 'a route that needs no graph answers during the flood');
     assert.ok(cols.ms < 2000, `and promptly (${cols.ms} ms): the server's event loop is not held by queued graph work`);
     proxy.holdMs = 0; await until(() => proxy.outstanding === 0, 90000);
