@@ -60,6 +60,16 @@ test('commons.html (unscoped) renders the whole feed and posts a message', async
     );
     const after = await page.$$eval('.cv-msg-body', (els) => els.map((e) => e.textContent));
     assert.ok(after.some((b) => b.includes('posted from the full page')), 'posted message rendered: ' + after.join(' | '));
+
+    // #2026 — /shrug: typed in the composer and sent, the room shows the shrug, not the command
+    await page.evaluate(() => { document.querySelector('.cv-input').value = '/shrug no idea'; });
+    await page.click('.cv-send');
+    const shrug = 'no idea ¯\\_(ツ)_/¯';
+    await page.waitForFunction((want) => [...document.querySelectorAll('.cv-msg-body')].some((e) => e.textContent.trim() === want), { timeout: 5000 }, shrug);
+    const bodies2 = await page.$$eval('.cv-msg-body', (els) => els.map((e) => e.textContent));
+    assert.ok(!bodies2.some((t) => t.includes('/shrug')), '#2026: the command itself is never posted');
+    const stored = await (await fetch(`${server.baseUrl}/api/conversations`)).json();
+    assert.ok(stored.some((m) => m.body === shrug), '#2026: the server holds the shrug as typed into the room');
   }, { server: { board }, launch: { headless: 'new' } });
 });
 
