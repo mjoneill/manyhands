@@ -24,7 +24,7 @@ test('#1196B/#1383/#1470/#1558/#1574 the surface is seven reads plus the seat\'s
   // purpose: this pinned list is how a new tool announces itself to review.
   // #1574 D1 — conversation_get joins as a READ (one post by id, through the board's own route). Granted to no agent by this change: a grant is a
   // separate, permission-changing act. Pinned in this list on purpose, as every new tool is.
-  assert.deepEqual(names, ['board_search', 'card_get', 'conversation_get', 'graph_authority', 'graph_query', 'kind_list', 'link_attach', 'link_decide', 'memory_update', 'predicate_list', 'seat_clear', 'seat_declare']);
+  assert.deepEqual(names, ['board_search', 'card_get', 'conversation_get', 'graph_authority', 'graph_query', 'kind_list', 'link_attach', 'link_decide', 'memory_update', 'predicate_list', 'reaction_add', 'reactions_recent', 'seat_clear', 'seat_declare']);   // #2029: reactions_recent (a READ) and reaction_add (the seat's OWN reaction), granted to no agent by this change
   for (const t of BOARD_TOOLS) {
     assert.equal(t.type, 'function');
     assert.ok(t.function.description && t.function.description.length > 20, `${t.function.name} needs a description a model can act on`);

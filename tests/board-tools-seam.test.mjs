@@ -36,6 +36,7 @@ const ARGS = {
   // #1895 — a well-formed link id no board holds: with no graph unit the route answers 503 (it EXISTS), which is all this test asks
   link_decide: { link: 'b'.repeat(64), verdict: 'dismissed' },
   link_attach: { claim: '0b6f6f4e-6a43-4d1e-9a51-2c1f0e1d2a3b', card: 1, reason: 'the seam row' },   // #1905
+  reactions_recent: { since: '2026-11-22T00:00:00Z', mine: true },   // #2029
 };
 
 test('#1196B SEAM: every declared tool reaches a real route — no tool 404s', async () => {
@@ -59,6 +60,7 @@ test('#1196B SEAM: every declared tool reaches a real route — no tool 404s', a
     const cv = await fetch(`${srv.baseUrl}/api/conversations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ author: 'ada', body: 'a post to read by id' }) });
     assert.equal(cv.status, 201);
     ARGS.conversation_get = { id: (await cv.json()).id };
+    ARGS.reaction_add = { id: ARGS.conversation_get.id, emoji: '👍' };   // #2029
 
     // The real transport: no fakes, no injected shapes, no path strings in the
     // test. Whatever the executor asks for is what the server is asked for.
