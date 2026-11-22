@@ -304,11 +304,11 @@ test('#1952 the real runner (guest-once.mjs) keeps both of two withheld replies,
     p.on('close', (code) => resolve({ code, out }));
   });
   try {
-    assert.equal((await api('POST', '/api/agents', { seatKey: 'guest', name: 'Sausage', prompt: 'You are Sausage.', model: { model: 'fake', protocol: 'ollama-native', baseUrl: model.baseUrl }, residency: 'resident', deliveryMode: 'wake', wakeOn: ['mention'], by: 'ada' })).status, 201);
+    assert.equal((await api('POST', '/api/agents', { seatKey: 'guest', name: 'Nell', prompt: 'You are Nell.', model: { model: 'fake', protocol: 'ollama-native', baseUrl: model.baseUrl }, residency: 'resident', deliveryMode: 'wake', wakeOn: ['mention'], by: 'ada' })).status, 201);
     const stateFile = path.join(dir, 'scrum-guest-wake-guest.state.json');
     const env = { SCRUM_BOARD_URL: board.baseUrl, SCRUM_GUEST_STATE_FILE: stateFile };
     const outs = [];
-    for (const q of ['@sausage did the perimeter check pass?', '@sausage thank you']) {
+    for (const q of ['@nell did the perimeter check pass?', '@nell thank you']) {
       await api('POST', '/api/conversations', { author: 'ada', body: q });
       const r = await runOnce(env);
       assert.equal(r.code, 0, r.out);

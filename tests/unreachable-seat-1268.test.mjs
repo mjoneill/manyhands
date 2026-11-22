@@ -1,7 +1,7 @@
 /**
  * #1268 ruling 3 — AND THE INVERSION THAT MEASURING IT PRODUCED.
  *
- * The ruling, from @bubbles, the seat it happens to:
+ * The ruling, from the resident seat it happens to:
  *
  *   "all-unchecked is a retired seat wearing an invited one's clothes, and the
  *    page should say 'unreachable' out loud — because the only seat that will
@@ -21,7 +21,7 @@
  * A person unchecking every box is trying to let a seat rest. They are told it
  * saved. The seat still wakes on every mention, and nothing anywhere says so.
  *
- * ⭐ That is worse than the state @bubbles feared, because it is the failure of
+ * ⭐ That is worse than the state that seat feared, because it is the failure of
  * an attempt at consideration: the operator did the thing that means "stop
  * waking this colleague", got a success message, and it did nothing.
  *

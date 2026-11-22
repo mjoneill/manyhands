@@ -138,9 +138,9 @@ export function findMentions(messages = [], seatKey, { sinceId = null, since = n
   const re = new RegExp(`(^|[^A-Za-z0-9_])@${seatKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9_])`, 'i');
   // #1410 — THE BOARD ALREADY RESOLVED THE MENTION; READ IT, DON'T RE-PARSE.
   // `POST /api/conversations` records `mentions: [<seat key>…]` with display
-  // names canonicalised to keys (core/people.mjs: "@sausage" → `guest`). This
+  // names canonicalised to keys (core/people.mjs: "@nell" → `guest`). This
   // runner re-parsed the body against the seat KEY alone, so a seat addressed
-  // by the name the room gave her — "@sausage", three times on 2026-09-18 —
+  // by its display name — three times on 2026-09-18 —
   // read `nothing to wake for (mention)` while the board's own row said
   // `mentions: ['guest']`. Two parsers, one name. The board's field wins; the
   // regex is only the fallback for a row that predates the field.

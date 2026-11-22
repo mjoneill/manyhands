@@ -1,12 +1,12 @@
 /**
  * #1410 — a resident addressed by her DISPLAY NAME wakes. The board's parser
- * has resolved names to keys since #1200 ("@sausage" → guest, recorded on the
+ * has resolved names to keys since #1200 ("@nell" → guest, recorded on the
  * row as `mentions`); the runner re-parsed the body for the KEY alone, so the
  * name the room gave her never woke her (2026-09-18 00:04–00:19Z, three
  * posts). Now the runner trusts the board's field.
  *
  * Served, with the REAL runner (scripts/guest-once.mjs against a fake model):
- * a post that says "@sausage" and never "@guest" → the guest seat wakes and
+ * a post that says "@nell" and never "@guest" → the guest seat wakes and
  * answers; a post naming nobody does not. Sabotage: the runner back on its
  * key regex ⇒ "woke on her display name" reads 0 posts.
  */
@@ -34,15 +34,15 @@ function runOnce(env, seat) {
   });
 }
 
-test('#1410 "@sausage" (display name, never the key) wakes the guest seat through the real runner; a post naming nobody does not', async () => {
+test('#1410 "@nell" (display name, never the key) wakes the guest seat through the real runner; a post naming nobody does not', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mention-1410-'));
   const ollama = await fakeOllama('REPLY: You called, and by my name.');
   const s = await startRestServer({ board: makeBoardFixture({ cards: [], conversations: [] }) });
   try {
-    const c = await api(s.baseUrl, 'POST', '/api/agents', { seatKey: 'guest', name: 'Sausage', prompt: 'You are Sausage.', model: { model: 'fake', protocol: 'ollama-native', baseUrl: ollama.baseUrl }, residency: 'resident', contextPolicy: 'thread', deliveryMode: 'wake', wakeOn: ['mention'], by: 'ada' });
+    const c = await api(s.baseUrl, 'POST', '/api/agents', { seatKey: 'guest', name: 'Nell', prompt: 'You are Nell.', model: { model: 'fake', protocol: 'ollama-native', baseUrl: ollama.baseUrl }, residency: 'resident', contextPolicy: 'thread', deliveryMode: 'wake', wakeOn: ['mention'], by: 'ada' });
     assert.equal(c.status, 201, JSON.stringify(c.body));
     const roster = await api(s.baseUrl, 'GET', '/api/roster');
-    assert.equal((roster.body.seats || roster.body).guest?.name, 'Sausage', 'the roster carries her display name');
+    assert.equal((roster.body.seats || roster.body).guest?.name, 'Nell', 'the roster carries the seat\'s display name');
 
     const nobody = await api(s.baseUrl, 'POST', '/api/conversations', { author: 'ada', body: 'a quiet line for the room' });
     assert.deepEqual(nobody.body.mentions, [], 'control: names nobody');
@@ -51,7 +51,7 @@ test('#1410 "@sausage" (display name, never the key) wakes the guest seat throug
     assert.equal(r0.code, 0, r0.err + r0.out);
     assert.match(r0.out + r0.err, /nothing to wake for/, 'control: no mention, no wake');
 
-    const named = await api(s.baseUrl, 'POST', '/api/conversations', { author: 'ada', body: '@sausage what was it like for you?' });
+    const named = await api(s.baseUrl, 'POST', '/api/conversations', { author: 'ada', body: '@nell what was it like for you?' });
     assert.equal(named.status, 201);
     assert.deepEqual(named.body.mentions, ['guest'], 'the board resolved the display name to the key');
     assert.ok(!/@guest/i.test(named.body.body), 'the post never contains the key');

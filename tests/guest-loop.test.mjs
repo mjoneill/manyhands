@@ -37,16 +37,16 @@ const MSGS = [
   { id: 'm6', author: 'board', body: '🔔 ada released #1 “ask @gizmo about it”', createdAt: '2026-09-06T10:05:00Z' },
 ];
 
-// #1410 — the board resolves display names to keys ("@sausage" → guest) and
+// #1410 — the board resolves display names to keys ("@nell" → guest) and
 // records `mentions` on the row; the runner must READ that, not re-parse the
 // body for the key. The owner called the guest seat by the name the room gave
 // her three times on 2026-09-18 and she never woke.
 const NAMED = [
-  { id: 'n1', author: 'ada', body: '@sausage what was it like?', mentions: ['guest'], createdAt: '2026-09-18T00:04:35Z' },
-  { id: 'n2', author: 'ada', body: 'not hearing from @sausage', mentions: ['guest'], createdAt: '2026-09-18T00:08:33Z' },
+  { id: 'n1', author: 'ada', body: '@nell what was it like?', mentions: ['guest'], createdAt: '2026-09-18T00:04:35Z' },
+  { id: 'n2', author: 'ada', body: 'not hearing from @nell', mentions: ['guest'], createdAt: '2026-09-18T00:08:33Z' },
   { id: 'n3', author: 'ada', body: 'this mentions nobody', mentions: [], createdAt: '2026-09-18T00:09:00Z' },
-  { id: 'n4', author: 'guest', body: '@sausage myself', mentions: ['guest'], createdAt: '2026-09-18T00:09:30Z' },
-  { id: 'n5', author: 'board', body: '🔔 released “ask @sausage”', mentions: ['guest'], createdAt: '2026-09-18T00:09:40Z' },
+  { id: 'n4', author: 'guest', body: '@nell myself', mentions: ['guest'], createdAt: '2026-09-18T00:09:30Z' },
+  { id: 'n5', author: 'board', body: '🔔 released “ask @nell”', mentions: ['guest'], createdAt: '2026-09-18T00:09:40Z' },
   { id: 'n6', author: 'ada', body: 'a row from before the field existed: @guest hi', createdAt: '2026-09-18T00:10:00Z' },
   { id: 'n7', author: 'ada', body: 'text says @guest but the board resolved nobody', mentions: [], createdAt: '2026-09-18T00:10:30Z' },
 ];
@@ -54,18 +54,18 @@ const NAMED = [
 // address agents; the limit is a per-seat number). A pair of residents may
 // spend N reply-wakes on each other per hour; a human or terminal seat naming
 // a resident is never capped. Cap 0 is the retired rule 1 exactly.
-const RES = new Set(['guest', 'bubbles']);
+const RES = new Set(['guest', 'otto']);
 const CHAIN = [
-  { id: 'c1', author: 'ada',     body: '@sausage what was it like?',            mentions: ['guest'],            createdAt: '2026-09-18T00:40:00Z' },   // a human ⇒ wakes, never capped
-  { id: 'c2', author: 'bubbles', body: '@sausage just so nobody has to guess…', mentions: ['guest'],            createdAt: '2026-09-18T00:41:50Z' },   // pair spend before: 0 ⇒ wakes
-  { id: 'c3', author: 'bubbles', body: '@sausage @ada — both of you',           mentions: ['guest', 'ada'],     createdAt: '2026-09-18T00:42:00Z' },   // spend 1 ⇒ wakes
-  { id: 'c4', author: 'cy',      body: '@sausage from a terminal seat',          mentions: ['guest'],            createdAt: '2026-09-18T00:43:00Z' },   // terminal seat ⇒ wakes, never capped
-  { id: 'c5', author: 'bubbles', body: '@sausage @bubbles we are separate',     mentions: ['guest', 'bubbles'], createdAt: '2026-09-18T00:44:04Z' },   // spend 2 ⇒ wakes (the third)
-  { id: 'c6', author: 'bubbles', body: '@sausage once more',                    mentions: ['guest'],            createdAt: '2026-09-18T00:45:00Z' },   // spend 3 ⇒ CAPPED
-  { id: 'c7', author: 'ada',     body: '@sausage are you there?',               mentions: ['guest'],            createdAt: '2026-09-18T00:46:00Z' },   // a human restarts her ⇒ wakes
-  { id: 'c8', author: 'guest',   body: '@bubbles yes',                          mentions: ['bubbles'],          createdAt: '2026-09-18T00:46:30Z' },   // guest's own post — never a wake for guest; counts toward the pair
-  { id: 'c9', author: 'bubbles', body: '@sausage good',                         mentions: ['guest'],            createdAt: '2026-09-18T00:47:00Z' },   // spend 4 in the hour ⇒ CAPPED
-  { id: 'c10', author: 'bubbles', body: '@sausage an hour later',               mentions: ['guest'],            createdAt: '2026-09-18T01:48:00Z' },   // the hour slid: spend inside (00:48, 01:48] = 0 ⇒ wakes
+  { id: 'c1', author: 'ada',     body: '@nell what was it like?',            mentions: ['guest'],            createdAt: '2026-09-18T00:40:00Z' },   // a human ⇒ wakes, never capped
+  { id: 'c2', author: 'otto', body: '@nell just so nobody has to guess…', mentions: ['guest'],            createdAt: '2026-09-18T00:41:50Z' },   // pair spend before: 0 ⇒ wakes
+  { id: 'c3', author: 'otto', body: '@nell @ada — both of you',           mentions: ['guest', 'ada'],     createdAt: '2026-09-18T00:42:00Z' },   // spend 1 ⇒ wakes
+  { id: 'c4', author: 'cy',      body: '@nell from a terminal seat',          mentions: ['guest'],            createdAt: '2026-09-18T00:43:00Z' },   // terminal seat ⇒ wakes, never capped
+  { id: 'c5', author: 'otto', body: '@nell @otto we are separate',     mentions: ['guest', 'otto'], createdAt: '2026-09-18T00:44:04Z' },   // spend 2 ⇒ wakes (the third)
+  { id: 'c6', author: 'otto', body: '@nell once more',                    mentions: ['guest'],            createdAt: '2026-09-18T00:45:00Z' },   // spend 3 ⇒ CAPPED
+  { id: 'c7', author: 'ada',     body: '@nell are you there?',               mentions: ['guest'],            createdAt: '2026-09-18T00:46:00Z' },   // a human restarts her ⇒ wakes
+  { id: 'c8', author: 'guest',   body: '@otto yes',                          mentions: ['otto'],          createdAt: '2026-09-18T00:46:30Z' },   // guest's own post — never a wake for guest; counts toward the pair
+  { id: 'c9', author: 'otto', body: '@nell good',                         mentions: ['guest'],            createdAt: '2026-09-18T00:47:00Z' },   // spend 4 in the hour ⇒ CAPPED
+  { id: 'c10', author: 'otto', body: '@nell an hour later',               mentions: ['guest'],            createdAt: '2026-09-18T01:48:00Z' },   // the hour slid: spend inside (00:48, 01:48] = 0 ⇒ wakes
 ];
 test('#1411 the PAIR CAP: a pair of residents wakes each other N times an hour, then not, until the hour slides; humans and terminal seats are never capped; cap 0 is rule 1; no resident set = no cap', () => {
   assert.deepEqual(findMentions(CHAIN, 'guest', { residents: RES, perHour: 3 }).map((m) => m.id), ['c1', 'c2', 'c3', 'c4', 'c5', 'c7', 'c10'],
@@ -75,7 +75,7 @@ test('#1411 the PAIR CAP: a pair of residents wakes each other N times an hour, 
     'cap 0 = the retired rule 1: no resident-authored mention wakes, humans and terminal seats do');
   assert.deepEqual(findMentions(CHAIN, 'guest').map((m) => m.id), ['c1', 'c2', 'c3', 'c4', 'c5', 'c6', 'c7', 'c9', 'c10'],
     'control: with no resident set handed in, the cap is off and every mention wakes');
-  assert.equal(pairSpend(CHAIN, 'bubbles', 'guest', { residents: RES, before: '2026-09-18T00:47:00Z', excludeId: 'c9' }), 5, 'c2, c3, c5, c6 by bubbles naming guest + c8 by guest naming bubbles; c1/c4/c7 are not the pair');
+  assert.equal(pairSpend(CHAIN, 'otto', 'guest', { residents: RES, before: '2026-09-18T00:47:00Z', excludeId: 'c9' }), 5, 'c2, c3, c5, c6 by otto naming guest + c8 by guest naming otto; c1/c4/c7 are not the pair');
 });
 
 test('#1410 findMentions trusts the board\'s resolved `mentions` — a seat addressed by her display NAME wakes; the key regex is only the fallback for rows without the field', () => {
@@ -132,7 +132,7 @@ test('#1201/#1420 a model failure → NO reply, one ledger row saying why, and O
     post: async (b) => { posts.push(b); return { id: 'f-1' }; }, ledgerFile: file });
   assert.equal(r.posted, false); assert.equal(r.reason, 'model-failed');
   assert.equal(ledgerRows(file).length, 1); assert.equal(ledgerRows(file)[0].ok, false);
-  // #1420 — Sausage woke on a job at 15:37Z on 2026-09-19, the call died
+  // #1420 — Nell woke on a job at 15:37Z on 2026-09-19, the call died
   // `fetch failed` after 7.7 min, the wake was marked answered and NOBODY was
   // told for 77 minutes. The failure is still not an answer (posted:false, the
   // ledger says why), but it is SAID once, by the seat, where the mention came
@@ -272,26 +272,26 @@ test('#1201 the wake cursor advances only on a settled outcome: posted or a defi
 // day, each correction a paid call. Live rulings that name the seat (or its
 // role, or its display name) reach every wake, above the change rows.
 const DECISIONS = [
-  { id: 'fd13308e-aaaa', statement: 'From the 2026-09-24 planning, the Scrum Master of record is the OpenRouter resident seat (bubbles).', decidedBy: 'ada', decidedAt: '2026-09-21T13:09:56Z', constrains: ['roles', 'scrum-master'], reopensIf: 'the owner says otherwise', live: true },
+  { id: 'fd13308e-aaaa', statement: 'From the 2026-09-24 planning, the Scrum Master of record is the OpenRouter resident seat (otto).', decidedBy: 'ada', decidedAt: '2026-09-21T13:09:56Z', constrains: ['roles', 'scrum-master'], reopensIf: 'the owner says otherwise', live: true },
   { id: '11111111-bbbb', statement: 'Deploys need a second seat\'s review.', decidedBy: 'pip', decidedAt: '2026-09-10T00:00:00Z', constrains: ['deploy'], live: true },
-  { id: '22222222-cccc', statement: 'bubbles opens the retro (superseded).', decidedBy: 'pip', decidedAt: '2026-09-19T00:00:00Z', constrains: ['ceremonies'], live: false },
+  { id: '22222222-cccc', statement: 'otto opens the retro (superseded).', decidedBy: 'pip', decidedAt: '2026-09-19T00:00:00Z', constrains: ['ceremonies'], live: false },
   { id: '33333333-dddd', statement: 'The PO holds Planned.', decidedBy: 'owner', decidedAt: '2026-09-13T00:00:00Z', constrains: ['po'], live: true },
 ];
 
 test('#1436 bindingRulings — live decisions naming the seat, its held role, or its display name; superseded ones excluded; newest first', () => {
-  const mine = bindingRulings(DECISIONS, { seatKey: 'bubbles' });
+  const mine = bindingRulings(DECISIONS, { seatKey: 'otto' });
   assert.deepEqual(mine.map((d) => d.id), ['fd13308e-aaaa'], 'the live ruling naming the seat, not the superseded one, not the unrelated ones');
   const byRole = bindingRulings(DECISIONS, { seatKey: 'pip', roleKey: 'po' });
   assert.deepEqual(byRole.map((d) => d.id), ['33333333-dddd'], 'a ruling that constrains the seat\'s HELD role binds it');
   const byName = bindingRulings(DECISIONS, { seatKey: 'x', displayName: 'Scrum Master' });
   assert.deepEqual(byName.map((d) => d.id), ['fd13308e-aaaa']);
   assert.deepEqual(bindingRulings(DECISIONS, { seatKey: 'nobody' }), []);
-  assert.deepEqual(bindingRulings(null, { seatKey: 'bubbles' }), []);
+  assert.deepEqual(bindingRulings(null, { seatKey: 'otto' }), []);
 });
 
 test('#1436 buildMessages carries the binding rulings ABOVE the change rows, as settled rules with what reopens them', () => {
   const changes = [{ at: '2026-09-21T20:00:00Z', kind: 'card', op: 'update', shortId: 1, title: 'unrelated' }];
-  const rulings = bindingRulings(DECISIONS, { seatKey: 'bubbles' });
+  const rulings = bindingRulings(DECISIONS, { seatKey: 'otto' });
   const m = buildMessages({ agent: AGENT, wake: MSGS[1], changes, rulings });
   const user = m[1].content;
   assert.match(user, /Rulings that bind this seat/);

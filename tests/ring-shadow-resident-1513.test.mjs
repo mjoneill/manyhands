@@ -12,7 +12,7 @@ import { residentSlotShadow } from '../core/ring-shadow.mjs';
 
 const T = (s) => `2026-09-28T22:${s}Z`;
 const ev = (state, at, extra = {}) => ({ state, at: T(at), ...extra });
-const slot = { seat: 'bubbles', cycle: 3, openedAt: T('44:26.000'), deadline: T('49:26.000') };
+const slot = { seat: 'otto', cycle: 3, openedAt: T('44:26.000'), deadline: T('49:26.000') };
 
 test('a slot that expired with a live turn inside it says so, and how long the turn had been running', () => {
   const r = residentSlotShadow({
