@@ -230,5 +230,6 @@
   "tests/seat-inbox-rest-1902.test.mjs",
   "tests/reactions-449.test.mjs",
   "tests/reactions-commons-449.test.mjs",
-  "tests/guest-once-reactions-2029.test.mjs"
+  "tests/guest-once-reactions-2029.test.mjs",
+  "tests/reaction-push-2029.test.mjs"
 ]

@@ -13783,7 +13783,12 @@ async function handleReactToConversation(req, res, id) {
     const live = !!(now.reactions.get(id) ?? []).find((c) => c.emoji === emoji)?.by.includes(by);
     if (live === on) return sendJSON(res, 200, { id, reactions: now.reactions.get(id) ?? [] });
     const w = await SMALLKINDS.writeReaction(reactionIntention({ actor: graphActor(by), iri: reactionIri(), postId: id, seat: by, emoji, state: on ? 'on' : 'off', at: new Date().toISOString() }));
-    if (w.status === 'APPLIED') return await answer();
+    if (w.status === 'APPLIED') {
+      // #2029 slice 2 — an ADD is pushed to the post's author (MCP reads the post; no text travels). Fire and forget: the
+      // reaction is already written, and the durable paths carry it whether or not this nudge lands.
+      if (on && MCP_NOTIFY_URL) fetch(MCP_NOTIFY_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ event: { kind: 'reaction', post: id, emoji, by } }), signal: AbortSignal.timeout(5000) }).catch(() => {});
+      return await answer();
+    }
     if (w.status === 'PRECONDITION_FAILED') return sendJSON(res, 404, { error: `post ${id} is no longer a live post in the graph`, code: 'NO_SUCH_POST' });
     if (w.status === 'UNAVAILABLE') return sendJSON(res, 503, { error: `the graph could not be written, so the reaction was refused: ${w.reason}`, code: 'GRAPH_UNAVAILABLE' });
     return sendJSON(res, 500, { error: `the graph refused the reaction: ${w.reason ?? 'rejected'}` });

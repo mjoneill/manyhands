@@ -2607,6 +2607,50 @@ async function routeHint(id) {
 }
 const hintContent = (id) => `New post ${id}: read it with conversation_get.`;
 
+// #2029 slice 2 — A REACTION ON YOUR POST IS PUSHED TO YOU, and to no one else. REST sends an id-only event (post, emoji,
+// by: no text, decision 3dc9df18's rule); this reads the post itself. Review conditions (#2029, 2026-11-22):
+//   1. STRAIGHT to the author's transports, never through channelScheduler/broadcastChannel: the scheduler keys its
+//      bookkeeping on meta.message_id and would mark the author's own post push-served, write a fanout delivery for a
+//      resident, and be held by an armed token ring. A direct send records nothing.
+//   2. never to a guest/resident author: their ride-along (guest-once) already carries every reaction.
+//   3. routeHint's refusals (redacted or unreadable = no one); the excerpt is one line, cut on a code-point boundary.
+//   4. no coalescing yet: un-react then re-react is a fresh note.
+// Only BOUND sessions (#703) with an open stream are aimed at: a declared author tag is not an identity. It is a nudge,
+// never the only copy: the room-update hook and the guest ride-along carry every reaction durably.
+export function reactionExcerpt(body, max = 60) {
+  const one = String(body ?? '').replace(/\s+/g, ' ').trim();
+  const cps = Array.from(one);
+  return cps.length > max ? `${cps.slice(0, max).join('').trimEnd()}…` : one;
+}
+async function routeReaction(ev) {
+  const post = typeof ev?.post === 'string' ? ev.post : '';
+  const emoji = typeof ev?.emoji === 'string' ? ev.emoji : '';
+  const by = typeof ev?.by === 'string' ? ev.by : '';
+  if (!post || !emoji || !by) return { skip: 'malformed reaction event' };
+  const r = await routeHint(post);
+  if (!r.route) return { skip: r.skip };
+  const author = r.route.author;
+  if (author === by) return { skip: 'a reaction on your own post' };
+  try {
+    const agents = await apiCall('GET', `/api/agents?seat=${encodeURIComponent(author)}`);
+    if (Array.isArray(agents) && agents.length) return { skip: `${author} is a guest/resident seat (its ride-along carries reactions)` };
+  } catch { /* unreadable: fall through; only BOUND sessions are aimed at, and a guest has none */ }
+  let body = '';
+  try { body = (await apiCall('GET', `/api/conversations/${encodeURIComponent(post)}`))?.body ?? ''; } catch { return { skip: 'the post could not be read' }; }
+  const targets = [...transports.entries()].filter(([sid]) => (sessionMeta.get(sid)?.openStreamCount ?? 0) > 0
+    && (seatRegistry.seatForSession(sid) ?? sessionMeta.get(sid)?.seat ?? null) === author);
+  const notification = {
+    jsonrpc: '2.0',
+    method: 'notifications/claude/channel',
+    params: {
+      content: `${by} reacted ${emoji} to your post: "${reactionExcerpt(body)}"`,
+      meta: { chat_id: 'commons', message_id: post, kind: 'reaction', post, emoji, by },   // scalars only (#206)
+    },
+  };
+  for (const [, t] of targets) Promise.resolve().then(() => t.send(notification)).catch((e) => console.error(`reaction push: send failed: ${e.message}`));
+  return { author, sent: targets.length };
+}
+
 const whisperTick = async () => {
   // Read once per tick, before the gate, so `lastActivityAt` is a pure getter
   // over a value already in hand — tendingTick stays synchronous in its
@@ -3988,6 +4032,13 @@ const httpServer = http.createServer(async (req, res) => {
       }
       let payload;
       try { payload = raw ? JSON.parse(raw) : {}; } catch { payload = {}; }
+      // #2029 slice 2 — a reaction event is not a post: it is handled here, before the post branch, and never fanned out.
+      if (payload && payload.event && payload.event.kind === 'reaction') {
+        const r = await routeReaction(payload.event);
+        console.log(r.skip ? `reaction push: skipped (${r.skip})` : `reaction push: ${payload.event.by} ${payload.event.emoji} on ${r.author}'s post -> ${r.sent} bound session(s)`);
+        res.writeHead(204);
+        return res.end();
+      }
       if (payload && payload.conversation && payload.conversation.id) {
         let target = payload.conversation;
         if (isIdOnlyHint(target)) {
