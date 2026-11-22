@@ -35,7 +35,7 @@ const HEAD = git('rev-parse', 'HEAD');
 const LOG = (error) => [
   `server suite\tRun the server suite\t2026-11-21T00:00:00.0Z not ok 7 - G1 every code is registered`,
   `server suite\tRun the server suite\t2026-11-21T00:00:00.0Z   ---`,
-  `server suite\tRun the server suite\t2026-11-21T00:00:00.0Z   location: '/home/runner/work/r/r/tests/guard.test.mjs:1:1'`,
+  `server suite\tRun the server suite\t2026-11-21T00:00:00.0Z   location: '/__w/r/r/tests/guard.test.mjs:1:1'`,
   `server suite\tRun the server suite\t2026-11-21T00:00:00.0Z   error: '${error}'`,
   `server suite\tRun the server suite\t2026-11-21T00:00:00.0Z   ...`,
   `server suite\tRun the server suite\t2026-11-21T00:00:00.0Z # fail 1`,
