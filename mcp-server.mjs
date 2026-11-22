@@ -1517,7 +1517,8 @@ function buildMcpServer() {
   });
 
   // ── #449 — REACTIONS on a commons post ──────────────────────────────────
-  const REACTION_EMOJI = z.enum(REACTION_PALETTE).describe(`One of ${REACTION_PALETTE.join(' ')}`);
+  // #2026 — any single emoji; the server also accepts a bare symbol (❤) and stores its emoji form (❤️)
+  const REACTION_EMOJI = z.string().min(1).describe(`Exactly one emoji, for example ${REACTION_PALETTE.join(' ')} or 🐊`);
   mcp.registerTool('reaction_add', {
     description: 'React to a commons post with an emoji (#449), the way a reader does under a message. It never edits the post. '
       + 'Adding a reaction you already gave is a no-op. Returns the post\'s reactions after the write, as [{emoji, by}]. '

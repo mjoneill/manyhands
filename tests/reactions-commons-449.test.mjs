@@ -6,6 +6,8 @@
  *   E1  REACT FROM THE PAGE: ☺+ → 👍 on a seat's post; the chip shows, marked as yours, and the server holds it.
  *   E2  ANOTHER'S REACTION ARRIVES: a seat reacts through REST; the page shows the chip within a poll tick, names it, no reload.
  *   E3  TAKE YOURS BACK: clicking your own chip removes your reaction, on screen and on the server.
+ *   E4  ANY EMOJI, BY NAME (#2026): ☺+ → ⋯ opens the full set; typing "croc" leaves only 🐊 on screen; a pick reacts.
+ *   E5  THE ROOM'S TOP SIX (#2026): the picker's first row leads with the room's own most-used emoji.
  *   E0  AN UNTOUCHED POST SHOWS NO EMOJI: before anyone reacts, the palette is NOT on screen (computed style, not the
  *       `hidden` flag): only the faded ☺+ shows. ☺+ opens it; a pick closes it again. At the 2026-11-22 demo the
  *       open palette under every post read as six reactions already applied, because a `display` rule beat `hidden`.
@@ -81,6 +83,35 @@ test('E1–E3 the banana test, rehearsed: react from the page, see another seat\
       assert.ok(gone, 'E3: your chip is gone from the page');
       const after3 = await json(await fetch(`${base}/api/conversations/${made.id}`));
       assert.deepEqual(after3.reactions, [{ emoji: '😂', by: [other] }], 'E3: and from the server; the other seat\'s stays');
+
+      // E4 (#2026) — ANY EMOJI, BY NAME: ☺+ → ⋯ opens a search over the full set; typing narrows what is ON SCREEN; a pick reacts
+      await page.click(`${msg} .cv-reaction-add`);
+      assert.equal(await shown(`${msg} .cv-reaction-browse`), false, 'E4: the full set stays closed until ⋯');
+      await page.click(`${msg} .cv-reaction-more`);
+      const visiblePicks = () => page.$$eval(`${msg} .cv-reaction-grid .cv-reaction-pick`, (bs) => bs.filter((b) => {
+        const r = b.getBoundingClientRect(); return getComputedStyle(b).display !== 'none' && r.width > 0 && r.height > 0;
+      }).map((b) => b.dataset.emoji));
+      assert.ok(await until(async () => (await visiblePicks()).length > 1000, 10000), 'E4: ⋯ shows the full set');
+      // reachable, not merely rendered: the search box sits inside the feed's visible box (a popover that grew upward out
+      // of the scrolling feed was cut off at its top edge, where no scrolling can reach)
+      const inFeed = await page.$eval(`${msg} .cv-reaction-search`, (el) => {
+        const feed = el.closest('.cv-feed'); const r = el.getBoundingClientRect(); const f = feed.getBoundingClientRect();
+        return r.top >= f.top - 1 && r.bottom <= f.bottom + 1 && r.height > 0;
+      });
+      assert.equal(inFeed, true, 'E4: the search box is inside the feed\'s visible area, so it can be typed in');
+      assert.equal(await page.$eval(`${msg} .cv-reaction-grid .cv-reaction-pick`, (b) => b.dataset.emoji), '😀', 'E4: the full set opens on faces, not symbols');
+      await page.type(`${msg} .cv-reaction-search`, 'croc');
+      assert.deepEqual(await visiblePicks(), ['🐊'], 'E4: typing "croc" leaves only 🐊 on screen');
+      await page.$$eval(`${msg} .cv-reaction-grid .cv-reaction-pick`, (bs) => bs.find((b) => b.dataset.emoji === '🐊').click());
+      assert.ok(await until(() => page.$$eval(`${msg} .cv-reaction-mine`, (bs) => bs.some((b) => b.dataset.emoji === '🐊')), 10000), 'E4: the 🐊 chip shows, marked as yours');
+      assert.equal(await shown(`${msg} .cv-reaction-picker`), false, 'E4: a pick closes the picker');
+      const after4 = await json(await fetch(`${base}/api/conversations/${made.id}`));
+      assert.deepEqual(after4.reactions.map((c) => c.emoji), ['😂', '🐊'], 'E4: the server holds an emoji from beyond the six');
+
+      // E5 (#2026) — THE ROOM'S TOP SIX: 😂 and 🐊 are the room's only live reactions, one each; the tie goes to 🐊, used last
+      const topRow = () => page.$$eval(`${msg} .cv-reaction-top .cv-reaction-pick`, (bs) => bs.map((b) => b.dataset.emoji));
+      assert.ok(await until(async () => (await topRow()).join('') === '🐊😂👍❤️🤷👏', 10000),
+        `E5: the first row leads with the room's own emoji, padded from the default six (got ${(await topRow()).join('')})`);
     }, { server: { board: makeBoardFixture(), env: { SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: exec.baseUrl, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_GRAPH_UNIT_SMALLKINDS: '1' } } });
   } finally { await killExecutor(exec); fs.rmSync(store, { recursive: true, force: true }); }
 });

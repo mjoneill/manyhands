@@ -55,9 +55,10 @@ test('V4 THE PICKER: opens the palette, a pick reacts or removes yours and close
   assert.equal(picker.hidden, true, 'closed until asked');
   add.click();
   assert.equal(picker.hidden, false);
-  assert.deepEqual([...picker.querySelectorAll('button')].map((b) => b.textContent), [...REACTION_PALETTE]);
+  // with no room history the first row is the default six (#2026 adds a "more" button after them, tested in its own file)
+  assert.deepEqual([...picker.querySelectorAll('.cv-reaction-top .cv-reaction-pick')].map((b) => b.textContent), [...REACTION_PALETTE]);
   // by dataset, not a [data-emoji="…"] selector: jsdom's selector engine misses astral-plane characters like 👀 (browsers don't)
-  const pick = (emoji) => [...picker.querySelectorAll('button')].find((b) => b.dataset.emoji === emoji);
+  const pick = (emoji) => [...picker.querySelectorAll('.cv-reaction-pick')].find((b) => b.dataset.emoji === emoji);
   pick('👀').click();
   assert.equal(picker.hidden, true, 'a pick closes it');
   add.click();

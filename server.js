@@ -54,7 +54,7 @@ import {
   Q_POSITION,   // #1643 — the executor's commit marker, read for the checks' stated currency
 } from './core/logborn-unit.mjs';
 import { createSmallkindsUnit, wakeCreateIntention, wakeIri, REACTION_PALETTE, reactionIntention, reactionIri } from './core/smallkinds-unit.mjs';   // #1624, #449
-import { REACTION_BATCH_MAX } from './core/reaction-palette.mjs';   // #449
+import { REACTION_BATCH_MAX, normalizeReactionEmoji, topEmoji, TOP_DAYS, TOP_DAYS_MAX } from './core/reaction-palette.mjs';   // #449, #2026
 import { BOARD_TOOLS } from './core/board-tools.mjs';
 import { resolveAttachedTo } from './core/attached-to.mjs'; // #761
 import { withAttachmentFence, FENCE_BUSY, DEFAULT_WAIT_MS as DEFAULT_FENCE_WAIT_MS } from './core/attachment-fence.mjs';   // #1648
@@ -13763,7 +13763,9 @@ async function handleReactToConversation(req, res, id) {
     if (!body || typeof body !== 'object' || Array.isArray(body)) return sendJSON(res, 400, { error: 'the body must be a JSON object: {by, emoji, on?}' });
     const by = typeof body.by === 'string' ? body.by.trim() : '';
     if (!by) return sendJSON(res, 400, { error: 'by is required: the seat (or person) reacting. Declared, not authenticated.', code: 'INVALID_REACTOR' });
-    if (!REACTION_PALETTE.includes(body.emoji)) return sendJSON(res, 400, { error: `emoji must be one of ${REACTION_PALETTE.join(' ')}`, code: 'INVALID_EMOJI', palette: REACTION_PALETTE });
+    // #2026 — any single emoji, not only the six; a bare symbol (❤) is held as the emoji form the picker sends (❤️)
+    const emoji = normalizeReactionEmoji(body.emoji);
+    if (!emoji) return sendJSON(res, 400, { error: 'emoji must be exactly one emoji, such as 👍 or 🐊', code: 'INVALID_EMOJI', palette: REACTION_PALETTE });
     if (body.on !== undefined && typeof body.on !== 'boolean') return sendJSON(res, 400, { error: 'on must be true (react) or false (remove your reaction); omit it to react', code: 'INVALID_ON' });
     const on = body.on !== false;
     if (!SMALLKINDS_UNIT) return sendJSON(res, 400, { error: 'reactions are stored in the graph: they need the small-kinds unit on (SCRUM_GRAPH_UNIT_SMALLKINDS=1)', code: 'REACTIONS_NEED_GRAPH' });
@@ -13778,9 +13780,9 @@ async function handleReactToConversation(req, res, id) {
     };
     const now = await SMALLKINDS.readReactions([id]);
     if (now.unavailable) return sendJSON(res, 503, { error: `the graph could not be read: ${now.unavailable}`, code: 'GRAPH_UNAVAILABLE' });
-    const live = !!(now.reactions.get(id) ?? []).find((c) => c.emoji === body.emoji)?.by.includes(by);
+    const live = !!(now.reactions.get(id) ?? []).find((c) => c.emoji === emoji)?.by.includes(by);
     if (live === on) return sendJSON(res, 200, { id, reactions: now.reactions.get(id) ?? [] });
-    const w = await SMALLKINDS.writeReaction(reactionIntention({ actor: graphActor(by), iri: reactionIri(), postId: id, seat: by, emoji: body.emoji, state: on ? 'on' : 'off', at: new Date().toISOString() }));
+    const w = await SMALLKINDS.writeReaction(reactionIntention({ actor: graphActor(by), iri: reactionIri(), postId: id, seat: by, emoji, state: on ? 'on' : 'off', at: new Date().toISOString() }));
     if (w.status === 'APPLIED') return await answer();
     if (w.status === 'PRECONDITION_FAILED') return sendJSON(res, 404, { error: `post ${id} is no longer a live post in the graph`, code: 'NO_SUCH_POST' });
     if (w.status === 'UNAVAILABLE') return sendJSON(res, 503, { error: `the graph could not be written, so the reaction was refused: ${w.reason}`, code: 'GRAPH_UNAVAILABLE' });
@@ -13810,6 +13812,28 @@ async function handleBatchReactions(req, res) {
   } catch (e) {
     console.error('GET /api/reactions:', e.message);
     sendJSON(res, 500, { error: 'Failed to read reactions' });
+  }
+}
+
+// #2026 — GET /api/reactions/top[?days=N] → 200 {enabled, days, top: [{emoji, count}]}. The room's most-used emoji over a
+// rolling window (default 30 days; decided 2026-11-22): the picker's first row. Counts LIVE reactions whose last toggle
+// fell in the window, so a reaction taken back does not count. Most used first; a tie goes to the more recently used.
+// With the small-kinds unit off: {enabled: false, top: []}. An unreadable graph is a 503, never an empty list.
+async function handleTopReactions(req, res) {
+  try {
+    const q = parseQuery(req.url);
+    const days = q.days === undefined ? TOP_DAYS : (/^\d+$/.test(String(q.days)) ? Number(q.days) : NaN);
+    if (!Number.isInteger(days) || days < 1 || days > TOP_DAYS_MAX) {
+      return sendJSON(res, 400, { error: `days must be a whole number from 1 to ${TOP_DAYS_MAX}`, code: 'INVALID_DAYS' });
+    }
+    if (!SMALLKINDS_UNIT) return sendJSON(res, 200, { enabled: false, days, top: [] });
+    const since = new Date(Date.now() - days * 86400000).toISOString();
+    const r = await SMALLKINDS.readRecentReactions(since);
+    if (r.unavailable) return sendJSON(res, 503, { error: `the graph could not be read: ${r.unavailable}`, code: 'GRAPH_UNAVAILABLE' });
+    sendJSON(res, 200, { enabled: true, days, top: topEmoji(r.reactions, 6) });
+  } catch (e) {
+    console.error('GET /api/reactions/top:', e.message);
+    sendJSON(res, 500, { error: 'Failed to read the most-used reactions' });
   }
 }
 
@@ -15190,6 +15214,7 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/conversations\/([^\/]+)\/reactions$/, fn: (req, res, m) => handleReactToConversation(req, res, decodeURIComponent(m[1])) },   // #449
   { method: 'GET',    re: /^\/api\/reactions$/,                  fn: (req, res) => handleBatchReactions(req, res) },   // #449
   { method: 'GET',    re: /^\/api\/reactions\/recent$/,           fn: (req, res) => handleRecentReactions(req, res) },   // #449
+  { method: 'GET',    re: /^\/api\/reactions\/top$/,              fn: (req, res) => handleTopReactions(req, res) },   // #2026
   { method: 'POST',   re: /^\/api\/attachments$/,                  fn: (req, res) => handleCreateAttachment(req, res) },
   { method: 'GET',    re: /^\/api\/attachments\/([^\/]+)$/,        fn: (req, res, m) => serveAttachment(req, res, m[1]) },
   { method: 'GET',    re: /^\/api\/nodes$/,                        fn: (req, res) => handleListNodes(req, res) },

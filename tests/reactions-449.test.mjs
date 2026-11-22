@@ -13,6 +13,9 @@
  *   X5  THE POST IS UNTOUCHED: body, author and postSeq read back identical after reactions, and a post with none has no field.
  *   X6  FAIL LOUD: with the executor unreachable, reacting is 503 (never a 200 that implies it was written).
  *   X7  AN MCP-ONLY SEAT CAN REACT: reaction_add and reaction_remove reach the same store, and conversation_get shows it.
+ *   X13 ANY EMOJI (#2026): beyond the six, a skin tone, a flag and a ZWJ sequence are held; a bare ❤ is held as ❤️.
+ *   X14 THE ROOM'S TOP SIX (#2026): GET /api/reactions/top?days=N counts the window's live reactions by emoji.
+ *   X15 TOP, OFF (#2026): with the unit off, the top read says reactions are not enabled.
  *
  * NOT COVERED, by name: the list endpoint's reactions (session 1 serves them on the single-post read only); MCP tools
  * a redacted post's reactions; concurrency (two toggles of one (reactor, emoji) in
@@ -116,10 +119,12 @@ test('X3 ORDER: emoji by first live reaction, reactors in the order they reacted
   ]);
 }));
 
-test('X4 REFUSALS: off-palette emoji, missing by, non-boolean on are 400; an unknown post is 404; none writes', { skip: SKIP, timeout: 120000 }, () => unitOn(async ({ base }) => {
+test('X4 REFUSALS: a non-emoji, missing by, non-boolean on are 400; an unknown post is 404; none writes', { skip: SKIP, timeout: 120000 }, () => unitOn(async ({ base }) => {
   const p = await aPost(base);
   for (const [b, why] of [
-    [{ by: 'ada', emoji: '🍌' }, 'an emoji off the palette'],
+    [{ by: 'ada', emoji: 'a' }, 'a letter, not an emoji (#2026: any emoji passes, not only the palette)'],
+    [{ by: 'ada', emoji: '' }, 'an empty emoji'],
+    [{ by: 'ada', emoji: '👍 ' }, 'an emoji with trailing text'],
     [{ by: 'ada', emoji: '👍👍' }, 'two emoji in one'],
     [{ emoji: '👍' }, 'no by'],
     [{ by: '  ', emoji: '👍' }, 'a blank by'],
@@ -131,6 +136,37 @@ test('X4 REFUSALS: off-palette emoji, missing by, non-boolean on are 400; an unk
   const unknown = await react(base, '00000000-0000-4000-8000-000000000000', { by: 'ada', emoji: '👍' });
   assert.equal(unknown.status, 404, `an unknown post is 404 (${unknown.text})`);
   assert.equal((await read(base, p.id)).body.reactions, undefined, 'no refused request recorded anything');
+}));
+
+test('X13 ANY EMOJI (#2026): one beyond the six, a skin tone, a flag and a ZWJ sequence are held; a bare ❤ is stored as ❤️', { skip: SKIP, timeout: 120000 }, () => unitOn(async ({ base }) => {
+  const p = await aPost(base);
+  for (const emoji of ['🐊', '👍🏽', '🇺🇸', '🤷‍♀️']) {
+    const r = await react(base, p.id, { by: 'ada', emoji });
+    assert.equal(r.status, 200, `${emoji} is accepted (${r.text})`);
+  }
+  const bare = await react(base, p.id, { by: 'gizmo', emoji: '\u2764' });
+  assert.equal(bare.status, 200, `a heart without its emoji selector is accepted (${bare.text})`);
+  assert.deepEqual((await read(base, p.id)).body.reactions.map((c) => c.emoji), ['🐊', '👍🏽', '🇺🇸', '🤷‍♀️', '\u2764\uFE0F'],
+    'each is held as sent, and the bare heart as the same ❤️ the picker sends, so the two cannot split into two chips');
+}));
+
+test('X14 THE ROOM\'S TOP SIX (#2026): GET /api/reactions/top counts the window\'s live reactions by emoji; a removed one does not count', { skip: SKIP, timeout: 120000 }, () => unitOn(async ({ base }) => {
+  const p = await aPost(base); const q = await aPost(base);
+  await react(base, p.id, { by: 'ada', emoji: '🐊' });
+  await react(base, q.id, { by: 'gizmo', emoji: '🐊' });
+  await react(base, p.id, { by: 'gizmo', emoji: '👀' });
+  await react(base, p.id, { by: 'ada', emoji: '🍑' });
+  await react(base, p.id, { by: 'ada', emoji: '🍑', on: false });
+  const top = await fetch(`${base}/api/reactions/top?days=30`).then(async (r) => ({ status: r.status, body: await r.json() }));
+  assert.equal(top.status, 200);
+  assert.equal(top.body.enabled, true);
+  assert.equal(top.body.days, 30);
+  assert.deepEqual(top.body.top, [{ emoji: '🐊', count: 2 }, { emoji: '👀', count: 1 }], 'most used first; the taken-back 🍑 is not counted');
+  for (const bad of ['0', '-1', 'x', '366']) {
+    const r = await fetch(`${base}/api/reactions/top?days=${bad}`);
+    assert.equal(r.status, 400, `days=${bad} is refused`);
+    assert.equal((await r.json()).code, 'INVALID_DAYS');
+  }
 }));
 
 test('X5 THE POST IS UNTOUCHED: body, author and postSeq read back identical', { skip: SKIP, timeout: 120000 }, () => unitOn(async ({ base }) => {
@@ -216,6 +252,15 @@ test('X10 RECENT, OFF: with the small-kinds unit off, the recent read says react
     const r = await recent(rest.baseUrl, '?since=2026-01-01T00:00:00Z');
     assert.equal(r.status, 200, r.text);
     assert.deepEqual(r.body, { enabled: false, reactions: [], truncated: false, postsDropped: 0 });
+  } finally { await rest.stop(); }
+});
+
+test('X15 TOP, OFF (#2026): with the small-kinds unit off, the top read says reactions are not enabled', { timeout: 120000 }, async () => {
+  const rest = await startRestServer({ board: makeBoardFixture(), env: { SCRUM_ROSTER_FILE: ROSTER_FILE } });
+  try {
+    const r = await api(rest.baseUrl, 'GET', '/api/reactions/top?days=30');
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(r.body, { enabled: false, days: 30, top: [] });
   } finally { await rest.stop(); }
 });
 
