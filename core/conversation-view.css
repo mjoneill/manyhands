@@ -182,14 +182,32 @@ a.cv-recall-item:hover .cv-recall-title { text-decoration: underline; text-under
 @media (hover: none) { .cv-reactions:not(:has(.cv-reaction)) .cv-reaction-add { opacity: .55; } }
 .cv-msg:hover .cv-reaction-add, .cv-reaction-add:focus-visible, .cv-reaction-add[aria-expanded="true"] { opacity: 1; }
 .cv-reaction-add:hover { color: var(--ink); border-color: var(--accent); }
-/* The palette floats above the row as a popover, so even open it cannot be read as reactions already given. */
+/* The palette floats as a popover, so even open it cannot be read as reactions already given. It opens BELOW the row
+   (#2026): with "more" open it is tall, and the feed is a scroll container, so overflow above its top edge could never be
+   scrolled to (the search box was cut off); overflow below just extends what scrolls. */
 .cv-reaction-picker {
   display: flex; gap: 2px; padding: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
   box-shadow: 0 4px 14px rgba(0, 0, 0, .18);
-  position: absolute; left: 0; bottom: calc(100% + 4px); z-index: 10;
+  position: absolute; left: 0; top: calc(100% + 4px); z-index: 10;
 }
 /* #449: `display: flex` above beats the browser's own [hidden] rule, so without this the closed palette showed under
    every post and read as six reactions already given (#449, the 2026-11-22 demo). */
 .cv-reaction-picker[hidden] { display: none; }
+/* #2026 — the picker: the room's top six and a "more" button, then (when asked) a search box over every named emoji. */
+.cv-reaction-picker { flex-direction: column; align-items: stretch; gap: 4px; }
+.cv-reaction-top { display: flex; gap: 2px; align-items: center; }
+.cv-reaction-more {
+  background: none; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); font: inherit; font-size: 14px;
+  line-height: 1; padding: 4px 8px; margin-left: 2px; cursor: pointer;
+}
+.cv-reaction-more:hover, .cv-reaction-more:focus-visible, .cv-reaction-more[aria-expanded="true"] { color: var(--ink); border-color: var(--accent); outline: none; }
+.cv-reaction-browse { display: flex; flex-direction: column; gap: 4px; width: min(320px, 80vw); }
+.cv-reaction-browse[hidden] { display: none; }
+.cv-reaction-search {
+  font: inherit; font-size: 13px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); color: var(--ink);
+}
+.cv-reaction-grid { display: flex; flex-wrap: wrap; gap: 1px; max-height: 220px; overflow-y: auto; }
+.cv-reaction-grid .cv-reaction-pick[hidden] { display: none; }
 .cv-reaction-pick { background: none; border: 0; border-radius: 6px; font-size: 18px; line-height: 1; padding: 4px 6px; cursor: pointer; }
 .cv-reaction-pick:hover, .cv-reaction-pick:focus-visible { background: color-mix(in srgb, var(--accent) 18%, transparent); outline: none; }

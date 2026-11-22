@@ -229,6 +229,7 @@ export function mountConversationView(opts = {}) {
   // reaction store) means chips may show but nothing offers to react.
   const reactionMap = new Map();
   let reactionsEnabled = false;
+  let roomTop = [];   // #2026 — the room's most-used emoji (GET /api/reactions/top): the picker's first row
   let reactorSelect = null;   // the composer's "post as" select: the viewer's identity for marking and toggling
 
   // #303-6 — structure: <div.cv-root> <div.cv-toolbar> <div.cv-feed> <form> </div>
@@ -446,6 +447,8 @@ export function mountConversationView(opts = {}) {
       postId: id, chips: reactionMap.get(id) || [], me: currentReactor(), enabled: reactionsEnabled,
       nameOf: (k) => identityOf(k).name || k,
       onToggle: (emoji, on) => toggleReaction(id, emoji, on),
+      top: roomTop,
+      loadNames: loadEmojiNames,
     }));
   }
   function repaintReactions(onlyId) {
@@ -472,6 +475,20 @@ export function mountConversationView(opts = {}) {
     }
     if (changed) repaintReactions();
   }
+  // #2026 — the full emoji table is ~40 KB, so it is fetched the first time anyone opens "more", once per page
+  let emojiNames = null;
+  const loadEmojiNames = () => (emojiNames ||= import('./emoji-names.mjs').then((m) => m.EMOJI_NAMES).catch(() => { emojiNames = null; return []; }));
+  async function refreshTop() {
+    try {
+      const res = await f(`${baseUrl}/api/reactions/top`);
+      if (!res.ok) return;   // keep the row shown; the default six stand in until the room's own answer arrives
+      const body = await res.json();
+      const next = Array.isArray(body.top) ? body.top.map((t) => t && t.emoji).filter(Boolean) : [];
+      if (JSON.stringify(next) === JSON.stringify(roomTop)) return;
+      roomTop = next;
+      repaintReactions();
+    } catch (_) { /* offline */ }
+  }
   async function toggleReaction(id, emoji, on) {
     const by = currentReactor();
     if (!by) return;
@@ -483,6 +500,7 @@ export function mountConversationView(opts = {}) {
       const body = await res.json();
       if (Array.isArray(body.reactions) && body.reactions.length) reactionMap.set(id, body.reactions); else reactionMap.delete(id);
       repaintReactions(id);
+      refreshTop();   // your own pick may change the room's top six
     } catch (_) { /* offline */ }
   }
 
@@ -1105,6 +1123,7 @@ export function mountConversationView(opts = {}) {
   // no new post arrived, so the refresh is not inside it).
   load().then(() => {
     refreshReactions();
+    refreshTop();   // #2026
     if (poll && doc.defaultView) timer = doc.defaultView.setInterval(async () => { await pollOnce(); await refreshReactions(); }, pollMs);
   });
 
