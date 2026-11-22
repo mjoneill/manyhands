@@ -170,15 +170,26 @@ a.cv-recall-item:hover .cv-recall-title { text-decoration: underline; text-under
   content: attr(data-names); position: absolute; left: 0; top: calc(100% + 4px); z-index: 5; white-space: nowrap;
   background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; font-size: 12px;
 }
+/* A muted round ☺+ (Slack-style). On a post with no reactions it shows only on hover or keyboard focus, so an
+   untouched post carries no emoji at all; once a post has chips it sits after them, faded. Touch screens have no
+   hover, so there it stays faded-visible. */
 .cv-reaction-add {
-  background: none; border: 1px dashed var(--line); color: var(--muted); border-radius: 999px;
-  font: inherit; font-size: 12px; padding: 1px 8px; min-height: 24px; cursor: pointer; opacity: .55;
+  display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0;
+  background: var(--panel); border: 1px solid var(--line); color: var(--muted); border-radius: 50%;
+  font: inherit; font-size: 11px; line-height: 1; cursor: pointer; opacity: .55;
 }
+.cv-reactions:not(:has(.cv-reaction)) .cv-reaction-add { opacity: 0; }
+@media (hover: none) { .cv-reactions:not(:has(.cv-reaction)) .cv-reaction-add { opacity: .55; } }
 .cv-msg:hover .cv-reaction-add, .cv-reaction-add:focus-visible, .cv-reaction-add[aria-expanded="true"] { opacity: 1; }
 .cv-reaction-add:hover { color: var(--ink); border-color: var(--accent); }
+/* The palette floats above the row as a popover, so even open it cannot be read as reactions already given. */
 .cv-reaction-picker {
   display: flex; gap: 2px; padding: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
   box-shadow: 0 4px 14px rgba(0, 0, 0, .18);
+  position: absolute; left: 0; bottom: calc(100% + 4px); z-index: 10;
 }
+/* #449: `display: flex` above beats the browser's own [hidden] rule, so without this the closed palette showed under
+   every post and read as six reactions already given (#449, the 2026-11-22 demo). */
+.cv-reaction-picker[hidden] { display: none; }
 .cv-reaction-pick { background: none; border: 0; border-radius: 6px; font-size: 18px; line-height: 1; padding: 4px 6px; cursor: pointer; }
 .cv-reaction-pick:hover, .cv-reaction-pick:focus-visible { background: color-mix(in srgb, var(--accent) 18%, transparent); outline: none; }

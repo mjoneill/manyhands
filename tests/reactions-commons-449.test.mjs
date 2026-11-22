@@ -6,6 +6,9 @@
  *   E1  REACT FROM THE PAGE: ☺+ → 👍 on a seat's post; the chip shows, marked as yours, and the server holds it.
  *   E2  ANOTHER'S REACTION ARRIVES: a seat reacts through REST; the page shows the chip within a poll tick, names it, no reload.
  *   E3  TAKE YOURS BACK: clicking your own chip removes your reaction, on screen and on the server.
+ *   E0  AN UNTOUCHED POST SHOWS NO EMOJI: before anyone reacts, the palette is NOT on screen (computed style, not the
+ *       `hidden` flag): only the faded ☺+ shows. ☺+ opens it; a pick closes it again. At the 2026-11-22 demo the
+ *       open palette under every post read as six reactions already applied, because a `display` rule beat `hidden`.
  *
  * NOT COVERED, by name: the board's own embedded panel (index.html; it is not this view yet), touch, a 503 mid-click.
  * Without a python with pyoxigraph these rows are SKIPPED, and a skip is NOT a pass.
@@ -42,11 +45,25 @@ test('E1–E3 the banana test, rehearsed: react from the page, see another seat\
       const me = await page.$eval('.cv-who', (s) => s.value);
       assert.ok(me, 'the page has a "post as" identity to react as');
 
+      // E0 — an untouched post shows no emoji: the palette is closed ON SCREEN, not just flagged hidden
+      const shown = (sel) => page.$eval(sel, (el) => { const r = el.getBoundingClientRect(); return getComputedStyle(el).display !== 'none' && r.width > 0 && r.height > 0; });
+      assert.equal(await shown(`${msg} .cv-reaction-picker`), false, 'E0: the palette is not on screen before ☺+');
+      assert.equal(await page.$$eval(`${msg} .cv-reaction`, (bs) => bs.length), 0, 'E0: no chips on an untouched post');
+      assert.equal(await shown(`${msg} .cv-reaction-add`), true, 'E0: the ☺+ button is there');
+      const height = () => page.$eval(msg, (el) => el.getBoundingClientRect().height);
+      const closedHeight = await height();
+      await page.click(`${msg} .cv-reaction-add`);
+      assert.equal(await shown(`${msg} .cv-reaction-picker`), true, 'E0: ☺+ opens the palette');
+      assert.equal(await height(), closedHeight, 'E0: the open palette floats over the page; it does not sit in the post like a row of reactions');
+      await page.click(`${msg} .cv-reaction-add`);
+      assert.equal(await shown(`${msg} .cv-reaction-picker`), false, 'E0: ☺+ again closes it');
+
       // E1 — react from the page
       await page.click(`${msg} .cv-reaction-add`);
       await page.$$eval(`${msg} .cv-reaction-pick`, (bs) => bs.find((b) => b.dataset.emoji === '👍').click());
       const mine = await until(() => page.$$eval(`${msg} .cv-reaction`, (bs) => bs.filter((b) => b.dataset.emoji === '👍' && b.getAttribute('aria-pressed') === 'true').length), 10000);
       assert.equal(mine, 1, 'E1: the 👍 chip shows, marked as yours');
+      assert.equal(await shown(`${msg} .cv-reaction-picker`), false, 'E1: a pick leaves the palette closed on screen');
       const held = await json(await fetch(`${base}/api/conversations/${made.id}`));
       assert.deepEqual(held.reactions, [{ emoji: '👍', by: [me] }], 'E1: the server holds it');
 
