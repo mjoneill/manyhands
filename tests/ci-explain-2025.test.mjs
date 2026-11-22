@@ -54,6 +54,13 @@ const plan = JSON.parse(fs.readFileSync(path.join(${JSON.stringify(dir)}, 'plan.
 const a = process.argv.slice(2);
 fs.appendFileSync(path.join(${JSON.stringify(dir)}, 'calls.log'), a.join(' ') + '\\n');
 if (a[0] === 'run' && a[1] === 'list') { process.stdout.write(JSON.stringify(plan.runs)); process.exit(0); }
+const ai = a.indexOf('--attempt');
+if (a[0] === 'run' && a[1] === 'view' && ai > 0) {
+  const at = (plan.attempts || {})[a[2] + ':' + a[ai + 1]];
+  if (!at) process.exit(1);
+  if (a.includes('--json')) { process.stdout.write(JSON.stringify({ status: at.status, conclusion: at.conclusion, attempt: Number(a[ai + 1]) })); process.exit(0); }
+  process.stdout.write(at.log || ''); process.exit(at.log ? 0 : 1);
+}
 if (a[0] === 'run' && a[1] === 'view') { process.stdout.write(plan.logs[a[2]] || ''); process.exit(plan.logs[a[2]] ? 0 : 1); }
 if (a[0] === 'api') { process.stdout.write(plan.base || ''); process.exit(0); }
 process.stderr.write('fake gh: unexpected ' + a.join(' ')); process.exit(9);
@@ -108,4 +115,14 @@ test('E4 READ-ONLY: only run list, run view and api are asked', async () => {
   const verbs = gh.calls().map((c) => c.split(' ').slice(0, c.startsWith('api') ? 1 : 2).join(' '));
   assert.deepEqual([...new Set(verbs)].sort(), ['api', 'run list', 'run view']);
   assert.ok(gh.calls().every((c) => !/\b(rerun|push|merge|cancel|-X|--method)\b/.test(c)), gh.calls().join('\n'));
+});
+
+test('E5 RERUNS ARE READ: the latest attempt is green, attempt 1 of the same run was red — exit 0, and the post names attempt 1\'s failure as a probable flake', async () => {
+  const rerun = { ...GREEN, databaseId: 11, attempt: 2, event: 'pull_request' };
+  const gh = fakeGh('e5', { runs: [rerun], logs: {}, base: BASE, attempts: { '11:1': { status: 'completed', conclusion: 'failure', log: LOG('Unexpected end of JSON input') } } });
+  const x = await explain(HEAD, { gh: gh.bin, cwd: REPO });
+  assert.equal(x.code, 0, 'GREEN: the gate follows the latest attempt');
+  assert.equal(x.diagnosis.findings[0]?.class, 'probable-flake', x.text);
+  assert.match(x.text, /attempt 1 of run 11 was red/i);
+  assert.ok(gh.calls().some((c) => /run view 11 --attempt 1/.test(c)), 'it asked for the earlier attempt');
 });

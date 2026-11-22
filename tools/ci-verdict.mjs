@@ -98,8 +98,27 @@ export async function explain(sha, { gh = process.env.CI_VERDICT_GH || 'gh', git
   const failedLogs = [];
   let diffFiles = [];
   let newTokens = [];
-  if (gate.code === EXIT.RED) {
-    for (const x of gate.runs) {
+  // #2025 — `run list` shows only each run's LATEST attempt. A rerun that passed hides the red attempt before it, and
+  // that red-then-green is the commonest flake signal there is. So the earlier attempts are asked for by number.
+  const history = [];
+  if (gate.code === EXIT.RED || gate.code === EXIT.GREEN) {
+    for (const x of runs) {
+      for (let n = 1; n < (x.attempt ?? 1); n++) {
+        const v = run(gh, ['run', 'view', String(x.databaseId), '--attempt', String(n), '--json', 'status,conclusion,attempt']);
+        let at = null;
+        try { at = v.status === 0 ? JSON.parse(v.stdout) : null; } catch { at = null; }
+        if (!at) { notes.push(`could not read attempt ${n} of run ${x.databaseId}`); continue; }
+        history.push({ ...x, attempt: n, status: at.status, conclusion: at.conclusion });
+        if (at.status === 'completed' && at.conclusion === 'failure') {
+          const l = run(gh, ['run', 'view', String(x.databaseId), '--attempt', String(n), '--log-failed']);
+          if (l.status === 0) failedLogs.push({ runId: x.databaseId, attempt: n, text: l.stdout });
+          else notes.push(`could not read the failed log of run ${x.databaseId} attempt ${n}`);
+        }
+      }
+    }
+  }
+  if (gate.code === EXIT.RED || failedLogs.length) {
+    if (gate.code === EXIT.RED) for (const x of gate.runs) {
       const l = run(gh, ['run', 'view', String(x.databaseId), '--log-failed']);
       if (l.status === 0) failedLogs.push({ runId: x.databaseId, attempt: x.attempt ?? null, text: l.stdout });
       else notes.push(`could not read the failed log of run ${x.databaseId}`);
@@ -120,7 +139,7 @@ export async function explain(sha, { gh = process.env.CI_VERDICT_GH || 'gh', git
       } else notes.push(`git could not diff ${base.slice(0, 7)}..${sha.slice(0, 7)} here (fetch both?), so nothing is attributed to the diff`);
     } else notes.push('no PR carries this sha and no --base was given, so nothing is attributed to the diff');
   }
-  const d = diagnose({ sha, base, runs, failedLogs, diffFiles, newTokens });
+  const d = diagnose({ sha, base, runs: [...runs, ...history], failedLogs, diffFiles, newTokens });
   return { code: gate.code, diagnosis: d, text: [formatDiagnosis(d), ...notes.map((n) => `(${n})`)].join('\n') };
 }
 
