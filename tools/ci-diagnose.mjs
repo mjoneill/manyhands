@@ -106,10 +106,19 @@ const clip = (s) => String(s || '').split('\n').slice(0, EXCERPT_LINES).join('\n
  */
 export function diagnose(input) {
   const { sha, base = null, runs = [], failedLogs = [], diffFiles = [], newTokens = [] } = input || {};
-  const rv = runsVerdict(runs);
+  // #2025 — `runs` may hold several ATTEMPTS of one run (same databaseId). The verdict is the gate's, from each run's
+  // LATEST attempt only; the earlier attempts are history, read for evidence and never for the verdict.
+  const latestOf = new Map();
+  for (const r of Array.isArray(runs) ? runs : []) {
+    const k = r.databaseId; const cur = latestOf.get(k);
+    if (!cur || (r.attempt ?? 1) > (cur.attempt ?? 1)) latestOf.set(k, r);
+  }
+  const rv = runsVerdict(Array.isArray(runs) ? [...latestOf.values()] : runs);
   const provenance = { sha, base, parser: PARSER_VERSION, runs: failedLogs.map((l) => ({ runId: l.runId, attempt: l.attempt })) };
   const named = { [EXIT.GREEN]: 'GREEN', [EXIT.PENDING]: 'PENDING', [EXIT.NO_RUN]: 'NO RUN', [EXIT.CANCELLED]: 'CANCELLED', [EXIT.UNKNOWN]: 'UNKNOWN' };
-  if (rv.code !== EXIT.RED) return { verdict: named[rv.code], why: rv.why, findings: [], observations: { runs: rv.why }, provenance, advice: '' };
+  // GREEN after a rerun still reports what the red attempt showed: forgetting it is how a flake stays invisible.
+  const greenWithHistory = rv.code === EXIT.GREEN && failedLogs.length > 0;
+  if (rv.code !== EXIT.RED && !greenWithHistory) return { verdict: named[rv.code], why: rv.why, findings: [], observations: { runs: rv.why }, provenance, advice: '' };
 
   const inDiff = (f) => !!f && diffFiles.includes(f);
   const fresh = new Set(newTokens);
@@ -128,7 +137,10 @@ export function diagnose(input) {
     observations.fileExited.push(...p.fileExited);
     observations.newLeaks.push(...p.newLeaks);
     observations.runnerErrors.push(...p.runnerErrors);
-    const passedElsewhere = runs.filter((r) => r.databaseId !== log.runId && r.status === 'completed' && r.conclusion === 'success').map((r) => r.databaseId);
+    // A pass of the same sha in ANOTHER run, or in another ATTEMPT of this run (a rerun), is the flake evidence.
+    const passedElsewhere = runs.filter((r) => r.status === 'completed' && r.conclusion === 'success'
+      && !(r.databaseId === log.runId && (r.attempt ?? 1) === (log.attempt ?? 1)))
+      .map((r) => (r.databaseId === log.runId ? `${r.databaseId} attempt ${r.attempt}` : r.databaseId));
     for (const f of p.failures) {
       const evidence = evidenceFor(`${f.name}\n${f.excerpt}`);
       const cls = inDiff(f.file) ? 'in-diff' : evidence.length ? 'caused-by-diff' : passedElsewhere.length ? 'probable-flake' : 'unknown';
@@ -146,6 +158,12 @@ export function diagnose(input) {
   if (!failedLogs.length) findings.push({ class: 'unknown', test: null, file: null, inDiff: false, evidence: [], passedElsewhere: [], excerpt: 'the run failed, and no log was read', runId: null });
 
   const classes = new Set(findings.map((f) => f.class));
+  if (greenWithHistory) {
+    const flaky = [...classes].every((c) => c === 'probable-flake');
+    return { verdict: 'GREEN', why: rv.why, history: true, findings, observations, provenance,
+      advice: flaky ? 'Safe to land. An earlier attempt failed out of the diff and a rerun passed: a probable flake. If the same row fails again on another run, file a card for it.'
+        : 'Safe to land by the gate, but an earlier attempt failed in a way a rerun does not explain: read it before you trust the green.' };
+  }
   const verdict = classes.has('unknown') ? 'UNKNOWN' : 'RED';
   const advice = classes.has('unknown') ? 'A seat should read the excerpt below: the cause is not established.'
     : [...classes].every((c) => c === 'probable-flake') ? 'Rerun once (#1719). If it fails again on the same row, it is a real flake: file a card for it.'
@@ -159,9 +177,16 @@ const PHRASE = { 'in-diff': 'in a file the diff changed', 'caused-by-diff': 'cau
 export function formatDiagnosis(d) {
   const p = d.provenance || {};
   const runs = (p.runs || []).map((r) => `run ${r.runId}, attempt ${r.attempt}`).join('; ') || 'no failed log read';
-  const head = `CI verdict for ${String(p.sha || '').slice(0, 7)} (${runs}; parser ${p.parser}): **${d.verdict === 'UNKNOWN' ? 'RED, cause UNKNOWN' : d.verdict}**`;
-  if (d.verdict !== 'RED' && d.verdict !== 'UNKNOWN') return `${head}. ${d.why}`;
-  const out = [head];
+  let out;
+  if (d.history) {
+    // #2025 — green on the latest attempt, red on an earlier one: say both, the green first
+    const reds = (p.runs || []).map((r) => `Attempt ${r.attempt} of run ${r.runId}`).join('; ');
+    out = [`CI verdict for ${String(p.sha || '').slice(0, 7)} (parser ${p.parser}): **GREEN**. ${d.why}.`, `${reds} was red:`];
+  } else {
+    const head = `CI verdict for ${String(p.sha || '').slice(0, 7)} (${runs}; parser ${p.parser}): **${d.verdict === 'UNKNOWN' ? 'RED, cause UNKNOWN' : d.verdict}**`;
+    if (d.verdict !== 'RED' && d.verdict !== 'UNKNOWN') return `${head}. ${d.why}`;
+    out = [head];
+  }
   if (d.observations?.tap) out.push(`TAP: fail ${d.observations.tap.fail ?? '?'}, pass ${d.observations.tap.pass ?? '?'}.`);
   for (const f of d.findings) {
     const where = f.file ? `\`${f.file}\` (${f.inDiff ? 'in the diff' : 'not in the diff'})` : 'no file named';

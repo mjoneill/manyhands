@@ -18,6 +18,12 @@
  *   D8  THE POST: names each failing row, its file, whether the diff touched it, the class and the evidence,
  *       and keeps excerpts short.
  *   D9  GREEN comes only from the runs, all completed and successful.
+ *   D10 A RERUN IS EVIDENCE: attempt 1 red, attempt 2 of the SAME run green. The verdict follows the latest attempt
+ *       (GREEN, the gate's code is unchanged), and the red attempt is still reported, its out-of-diff failure a probable
+ *       flake citing the passing attempt. Before #2025's fix this rerun pass was invisible: same run id, so never
+ *       "elsewhere", and the red was simply forgotten.
+ *   D11 A RED RERUN IS NOT EVIDENCE: attempt 2 failing again keeps the failure UNKNOWN; an earlier failed attempt is
+ *       never counted as a pass.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -131,4 +137,28 @@ test('parseFailedLog reads gh\'s job<TAB>step<TAB>timestamp shape, BOM included,
   const p = parseFailedLog('﻿job\tstep\t2026-11-21T00:00:00.0Z not ok 1 - x # TODO later\njob\tstep\t2026-11-21T00:00:00.0Z # fail 0\n');
   assert.deepEqual(p.failures, []);
   assert.equal(p.tap.fail, 0);
+});
+
+test('D10 A RERUN IS EVIDENCE: attempt 1 red, attempt 2 of the same run green — GREEN, and the red attempt is a probable flake citing attempt 2', () => {
+  const { meta, input } = load('29871cc-main-a1');
+  const a1 = { databaseId: meta.runId, attempt: 1, event: meta.event, status: 'completed', conclusion: 'failure' };
+  const a2 = { ...a1, attempt: 2, conclusion: 'success' };
+  const d = diagnose({ ...input, runs: [a2, a1] });
+  assert.equal(d.verdict, 'GREEN', 'the verdict follows the latest attempt');
+  assert.deepEqual(byClass(d), [['tests/whisper-enable-flag.test.mjs', 'probable-flake']], 'the red attempt is still reported');
+  assert.deepEqual(d.findings[0].passedElsewhere, [`${meta.runId} attempt 2`]);
+  const text = formatDiagnosis(d);
+  assert.match(text, /\*\*GREEN\*\*/);
+  assert.match(text, /attempt 1 .*red/i, 'the post says an earlier attempt was red');
+  assert.match(text, /probable flake/i);
+});
+
+test('D11 A RED RERUN IS NOT EVIDENCE: attempt 2 fails again — RED, and the failure stays UNKNOWN', () => {
+  const { meta, input } = load('29871cc-main-a1');
+  const a1 = { databaseId: meta.runId, attempt: 1, event: meta.event, status: 'completed', conclusion: 'failure' };
+  const a2 = { ...a1, attempt: 2 };
+  const d = diagnose({ ...input, runs: [a2, a1], failedLogs: [{ ...input.failedLogs[0], attempt: 2 }] });
+  assert.equal(d.verdict, 'UNKNOWN', 'red, cause unknown');
+  assert.deepEqual(byClass(d), [['tests/whisper-enable-flag.test.mjs', 'unknown']]);
+  assert.deepEqual(d.findings[0].passedElsewhere, []);
 });
