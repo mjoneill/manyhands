@@ -139,7 +139,18 @@ export async function explain(sha, { gh = process.env.CI_VERDICT_GH || 'gh', git
       } else notes.push(`git could not diff ${base.slice(0, 7)}..${sha.slice(0, 7)} here (fetch both?), so nothing is attributed to the diff`);
     } else notes.push('no PR carries this sha and no --base was given, so nothing is attributed to the diff');
   }
-  const d = diagnose({ sha, base, runs: [...runs, ...history], failedLogs, diffFiles, newTokens });
+  // #2025 — a file that EXITED may run rows that live in a module it imports (#1760 split files). Its relative imports
+  // are read at the sha, so a row located in that module can explain the exit. Unreadable here ⇒ nothing is linked.
+  const { parseFailedLog } = await import('./ci-diagnose.mjs');
+  const importsOf = {};
+  for (const file of new Set(failedLogs.flatMap((l) => parseFailedLog(l.text).fileExited.map((e) => e.file)))) {
+    const shown = run(git, ['show', `${sha}:${file}`]);
+    if (shown.status !== 0) continue;
+    const dir = path.posix.dirname(file);
+    importsOf[file] = [...shown.stdout.matchAll(/^\s*(?:import|export)\b[^'"\n]*?(?:from\s*)?['"](\.{1,2}\/[^'"?]+)(?:\?[^'"]*)?['"]/gm)]
+      .map((m) => path.posix.normalize(path.posix.join(dir, m[1])));
+  }
+  const d = diagnose({ sha, base, runs: [...runs, ...history], failedLogs, diffFiles, newTokens, importsOf });
   return { code: gate.code, diagnosis: d, text: [formatDiagnosis(d), ...notes.map((n) => `(${n})`)].join('\n') };
 }
 

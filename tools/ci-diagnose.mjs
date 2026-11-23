@@ -23,7 +23,7 @@
  */
 import { verdict as runsVerdict, EXIT } from './ci-verdict.mjs';
 
-export const PARSER_VERSION = 'ci-diagnose/1';
+export const PARSER_VERSION = 'ci-diagnose/2';
 
 const TS = /^﻿?\d{4}-\d\d-\d\dT[\d:.]+Z ?/;
 const TOKEN = /[A-Za-z_][A-Za-z0-9_]*(?:[-.][A-Za-z0-9_]+)*/g;
@@ -99,13 +99,14 @@ export function parseFailedLog(text) {
 const clip = (s) => String(s || '').split('\n').slice(0, EXCERPT_LINES).join('\n');
 
 /**
- * input: { sha, base?, runs, failedLogs: [{ runId, attempt, text }], diffFiles: [path], newTokens: [identifier] }
+ * input: { sha, base?, runs, failedLogs: [{ runId, attempt, text }], diffFiles: [path], newTokens: [identifier],
+ *          importsOf?: { [exitedFile]: [repo path it imports] } }
  * `runs` are every run CI reported for the sha (ci-verdict's shape); `newTokens` are identifiers the diff's added
  * lines contain that the base tree never had. Without a diff (no base known) pass empty lists: nothing can then be
  * attributed to the diff, so failures come out UNKNOWN or, with a same-sha pass, probable flakes.
  */
 export function diagnose(input) {
-  const { sha, base = null, runs = [], failedLogs = [], diffFiles = [], newTokens = [] } = input || {};
+  const { sha, base = null, runs = [], failedLogs = [], diffFiles = [], newTokens = [], importsOf = {} } = input || {};
   // #2025 — `runs` may hold several ATTEMPTS of one run (same databaseId). The verdict is the gate's, from each run's
   // LATEST attempt only; the earlier attempts are history, read for evidence and never for the verdict.
   const latestOf = new Map();
@@ -148,8 +149,13 @@ export function diagnose(input) {
     }
     for (const l of p.newLeaks) findings.push({ class: 'temp-leak', test: null, file: l.file, inDiff: inDiff(l.file), entries: l.entries, bytes: l.bytes, evidence: [], passedElsewhere: [], excerpt: '', runId: log.runId });
     const explained = new Set(findings.map((x) => x.file));
+    // #2025 — split rows files (#1760): a row's location is the module it lives in, but FILE EXITED names the test
+    // file that imports it. A failing row explains an importer's exit only when that importer is the ONE exited file
+    // that imports the module: with two, the row cannot say which file it ran in, so neither is explained by it.
+    const importers = (m) => p.fileExited.filter((x) => (importsOf[x.file] || []).includes(m));
+    const viaImport = (file) => (importsOf[file] || []).some((m) => explained.has(m) && importers(m).length === 1);
     for (const e of p.fileExited) {
-      if (!explained.has(e.file)) findings.push({ class: 'unknown', test: null, file: e.file, inDiff: inDiff(e.file), evidence: [], passedElsewhere: [], excerpt: `the file exited with code ${e.code} and no failing row names it`, runId: log.runId });
+      if (!explained.has(e.file) && !viaImport(e.file)) findings.push({ class: 'unknown', test: null, file: e.file, inDiff: inDiff(e.file), evidence: [], passedElsewhere: [], excerpt: `the file exited with code ${e.code} and no failing row names it`, runId: log.runId });
     }
     if (!p.failures.length && !p.newLeaks.length && !p.fileExited.length) {
       findings.push({ class: 'unknown', test: null, file: null, inDiff: false, evidence: [], passedElsewhere: [], excerpt: clip(p.runnerErrors.join('\n') || 'the run failed, and its log names no failing row, leak or exited file'), runId: log.runId });

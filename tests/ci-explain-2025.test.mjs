@@ -7,6 +7,8 @@
  *       sha that passed in another run is a probable flake.
  *   E3  THE GATE IS UNCHANGED: --explain exits with the gate's code (RED 1, GREEN 0), whatever it explains.
  *   E4  READ-ONLY: the only gh verbs it uses are `run list`, `run view` and `api` (a GET); never rerun, never push.
+ *   E6  A SPLIT ROWS FILE (#1760): the exited test file's own imports are read at the sha (git show), so a failing row
+ *       located in the module it imports explains its exit. Real case: run 45050133125 attempt 2.
  */
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -26,6 +28,9 @@ fs.mkdirSync(REPO);
 git('init', '-q');
 git('-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'root');
 fs.writeFileSync(path.join(REPO, 'old.mjs'), 'export const ALREADY_THERE = 1;\n');
+fs.mkdirSync(path.join(REPO, 'tests'));
+fs.writeFileSync(path.join(REPO, 'tests', 'x.rows.mjs'), 'export const rows = 1;\n');
+fs.writeFileSync(path.join(REPO, 'tests', 'x-part2.test.mjs'), "// rows run in two files\nimport './x.rows.mjs?part=2';\n");
 git('add', '.'); git('-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '-m', 'base');
 const BASE = git('rev-parse', 'HEAD');
 fs.writeFileSync(path.join(REPO, 'feature.mjs'), "export const code = 'BRAND_NEW_CODE';\n");
@@ -125,4 +130,21 @@ test('E5 RERUNS ARE READ: the latest attempt is green, attempt 1 of the same run
   assert.equal(x.diagnosis.findings[0]?.class, 'probable-flake', x.text);
   assert.match(x.text, /attempt 1 of run 11 was red/i);
   assert.ok(gh.calls().some((c) => /run view 11 --attempt 1/.test(c)), 'it asked for the earlier attempt');
+});
+
+test('E6 A SPLIT ROWS FILE: the exited file imports the failing row\'s module at the sha, so its exit is explained', async () => {
+  const log = [
+    `server suite\tRun the server suite\t2026-11-21T00:00:00.0Z not ok 9 - E7 a sibling is REFUSED`,
+    `server suite\tRun the server suite\t2026-11-21T00:00:00.0Z   ---`,
+    `server suite\tRun the server suite\t2026-11-21T00:00:00.0Z   location: '/home/runner/work/r/r/tests/x.rows.mjs:1:1'`,
+    `server suite\tRun the server suite\t2026-11-21T00:00:00.0Z   error: 'no effect'`,
+    `server suite\tRun the server suite\t2026-11-21T00:00:00.0Z   ...`,
+    `server suite\tRun the server suite\t2026-11-21T00:00:00.0Z # fail 1`,
+    `server suite\tRun the server suite\t2026-11-21T00:00:00.0Z # ⛔ FILE EXITED with code 1: tests/x-part2.test.mjs`,
+  ].join('\n');
+  const gh = fakeGh('e6', { runs: [RED, GREEN], logs: { 11: log }, base: BASE });
+  const x = await explain(HEAD, { gh: gh.bin, cwd: REPO });
+  assert.equal(x.code, 1, 'the gate is unchanged');
+  assert.deepEqual(x.diagnosis.findings.map((f) => [f.file, f.class]), [['tests/x.rows.mjs', 'probable-flake']], x.text);
+  assert.doesNotMatch(x.text, /no failing row names it/);
 });

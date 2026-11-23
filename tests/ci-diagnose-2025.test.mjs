@@ -24,6 +24,12 @@
  *       "elsewhere", and the red was simply forgotten.
  *   D11 A RED RERUN IS NOT EVIDENCE: attempt 2 failing again keeps the failure UNKNOWN; an earlier failed attempt is
  *       never counted as a pass.
+ *   D12 A ROWS MODULE EXPLAINS THE FILE THAT RUNS IT (#1760 split files): the failing row's location is
+ *       `x.rows.mjs`, the FILE EXITED line names `x-part2.test.mjs`, which imports it. That exit is explained, not
+ *       UNKNOWN. Real case: run 45050133125 attempt 2, #1744 E7, where the false UNKNOWN sent a seat into the log.
+ *       Control: without the import known, the exit stays UNKNOWN. Nothing is explained by a name's resemblance.
+ *   D13 AMBIGUOUS IMPORTERS EXPLAIN NOTHING: two files that exited both import the module, and one row failed. The row
+ *       cannot say which file it ran in, so neither exit is explained by it.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -161,4 +167,36 @@ test('D11 A RED RERUN IS NOT EVIDENCE: attempt 2 fails again — RED, and the fa
   assert.equal(d.verdict, 'UNKNOWN', 'red, cause unknown');
   assert.deepEqual(byClass(d), [['tests/whisper-enable-flag.test.mjs', 'unknown']]);
   assert.deepEqual(d.findings[0].passedElsewhere, []);
+});
+
+const SPLIT_LOG = (exited) => [
+  'not ok 4992 - #1744 (E7) a sibling whose version was NOT bumped is REFUSED',
+  '  ---',
+  "  location: '/home/runner/work/r/r/tests/x.rows.mjs:56:75'",
+  "  error: 'a sibling whose version was NOT bumped: no effect'",
+  '  ...',
+  '# fail 1',
+  ...exited.map((f) => `# ⛔ FILE EXITED with code 1: ${f}`),
+].join('\n');
+const SPLIT_RUNS = [
+  { databaseId: 7, attempt: 2, status: 'completed', conclusion: 'failure' },
+  { databaseId: 8, attempt: 1, status: 'completed', conclusion: 'success' },
+];
+
+test('D12 A ROWS MODULE EXPLAINS THE FILE THAT RUNS IT: the importer\'s exit is not UNKNOWN; without the import known, it is', () => {
+  const input = { sha: 'a'.repeat(40), runs: SPLIT_RUNS, failedLogs: [{ runId: 7, attempt: 2, text: SPLIT_LOG(['tests/x-part2.test.mjs']) }] };
+  const d = diagnose({ ...input, importsOf: { 'tests/x-part2.test.mjs': ['tests/x.rows.mjs'] } });
+  assert.deepEqual(byClass(d), [['tests/x.rows.mjs', 'probable-flake']]);
+  assert.equal(d.verdict, 'RED', 'every finding is a probable flake: red, rerun once');
+  const control = diagnose(input);
+  assert.deepEqual(byClass(control), [['tests/x.rows.mjs', 'probable-flake'], ['tests/x-part2.test.mjs', 'unknown']], 'no import known, no explanation');
+});
+
+test('D13 AMBIGUOUS IMPORTERS EXPLAIN NOTHING: two exited files import the module, one row failed — both stay UNKNOWN', () => {
+  const d = diagnose({
+    sha: 'a'.repeat(40), runs: SPLIT_RUNS,
+    failedLogs: [{ runId: 7, attempt: 2, text: SPLIT_LOG(['tests/x-part1.test.mjs', 'tests/x-part2.test.mjs']) }],
+    importsOf: { 'tests/x-part1.test.mjs': ['tests/x.rows.mjs'], 'tests/x-part2.test.mjs': ['tests/x.rows.mjs'] },
+  });
+  assert.deepEqual(byClass(d).filter(([, c]) => c === 'unknown').map(([f]) => f), ['tests/x-part1.test.mjs', 'tests/x-part2.test.mjs']);
 });
