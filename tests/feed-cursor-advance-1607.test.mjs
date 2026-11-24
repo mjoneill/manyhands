@@ -24,8 +24,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { spawn } from 'node:child_process';
-import { freePort, waitForHttp, makeBoardFixture, PROJECT_DIR } from './helpers/harness.mjs';
+import { spawnBoardServer, makeBoardFixture } from './helpers/harness.mjs';
 import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-executor-proc.mjs';
 import { BK as BKG } from '../core/graph-vocab.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
@@ -62,16 +61,11 @@ async function startProxy(execUrl) {
 }
 
 async function spawnServer(boardFile, execUrl) {
-  const port = await freePort();
-  const env = { ...process.env, SCRUM_BOARD_FILE: boardFile, SCRUM_PORT: String(port), SCRUM_MCP_NOTIFY_URL: '',
-    SCRUM_ATTACHMENTS_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'a1607-attach-')),
-    SCRUM_CHANNEL_CONFIG_FILE: path.join(os.tmpdir(), `a1607-chan-${process.pid}-${port}.json`), SCRUM_INSTANCE_ID: `a1607-${port}`,
-    SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: execUrl, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1' };
-  const child = spawn('node', ['server.js'], { cwd: PROJECT_DIR, env, stdio: ['ignore', 'pipe', 'pipe'] });
-  const err = []; child.stderr.on('data', (d) => err.push(String(d)));
-  const base = `http://127.0.0.1:${port}`;
-  await waitForHttp(`${base}/api/board`, 15000);
-  return { base, stop: () => { try { child.kill('SIGKILL'); } catch { /* gone */ } }, stderr: () => err.join('') };
+  const attach = fs.mkdtempSync(path.join(os.tmpdir(), 'a1607-attach-'));
+  const srv = await spawnBoardServer({ label: 'a1607 board server', readyTimeoutMs: 15000, env: (port) => ({ ...process.env, SCRUM_BOARD_FILE: boardFile,
+    SCRUM_MCP_NOTIFY_URL: '', SCRUM_ATTACHMENTS_DIR: attach, SCRUM_CHANNEL_CONFIG_FILE: path.join(os.tmpdir(), `a1607-chan-${process.pid}-${port}.json`),
+    SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: execUrl, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1' }) });   // #1833: the harness retries a lost port race
+  return { base: srv.baseUrl, stop: srv.stop, stderr: srv.stderr };
 }
 async function stack(body) {
   const store = tmpStore('a1607-store-');
