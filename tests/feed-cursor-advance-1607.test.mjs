@@ -61,11 +61,17 @@ async function startProxy(execUrl) {
 }
 
 async function spawnServer(boardFile, execUrl) {
-  const attach = fs.mkdtempSync(path.join(os.tmpdir(), 'a1607-attach-'));
-  const srv = await spawnBoardServer({ label: 'a1607 board server', readyTimeoutMs: 15000, env: (port) => ({ ...process.env, SCRUM_BOARD_FILE: boardFile,
-    SCRUM_MCP_NOTIFY_URL: '', SCRUM_ATTACHMENTS_DIR: attach, SCRUM_CHANNEL_CONFIG_FILE: path.join(os.tmpdir(), `a1607-chan-${process.pid}-${port}.json`),
+  // every temp path this server uses lives under ONE dir the test removes at stop (the suite's tmp-leak check fails a run that leaves one)
+  const own = fs.mkdtempSync(path.join(os.tmpdir(), 'a1607-srv-'));
+  const attach = path.join(own, 'attachments'); fs.mkdirSync(attach);
+  const srv = await spawnBoardServer({ label: 'a1607 board server', readyTimeoutMs: 15000, env: () => ({ ...process.env, SCRUM_BOARD_FILE: boardFile,
+    SCRUM_MCP_NOTIFY_URL: '', SCRUM_ATTACHMENTS_DIR: attach, SCRUM_CHANNEL_CONFIG_FILE: path.join(own, 'channel-config.json'),
     SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: execUrl, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1' }) });   // #1833: the harness retries a lost port race
-  return { base: srv.baseUrl, stop: srv.stop, stderr: srv.stderr };
+  return { base: srv.baseUrl, stderr: srv.stderr, stop: async () => {
+    const p = srv.proc; const gone = p.exitCode !== null || p.signalCode !== null ? Promise.resolve() : new Promise((r) => p.once('exit', r));
+    srv.stop(); await gone;   // the process has exited, so nothing can recreate a path under `own` after it is removed
+    fs.rmSync(own, { recursive: true, force: true });
+  } };
 }
 async function stack(body) {
   const store = tmpStore('a1607-store-');
@@ -76,7 +82,7 @@ async function stack(body) {
   fs.writeFileSync(file, JSON.stringify(makeBoardFixture({ conversations: [] }), null, 2));
   const srv = await spawnServer(file, proxy.url);
   try { return await body({ base: srv.base, execUrl: exec.baseUrl, proxy, stderr: srv.stderr }); }
-  finally { srv.stop(); await proxy.stop(); await killExecutor(exec); fs.rmSync(dir, { recursive: true, force: true }); fs.rmSync(store, { recursive: true, force: true }); }
+  finally { await srv.stop(); await proxy.stop(); await killExecutor(exec); fs.rmSync(dir, { recursive: true, force: true }); fs.rmSync(store, { recursive: true, force: true }); }
 }
 
 async function api(base, method, route, body) {
