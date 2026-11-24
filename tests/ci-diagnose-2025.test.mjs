@@ -172,7 +172,7 @@ test('D11 A RED RERUN IS NOT EVIDENCE: attempt 2 fails again — RED, and the fa
 const SPLIT_LOG = (exited) => [
   'not ok 4992 - #1744 (E7) a sibling whose version was NOT bumped is REFUSED',
   '  ---',
-  "  location: '/home/runner/work/r/r/tests/x.rows.mjs:56:75'",
+  "  location: '/build/work/r/r/tests/x.rows.mjs:56:75'",
   "  error: 'a sibling whose version was NOT bumped: no effect'",
   '  ...',
   '# fail 1',

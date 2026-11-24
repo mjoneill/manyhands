@@ -136,7 +136,7 @@ test('E6 A SPLIT ROWS FILE: the exited file imports the failing row\'s module at
   const log = [
     `server suite\tRun the server suite\t2026-11-21T00:00:00.0Z not ok 9 - E7 a sibling is REFUSED`,
     `server suite\tRun the server suite\t2026-11-21T00:00:00.0Z   ---`,
-    `server suite\tRun the server suite\t2026-11-21T00:00:00.0Z   location: '/home/runner/work/r/r/tests/x.rows.mjs:1:1'`,
+    `server suite\tRun the server suite\t2026-11-21T00:00:00.0Z   location: '/build/work/r/r/tests/x.rows.mjs:1:1'`,
     `server suite\tRun the server suite\t2026-11-21T00:00:00.0Z   error: 'no effect'`,
     `server suite\tRun the server suite\t2026-11-21T00:00:00.0Z   ...`,
     `server suite\tRun the server suite\t2026-11-21T00:00:00.0Z # fail 1`,
