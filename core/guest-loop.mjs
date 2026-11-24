@@ -870,7 +870,13 @@ async function postFailureLine({ agent, wake, error, latencyMs, post, onError })
   // at-sign so the line wakes nobody) or a credential (scrub it — the same
   // shapes server.js redacts, #1217/#1343 — before it lands on the board).
   const why = scrubErrorText(error);
-  const body = `⚠️ ${name}: I was named but my model call failed${secs} (${why}) — no answer this time; name me again to retry.`;
+  // #1677 — a channel wake is a delivery, not a mention: "I was named" sent two seats looking for a self-wake loop, and
+  // naming a channel-mode seat wakes nothing, so the retry instruction was false too. Only a mention is a naming: an
+  // assignment or a scheduled check-in says what woke it.
+  const cause = { channel: 'a room post reached me', assignment: 'a card assigned to me woke me', schedule: 'my scheduled check-in woke me' }[wake?.kind];
+  const body = cause
+    ? `⚠️ ${name}: ${cause} but my model call failed${secs} (${why}) — no answer this time.`
+    : `⚠️ ${name}: I was named but my model call failed${secs} (${why}) — no answer this time; name me again to retry.`;
   const where = {
     ...(typeof wake?.attachedTo === 'string' && wake.attachedTo ? { attachedTo: wake.attachedTo } : {}),
     ...(replyTalkFor(wake, agent.seatKey) ? { conversation: replyTalkFor(wake, agent.seatKey) } : {}),   // #1446
