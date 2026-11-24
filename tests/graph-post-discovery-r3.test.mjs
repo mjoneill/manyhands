@@ -360,7 +360,7 @@ test('D9 tokens: malformed is 400 UNKNOWN_CURSOR; a ps1 document token, or a gc1
 
 test('D10 FILTERS across page boundaries (and mentions match case-insensitively: m1 mentions `Bea`, the filter is `bea`): with mentions_me and limit 1, a matching post that follows three excluded ones is still reached, and the cursor crosses an excluded row only after it was examined for THAT filter', { skip: SKIP }, async () => {
   const muts = ['m1', 'm2', 'm3', 'm4', 'm5'];
-  await stack(entriesBoard([...muts, 'm6'], { mentions: { m1: ['Bea'], m5: ['bea'], m3: ['cy'] } }), async (s) => {
+  await stack(entriesBoard([...muts, 'm6', 'm7'], { mentions: { m1: ['Bea'], m5: ['bea'], m3: ['cy'], m7: ['bea'] } }), async (s) => {
     const c0 = (await feed(s.base, 'afterCommit=start&mentions_me=bea')).body.nextAfterCommit;
     for (const m of muts) assert.equal((await publish(s.base, m)).body.status, 'published');
     const got = []; let cur = c0;
@@ -369,7 +369,17 @@ test('D10 FILTERS across page boundaries (and mentions match case-insensitively:
     assert.equal((await publish(s.base, 'm6')).body.status, 'published');           // a NON-matching post committed after the last delivered one: the head is now AHEAD of the cursor
     const quiet = await feed(s.base, `afterCommit=${cur}&limit=5&mentions_me=bea`);
     assert.deepEqual(quiet.body.conversations, []);
-    assert.equal(quiet.body.nextAfterCommit, cur, 'an EMPTY filtered page echoes the request\'s own cursor: it does not jump to a head it has not delivered');
+    // #1607 (contract change approved by its owner, 2026-11-24): an EXHAUSTED empty page advances to the head it read. m6
+    // was examined for THIS filter and excluded, so nothing below that head is owed; the guarantee the old echo protected
+    // is that nothing is SKIPPED, and that is asserted directly below with a matching post committed after the advance.
+    const headTok = (await feed(s.base, 'afterCommit=tip&mentions_me=bea')).body.nextAfterCommit;
+    assert.ok(commitOf(quiet.body.nextAfterCommit) > commitOf(cur), 'the exhausted filtered page crossed the excluded m6');
+    assert.equal(quiet.body.nextAfterCommit, headTok, 'it advanced to the head it read, under the same filter scope');
+    assert.equal((await publish(s.base, 'm7')).body.status, 'published');           // a MATCHING post after the advance
+    const after = await feed(s.base, `afterCommit=${quiet.body.nextAfterCommit}&limit=5&mentions_me=bea`);
+    assert.deepEqual(ids(after), [idOf('m7')], 'the advance skipped nothing: the next matching post is delivered');
+    const again = await feed(s.base, `afterCommit=${after.body.nextAfterCommit}&limit=5&mentions_me=bea`);
+    assert.deepEqual(again.body.conversations, [], 'and only once');
     const other = await feed(s.base, `afterCommit=${c0}&limit=10&mentions_me=cy`);
     assert.equal(other.status, 400, 'the token was minted for bea: another filter needs a fresh bootstrap');
   });

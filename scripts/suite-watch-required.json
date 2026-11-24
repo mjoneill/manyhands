@@ -70,6 +70,8 @@
   "tests/executor-meter-callers-1650.test.mjs",
   "tests/executor-ready-1716.test.mjs",
   "tests/export-graph-kinds-1825.test.mjs",
+  "tests/feed-cursor-advance-1607.test.mjs",
+  "tests/feed-cursor-visibility-1607.test.mjs",
   "tests/fresh-graph-seed-1679.test.mjs",
   "tests/gate-counters-n1.test.mjs",
   "tests/graph-auth-1559.test.mjs",
