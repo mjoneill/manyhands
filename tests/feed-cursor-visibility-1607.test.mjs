@@ -66,32 +66,53 @@ async function exUpdate(execUrl, opIri, sparql) {
   assert.ok(r.status < 300, `executor update refused (${r.status}): ${text.slice(0, 300)}`);
 }
 
-async function spawnServer(boardFile, execUrl) {
+async function spawnServer(boardFile, execUrl, args) {
   // every temp path this server uses lives under ONE dir the test removes at stop (the suite's tmp-leak check fails a run that leaves one)
   const own = fs.mkdtempSync(path.join(os.tmpdir(), 'v1607-srv-'));
   const attach = path.join(own, 'attachments'); fs.mkdirSync(attach);
-  const srv = await spawnBoardServer({ label: 'v1607 board server', readyTimeoutMs: 15000, env: () => ({ ...process.env, SCRUM_BOARD_FILE: boardFile,
+  let srv;
+  try {
+    srv = await spawnBoardServer({ ...(args ? { args } : {}), label: 'v1607 board server', readyTimeoutMs: 15000, env: () => ({ ...process.env, SCRUM_BOARD_FILE: boardFile,
     SCRUM_MCP_NOTIFY_URL: '', SCRUM_ATTACHMENTS_DIR: attach, SCRUM_CHANNEL_CONFIG_FILE: path.join(own, 'channel-config.json'),
     SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: execUrl, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1' }) });   // #1833: the harness retries a lost port race
+  } catch (e) { fs.rmSync(own, { recursive: true, force: true }); throw e; }   // #2064: a server that never started leaves nothing behind
   return { base: srv.baseUrl, stderr: srv.stderr, stop: async () => {
     const p = srv.proc; const gone = p.exitCode !== null || p.signalCode !== null ? Promise.resolve() : new Promise((r) => p.once('exit', r));
     srv.stop(); await gone;   // the process has exited, so nothing can recreate a path under `own` after it is removed
     fs.rmSync(own, { recursive: true, force: true });
   } };
 }
-async function stack(body) {
-  const store = tmpStore('v1607-store-');
-  const exec = await startExecutor({ store, datasetId: DSID, create: true });
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'v1607-'));
-  const file = path.join(dir, 'board.json');
-  fs.writeFileSync(file, JSON.stringify(makeBoardFixture({ conversations: [] }), null, 2));
-  const srv = await spawnServer(file, exec.baseUrl);
-  try { return await body({ base: srv.base, execUrl: exec.baseUrl, stderr: srv.stderr }); }
-  finally { await srv.stop(); await killExecutor(exec); fs.rmSync(dir, { recursive: true, force: true }); fs.rmSync(store, { recursive: true, force: true }); }
+async function stack(body, { serverArgs } = {}) {
+  // #2064 — everything is acquired INSIDE the try and released only if it exists, so a start that throws still ends the run cleanly
+  let store, exec, dir, srv;
+  try {
+    store = tmpStore('v1607-store-');
+    exec = await startExecutor({ store, datasetId: DSID, create: true });
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'v1607-'));
+    const file = path.join(dir, 'board.json');
+    fs.writeFileSync(file, JSON.stringify(makeBoardFixture({ conversations: [] }), null, 2));
+    srv = await spawnServer(file, exec.baseUrl, serverArgs);
+    return await body({ base: srv.base, execUrl: exec.baseUrl, stderr: srv.stderr });
+  } finally {
+    if (srv) await srv.stop();
+    if (exec) await killExecutor(exec);
+    if (dir) fs.rmSync(dir, { recursive: true, force: true });
+    if (store) fs.rmSync(store, { recursive: true, force: true });
+  }
 }
 const say = (base, i) => fetch(`${base}/api/conversations`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ author: 'ada', body: `v1607 post ${i}` }), signal: AbortSignal.timeout(30000) })
   .then(async (r) => { assert.equal(r.status, 201, `post ${i} refused: ${r.status} ${await r.text()}`); });
+
+
+// #2064 — a run that is already red must still END: a board server that does not start rejects at once, naming itself, and every process and
+// temp path the stack made is gone (before #2064 the executor was started outside the try, so its handles held node --test open indefinitely).
+test('V9 A SERVER THAT DOES NOT START fails the test at once, naming it, and leaves no temp path behind', { skip: SKIP, timeout: 60000 }, async () => {
+  const mine = () => fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('v1607-')).sort();
+  const before = mine();
+  await assert.rejects(stack(async () => assert.fail('the body must not run'), { serverArgs: ['no-such-server-2064.js'] }), /v1607 board server failed to start/);
+  assert.deepEqual(mine(), before, 'no v1607 temp path (store, board dir, server dir) is left behind');
+});
 
 test('V1 UNDER CONCURRENT POSTS: nothing at or below a marker the reader saw becomes deliverable after it was read', { skip: SKIP }, async () => {
   await stack(async (s) => {

@@ -60,29 +60,41 @@ async function startProxy(execUrl) {
   return p;
 }
 
-async function spawnServer(boardFile, execUrl) {
+async function spawnServer(boardFile, execUrl, args) {
   // every temp path this server uses lives under ONE dir the test removes at stop (the suite's tmp-leak check fails a run that leaves one)
   const own = fs.mkdtempSync(path.join(os.tmpdir(), 'a1607-srv-'));
   const attach = path.join(own, 'attachments'); fs.mkdirSync(attach);
-  const srv = await spawnBoardServer({ label: 'a1607 board server', readyTimeoutMs: 15000, env: () => ({ ...process.env, SCRUM_BOARD_FILE: boardFile,
+  let srv;
+  try {
+    srv = await spawnBoardServer({ ...(args ? { args } : {}), label: 'a1607 board server', readyTimeoutMs: 15000, env: () => ({ ...process.env, SCRUM_BOARD_FILE: boardFile,
     SCRUM_MCP_NOTIFY_URL: '', SCRUM_ATTACHMENTS_DIR: attach, SCRUM_CHANNEL_CONFIG_FILE: path.join(own, 'channel-config.json'),
     SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: execUrl, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1' }) });   // #1833: the harness retries a lost port race
+  } catch (e) { fs.rmSync(own, { recursive: true, force: true }); throw e; }   // #2064: a server that never started leaves nothing behind
   return { base: srv.baseUrl, stderr: srv.stderr, stop: async () => {
     const p = srv.proc; const gone = p.exitCode !== null || p.signalCode !== null ? Promise.resolve() : new Promise((r) => p.once('exit', r));
     srv.stop(); await gone;   // the process has exited, so nothing can recreate a path under `own` after it is removed
     fs.rmSync(own, { recursive: true, force: true });
   } };
 }
-async function stack(body) {
-  const store = tmpStore('a1607-store-');
-  const exec = await startExecutor({ store, datasetId: DSID, create: true });
-  const proxy = await startProxy(exec.baseUrl);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'a1607-'));
-  const file = path.join(dir, 'board.json');
-  fs.writeFileSync(file, JSON.stringify(makeBoardFixture({ conversations: [] }), null, 2));
-  const srv = await spawnServer(file, proxy.url);
-  try { return await body({ base: srv.base, execUrl: exec.baseUrl, proxy, stderr: srv.stderr }); }
-  finally { await srv.stop(); await proxy.stop(); await killExecutor(exec); fs.rmSync(dir, { recursive: true, force: true }); fs.rmSync(store, { recursive: true, force: true }); }
+async function stack(body, { serverArgs } = {}) {
+  // #2064 — everything is acquired INSIDE the try and released only if it exists, so a start that throws still ends the run cleanly
+  let store, exec, proxy, dir, srv;
+  try {
+    store = tmpStore('a1607-store-');
+    exec = await startExecutor({ store, datasetId: DSID, create: true });
+    proxy = await startProxy(exec.baseUrl);
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'a1607-'));
+    const file = path.join(dir, 'board.json');
+    fs.writeFileSync(file, JSON.stringify(makeBoardFixture({ conversations: [] }), null, 2));
+    srv = await spawnServer(file, proxy.url, serverArgs);
+    return await body({ base: srv.base, execUrl: exec.baseUrl, proxy, stderr: srv.stderr });
+  } finally {
+    if (srv) await srv.stop();
+    if (proxy) await proxy.stop();
+    if (exec) await killExecutor(exec);
+    if (dir) fs.rmSync(dir, { recursive: true, force: true });
+    if (store) fs.rmSync(store, { recursive: true, force: true });
+  }
 }
 
 async function api(base, method, route, body) {
@@ -108,6 +120,16 @@ INSERT { GRAPH ${BKG} { <${EX}dataset> <${EX}commitSeq> ?s1 . <${op}> <${EX}comm
 WHERE { GRAPH ${BKG} { <${EX}dataset> <${EX}commitSeq> ?s } BIND(?s + 1 AS ?s1) }` });
   assert.ok(r.status < 300, `non-post commit refused: ${r.status} ${await r.text()}`);
 }
+
+
+// #2064 — a run that is already red must still END: a board server that does not start rejects at once, naming itself, and every process and
+// temp path the stack made is gone (before #2064 the executor was started outside the try, so its handles held node --test open indefinitely).
+test('S0 A SERVER THAT DOES NOT START fails the test at once, naming it, and leaves no temp path behind', { skip: SKIP, timeout: 60000 }, async () => {
+  const mine = () => fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('a1607-')).sort();
+  const before = mine();
+  await assert.rejects(stack(async () => assert.fail('the body must not run'), { serverArgs: ['no-such-server-2064.js'] }), /a1607 board server failed to start/);
+  assert.deepEqual(mine(), before, 'no a1607 temp path (store, board dir, server dir) is left behind');
+});
 
 test('S1 NON-POST COMMIT: the next empty poll advances to the head it read, and the poll after that makes no operation scan', { skip: SKIP }, async () => {
   await stack(async (s) => {
