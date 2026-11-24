@@ -104,9 +104,11 @@ const clip = (s) => String(s || '').split('\n').slice(0, EXCERPT_LINES).join('\n
  * `runs` are every run CI reported for the sha (ci-verdict's shape); `newTokens` are identifiers the diff's added
  * lines contain that the base tree never had. Without a diff (no base known) pass empty lists: nothing can then be
  * attributed to the diff, so failures come out UNKNOWN or, with a same-sha pass, probable flakes.
+ * #2073 — `diffRead: false` says the diff could NOT be read (no base, or git failed). Each finding's `inDiff` is then
+ * null, not false, and the post says "diff unavailable": an unread diff is not evidence that a file is outside it.
  */
 export function diagnose(input) {
-  const { sha, base = null, runs = [], failedLogs = [], diffFiles = [], newTokens = [], importsOf = {} } = input || {};
+  const { sha, base = null, runs = [], failedLogs = [], diffFiles = [], newTokens = [], importsOf = {}, diffRead = true } = input || {};
   // #2025 — `runs` may hold several ATTEMPTS of one run (same databaseId). The verdict is the gate's, from each run's
   // LATEST attempt only; the earlier attempts are history, read for evidence and never for the verdict.
   const latestOf = new Map();
@@ -122,6 +124,7 @@ export function diagnose(input) {
   if (rv.code !== EXIT.RED && !greenWithHistory) return { verdict: named[rv.code], why: rv.why, findings: [], observations: { runs: rv.why }, provenance, advice: '' };
 
   const inDiff = (f) => !!f && diffFiles.includes(f);
+  const label = (f) => (f && !diffRead ? null : inDiff(f)); // #2073: true / false / null = diff unavailable
   const fresh = new Set(newTokens);
   const evidenceFor = (text) => {
     // A short plain word ("code", "table") is prose that any diff may happen to add; it is not evidence. A token
@@ -145,9 +148,9 @@ export function diagnose(input) {
     for (const f of p.failures) {
       const evidence = evidenceFor(`${f.name}\n${f.excerpt}`);
       const cls = inDiff(f.file) ? 'in-diff' : evidence.length ? 'caused-by-diff' : passedElsewhere.length ? 'probable-flake' : 'unknown';
-      findings.push({ class: cls, test: f.name, file: f.file, inDiff: inDiff(f.file), evidence, passedElsewhere: cls === 'probable-flake' ? passedElsewhere : [], excerpt: clip(f.excerpt), runId: log.runId });
+      findings.push({ class: cls, test: f.name, file: f.file, inDiff: label(f.file), evidence, passedElsewhere: cls === 'probable-flake' ? passedElsewhere : [], excerpt: clip(f.excerpt), runId: log.runId });
     }
-    for (const l of p.newLeaks) findings.push({ class: 'temp-leak', test: null, file: l.file, inDiff: inDiff(l.file), entries: l.entries, bytes: l.bytes, evidence: [], passedElsewhere: [], excerpt: '', runId: log.runId });
+    for (const l of p.newLeaks) findings.push({ class: 'temp-leak', test: null, file: l.file, inDiff: label(l.file), entries: l.entries, bytes: l.bytes, evidence: [], passedElsewhere: [], excerpt: '', runId: log.runId });
     const explained = new Set(findings.map((x) => x.file));
     // #2025 — split rows files (#1760): a row's location is the module it lives in, but FILE EXITED names the test
     // file that imports it. A failing row explains an importer's exit only when that importer is the ONE exited file
@@ -155,7 +158,7 @@ export function diagnose(input) {
     const importers = (m) => p.fileExited.filter((x) => (importsOf[x.file] || []).includes(m));
     const viaImport = (file) => (importsOf[file] || []).some((m) => explained.has(m) && importers(m).length === 1);
     for (const e of p.fileExited) {
-      if (!explained.has(e.file) && !viaImport(e.file)) findings.push({ class: 'unknown', test: null, file: e.file, inDiff: inDiff(e.file), evidence: [], passedElsewhere: [], excerpt: `the file exited with code ${e.code} and no failing row names it`, runId: log.runId });
+      if (!explained.has(e.file) && !viaImport(e.file)) findings.push({ class: 'unknown', test: null, file: e.file, inDiff: label(e.file), evidence: [], passedElsewhere: [], excerpt: `the file exited with code ${e.code} and no failing row names it`, runId: log.runId });
     }
     if (!p.failures.length && !p.newLeaks.length && !p.fileExited.length) {
       findings.push({ class: 'unknown', test: null, file: null, inDiff: false, evidence: [], passedElsewhere: [], excerpt: clip(p.runnerErrors.join('\n') || 'the run failed, and its log names no failing row, leak or exited file'), runId: log.runId });
@@ -195,7 +198,7 @@ export function formatDiagnosis(d) {
   }
   if (d.observations?.tap) out.push(`TAP: fail ${d.observations.tap.fail ?? '?'}, pass ${d.observations.tap.pass ?? '?'}.`);
   for (const f of d.findings) {
-    const where = f.file ? `\`${f.file}\` (${f.inDiff ? 'in the diff' : 'not in the diff'})` : 'no file named';
+    const where = f.file ? `\`${f.file}\` (${f.inDiff === null ? 'diff unavailable' : f.inDiff ? 'in the diff' : 'not in the diff'})` : 'no file named';
     let line = `- ${f.test ? `\`${f.test}\` in ` : ''}${where}: **${PHRASE[f.class]}**`;
     if (f.class === 'temp-leak') line += `, ${f.entries} entries left behind`;
     if (f.evidence.length) line += `. It names ${f.evidence.map((e) => `\`${e}\``).join(', ')}, which this diff introduced or changed`;

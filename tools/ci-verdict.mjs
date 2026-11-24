@@ -97,6 +97,7 @@ export async function explain(sha, { gh = process.env.CI_VERDICT_GH || 'gh', git
   const gate = verdict(runs);
   const failedLogs = [];
   let diffFiles = [];
+  let diffRead = false; // #2073: true only once git has actually read the diff
   let newTokens = [];
   // #2025 — `run list` shows only each run's LATEST attempt. A rerun that passed hides the red attempt before it, and
   // that red-then-green is the commonest flake signal there is. So the earlier attempts are asked for by number.
@@ -133,6 +134,7 @@ export async function explain(sha, { gh = process.env.CI_VERDICT_GH || 'gh', git
       const tree = run(git, ['grep', '-h', '-I', '-e', '', base]);
       if (names.status === 0 && diff.status === 0 && tree.status <= 1) {
         diffFiles = names.stdout.split('\n').filter(Boolean);
+        diffRead = true;
         const added = diff.stdout.split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++')).map((l) => l.slice(1)).join('\n');
         const had = tokens(tree.stdout);
         newTokens = [...tokens(added)].filter((t) => !had.has(t));
@@ -150,7 +152,7 @@ export async function explain(sha, { gh = process.env.CI_VERDICT_GH || 'gh', git
     importsOf[file] = [...shown.stdout.matchAll(/^\s*(?:import|export)\b[^'"\n]*?(?:from\s*)?['"](\.{1,2}\/[^'"?]+)(?:\?[^'"]*)?['"]/gm)]
       .map((m) => path.posix.normalize(path.posix.join(dir, m[1])));
   }
-  const d = diagnose({ sha, base, runs: [...runs, ...history], failedLogs, diffFiles, newTokens, importsOf });
+  const d = diagnose({ sha, base, runs: [...runs, ...history], failedLogs, diffFiles, diffRead, newTokens, importsOf });
   return { code: gate.code, diagnosis: d, text: [formatDiagnosis(d), ...notes.map((n) => `(${n})`)].join('\n') };
 }
 

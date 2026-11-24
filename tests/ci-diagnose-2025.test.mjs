@@ -200,3 +200,15 @@ test('D13 AMBIGUOUS IMPORTERS EXPLAIN NOTHING: two exited files import the modul
   });
   assert.deepEqual(byClass(d).filter(([, c]) => c === 'unknown').map(([f]) => f), ['tests/x-part1.test.mjs', 'tests/x-part2.test.mjs']);
 });
+
+test('D14 #2073 AN UNREAD DIFF IS NOT "NOT IN THE DIFF": with the diff unavailable, each file says "diff unavailable"', () => {
+  const { input } = load('29871cc-main-a1');
+  const d = diagnose({ ...input, diffFiles: [], newTokens: [], diffRead: false });
+  assert.equal(d.findings[0].inDiff, null, 'unknown, not false');
+  const t = formatDiagnosis(d);
+  assert.match(t, /`tests\/whisper-enable-flag\.test\.mjs` \(diff unavailable\)/);
+  assert.doesNotMatch(t, /not in the diff/);
+  // control: the same input with the diff READ and empty still says "not in the diff"
+  const read = formatDiagnosis(diagnose({ ...input, diffFiles: [], newTokens: [] }));
+  assert.match(read, /\(not in the diff\)/);
+});

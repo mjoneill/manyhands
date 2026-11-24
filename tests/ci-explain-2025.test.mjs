@@ -103,6 +103,21 @@ test('E2 NO PR, NO ATTRIBUTION: nothing is blamed on the diff, it says so, and a
   assert.equal(given.diagnosis.findings[0].class, 'caused-by-diff', 'an explicit base restores attribution');
 });
 
+test('E7 #2073 AN UNREAD DIFF IS LABELLED SO: no base, or a base git cannot diff, says "diff unavailable", never "not in the diff"', async () => {
+  const gh = fakeGh('e7', { runs: [RED], logs: { 11: LOG('register BRAND_NEW_CODE in the table') }, base: '' });
+  const nobase = await explain(HEAD, { gh: gh.bin, cwd: REPO });
+  assert.match(nobase.text, /no PR carries this sha/);
+  assert.match(nobase.text, /`tests\/guard\.test\.mjs` \(diff unavailable\)/);
+  assert.doesNotMatch(nobase.text, /not in the diff/);
+  const unreadable = await explain(HEAD, { gh: gh.bin, cwd: REPO, base: 'f'.repeat(40) });
+  assert.match(unreadable.text, /git could not diff/);
+  assert.match(unreadable.text, /\(diff unavailable\)/);
+  assert.doesNotMatch(unreadable.text, /not in the diff/);
+  // control: a readable base keeps the two-state label
+  const read = await explain(HEAD, { gh: gh.bin, cwd: REPO, base: BASE });
+  assert.match(read.text, /\(not in the diff\)/);
+});
+
 test('E3 THE GATE IS UNCHANGED: the CLI exits with the gate\'s code', () => {
   const red = fakeGh('e3r', { runs: [RED], logs: { 11: LOG('x') }, base: BASE });
   const r = cli(red.bin);
