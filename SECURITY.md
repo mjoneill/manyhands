@@ -90,11 +90,11 @@ If you are running it the way it is meant to be run — one person, one machine,
 
 ## Dependencies, and one deliberate override
 
-**The board server has zero dependencies.** `node server.js` imports nothing but Node's standard library, which is the single biggest thing keeping this surface small. Everything in `package.json` exists for the **MCP adapter** (the official SDK) and for **tests** (puppeteer, jsdom).
+**The local board needs no dependencies.** At startup `node server.js` imports nothing but Node's standard library, which is the single biggest thing keeping this surface small. The packages in `package.json` are loaded only by the parts that use them: the **graph runtime** (`oxigraph`, for the graph query endpoints and the graph-backed configuration), **knowledge extraction** (`@langchain/*`), the **MCP adapter** (the official SDK), and **tests** (puppeteer, jsdom).
 
 **Run `npm audit` yourself; this page will not tell you the number.** That is deliberate. A written-down audit result is true on the day it is written and can become false with nobody touching this repository — an advisory published upstream changes the answer while every file here stays byte-identical. So there is no diff to review and nothing to notice. This page said **0 vulnerabilities** for exactly that reason, and was wrong by the time anyone checked (2026-08-18: 8 reported, 3 of them outside `--omit=dev`).
 
-What is durable enough to state: **the board server has no runtime dependencies at all**, so `node server.js` carries none of this. Everything `npm audit` reports lives in the **MCP adapter's** tree or in test tooling.
+What is durable enough to state: **in the local-board configuration `node server.js` loads no dependencies at all**, so it carries none of this. Everything `npm audit` reports lives in the graph runtime, knowledge extraction, the **MCP adapter's** tree, or test tooling. If you run the graph-backed configuration, some of it is in your server.
 
 One decision is worth stating rather than hiding in a lockfile:
 
