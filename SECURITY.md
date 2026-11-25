@@ -1,6 +1,6 @@
 # Security
 
-This document is longer than the feature list, on purpose. This is software that runs an **unauthenticated server** which **agents can act on**, and you should be able to decide whether that's acceptable to you without reading the source.
+This document is longer than the feature list, on purpose. This is software that runs a server that is **unauthenticated by default** which **agents can act on**, and you should be able to decide whether that's acceptable to you without reading the source.
 
 ## Reporting something
 
@@ -28,13 +28,15 @@ That is the single most important property here, and it's deliberately not adjus
 
 ## What is NOT closed, and you should assume the worst
 
-### There is no authentication. At all.
+### By default, there is no authentication
 
-Any process on your machine can read and write the entire board. There are no users, no permissions, no roles. The trust boundary is **your host**, and nothing finer.
+Out of the box, any process on your machine can read and write the entire board. There are no users, no permissions, no roles. The trust boundary is **your host**, and nothing finer.
+
+An opt-in mode, `SCRUM_AUTH=required`, makes every request carry a per-seat bearer token with read, act or admin scope (stored only as hashes, minted with `scripts/credential.mjs`). We have checked that an unauthenticated write is refused with 401 in that mode; we have not audited every route or the MCP adapter under it, so treat it as a lock on the door, not a security review. Everything else on this page still applies with it on.
 
 ### Putting it behind a proxy removes the only protection
 
-The loopback bind is the whole security model. Tunnel it, reverse-proxy it, or port-forward it, and you have an unauthenticated read/write API exposed to whoever can reach that endpoint. If you need remote access, put real authentication in front of it — and understand you're now trusting your own work, not this project's. (A proxy will also need its name in `SCRUM_ALLOWED_HOSTS`, or the `Host` check above will refuse it — which is the check doing its job, not a bug.)
+The loopback bind is the whole security model. Tunnel it, reverse-proxy it, or port-forward it, and you have an unauthenticated read/write API exposed to whoever can reach that endpoint. `SCRUM_AUTH=required` narrows that, but it has not been reviewed for exposure to a network, so don't rely on it alone. If you need remote access, put real authentication in front of it — and understand you're now trusting your own work, not this project's. (A proxy will also need its name in `SCRUM_ALLOWED_HOSTS`, or the `Host` check above will refuse it — which is the check doing its job, not a bug.)
 
 ### ⚠️ The one that should actually worry you: the board is an actuator
 
@@ -55,6 +57,8 @@ Every message and card carries an author, and that author is whatever the writer
 - the audit trail tells you what was written, never reliably who wrote it
 
 If your threat model includes an attacker reaching the board, **this is where it breaks first** — before storage, before the network, before anything else.
+
+With `SCRUM_AUTH=required` on, a request's declared author is replaced by the seat its token belongs to, and a different declared name is kept as "on behalf of", so a post over HTTP can no longer wear another seat's name unnoticed. It proves which token made the request, not who was holding it: anyone with a seat's token is that seat. That is only as strong as the unaudited mode above, and by default none of it applies.
 
 ### Content you didn't write is data, not instructions
 

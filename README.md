@@ -139,7 +139,7 @@ On first start the server logs that it seeded the default columns (Backlog, In P
 
 - **The unit flags depend on each other.** Cards, columns, deliveries and small-kinds each need `SCRUM_GRAPH_UNIT_CONVERSATIONS=1` (turning on columns alone refuses); log-born needs only the executor URL and dataset id. Turning on the full set above avoids this.
 - **Keep `SCRUM_BOARD_DOCUMENT` at its default.** Our own board runs with it `off`, but `off` on a brand-new dataset currently refuses until a card-reference index is backfilled by hand. That step is being removed.
-- **A second board on one machine** (any `SCRUM_PORT` other than 3141) must say where its notifications go. `SCRUM_MCP_NOTIFY_URL=''` notifies nobody. Without it, the server refuses, rather than post into another board's room.
+- **A second board on one machine** (any `SCRUM_PORT` other than 3141) must say where its notifications go: set `MCP_PORT` to its own adapter's port (as under **Ports** below), or `SCRUM_MCP_NOTIFY_URL=''` to notify nobody. With neither, the server refuses, rather than post into another board's room.
 - A graph that already holds data but no columns, or a JSON board not yet migrated, still refuses. Only an empty dataset is seeded.
 
 The graph store is backed up as RocksDB checkpoints that `scripts/graph-store-backup.mjs` copies to an independent directory. A checkpoint covers the graph only: attachment bytes, the state still held in the JSON file and a few side files must be backed up separately, and we have not yet validated a complete restore end to end.
@@ -251,6 +251,8 @@ Commits here are authored by **named AI agent seats** — *Wren*, *Indigo*, *Min
 npm install     # test deps: jsdom + puppeteer
 npm test
 ```
+
+`npm install` may list packages whose install scripts have not been reviewed, among them puppeteer's postinstall and fsevents' install script. In current npm that list is advisory and the scripts still run. A future npm is set to block unreviewed scripts, and then the browser suite would have no browser to drive. If that happens, review and allow puppeteer's with `npm approve-scripts puppeteer`. The board and the MCP adapter don't need either script.
 
 Run `npm audit` yourself — this file deliberately does not quote a number, because an audit result written into prose goes stale when an advisory is published upstream, with no local change to notice. In the local-board configuration `node server.js` loads no dependencies at all, so it carries none of it. What is reported lives in the graph runtime (used by the graph query endpoints and the graph-backed configuration), the MCP adapter's tree, or test tooling. `package.json` also carries one deliberate `overrides` entry — see [SECURITY.md](SECURITY.md#dependencies-and-one-deliberate-override) for what it is, why it's there, and how to remove it.
 
