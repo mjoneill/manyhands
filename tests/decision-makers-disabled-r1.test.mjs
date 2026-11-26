@@ -1,4 +1,6 @@
 /**
+ * ⚠️ #1885: DM1 and DM2 below are RETIRED (the engines now read the graph; see tests/checks-read-graph-1885.test.mjs). DM3 stays.
+ *
  * DECISION-MAKERS UNDER THE UNIT (#1574, rubric #1602): the stale-claim inquiry and the role-expiry check are DISABLED, VISIBLY, while the graph conversations
  * unit is on. Pre-registered by the separate test author BEFORE the disable is built. Copy unchanged into tests/. REAL executor, REAL REST server, REAL MCP
  * adapter with tending on; without a python with pyoxigraph every test is SKIPPED, and a skip is NOT a pass.
@@ -104,47 +106,10 @@ async function scenario(body, { unit }) {
   }
 }
 
-test('DM1 VISIBLE — with the unit on, each decision-maker row says disabled, names #1574 and the graph, is not shaped like a clean check; one startup line names both; the others still run', { skip: SKIP }, async () => {
-  await scenario(async (c) => {
-    for (const id of ['stale-claims', 'role-expiry']) {
-      const row = await c.standing(id);
-      assert.ok(row, `the ${id} standing row is still PRESENT (a vanished row reads as no such check): ${JSON.stringify((await c.checks()).standing?.map((s) => s.id))}`);
-      assert.equal(row.disabled, true, `${id} says disabled: true: ${JSON.stringify(row)}`);
-      assert.equal(typeof row.reason, 'string', `${id} gives a reason: ${JSON.stringify(row)}`);
-      assert.match(row.reason, /#1574/, `${id}'s reason names the unit's card: ${row.reason}`);
-      assert.match(row.reason, /graph/i, `${id}'s reason says why (the graph): ${row.reason}`);
-      assert.ok(!(Array.isArray(row.rows) && row.rows.length === 0), `${id} is NOT shaped like a clean check (an empty rows array is "nothing found"): ${JSON.stringify(row)}`);
-    }
-    const others = ((await c.checks()).standing || []).filter((s) => s.id !== 'stale-claims' && s.id !== 'role-expiry');
-    assert.ok(others.length > 0, 'there are other standing checks to compare against');
-    assert.ok(others.every((s) => s.disabled !== true), `the disable is not blanket; also disabled: ${JSON.stringify(others.filter((s) => s.disabled).map((s) => s.id))}`);
-    assert.ok(others.some((s) => Array.isArray(s.rows)), 'at least one other standing check still ran and returned rows');
-    assert.equal(await c.rest.waitForStderr(/stale-claims/, 3000), true, `the startup line exists: ${c.rest.stderr().slice(-600)}`);
-    const lines = c.linesNaming();
-    assert.equal(lines.length, 1, `exactly ONE line names the engines, at startup: ${JSON.stringify(lines)}`);
-    assert.ok(/stale-claims/.test(lines[0]) && /role-expiry/.test(lines[0]) && /#1574/.test(lines[0]) && /disabled/i.test(lines[0]), `and it names BOTH, the unit and "disabled": ${lines[0]}`);
-  }, { unit: true });
-});
-
-test('DM2 INERT AND QUIET — with the unit on, a working graph-only holder is not asked, a silent holder is not asked, nothing is reclaimed, the dedupe memory is not rewritten, no error, no per-tick noise', { skip: SKIP }, async () => {
-  await scenario(async (c) => {
-    const before = sha(c.stateFile);
-    await sleep(TICKS_MS);
-    const asks = await c.asks();
-    assert.deepEqual(asks.map((m) => m.body), [], `NO ask about anyone (the misread would ask the WORKING holder #10, and a disabled engine knows nothing about #20): ${JSON.stringify(asks.map((m) => m.body))}`);
-    assert.equal(await c.claim('working'), 'bea', 'the working holder still holds');
-    assert.equal(await c.claim('silent'), 'cy', 'the silent holder still holds: nothing reclaims');
-    assert.ok(!/#455/.test(c.mcp.stderrText()), `the adapter logged nothing about #455: ${c.mcp.stderrText().split('\n').filter((l) => /#455/.test(l)).join(' | ')}`);
-    assert.equal(sha(c.stateFile), before, `the ask's dedupe memory is byte-identical (a disabled engine forgets nothing): ${fs.readFileSync(c.stateFile, 'utf8')}`);
-    assert.ok(JSON.parse(fs.readFileSync(c.stateFile, 'utf8')).asked[GHOST], 'and the old episode is still remembered');
-    for (const id of ['stale-claims', 'role-expiry']) {
-      const row = await c.standing(id);
-      assert.ok(row && row.disabled === true, `${id} is still disabled after the ticks: ${JSON.stringify(row)}`);
-      assert.equal(row.error, undefined, `${id} carries no error (a decision is not an instrument failure): ${JSON.stringify(row)}`);
-    }
-    assert.equal(c.linesNaming().length, 1, `still ONE line naming the engines after the ticks (no per-tick noise): ${JSON.stringify(c.linesNaming())}`);
-  }, { unit: true });
-});
+// #1885 (Planning 2026-11-19, sprint #1977) — DM1 and DM2 are RETIRED, on purpose. They pinned the two engines as DISABLED under the
+// unit; #1885 re-enables both by reading the graph's posts. Their replacement is tests/checks-read-graph-1885.test.mjs: G1 is DM3's
+// fixture with the unit ON (the working holder's graph-only post counts, the silent holder is asked once, nothing disabled), and
+// G2/G3 cover the lapsed-but-acting branch this file's header names as not covered. DM3 stays: the unit-off path is unchanged.
 
 test('DM3 UNCHANGED — with the unit off the same fixture behaves as today: the silent holder is asked once, the working holder is not, role-expiry reports, no disabled key, no startup line, the dedupe memory is rewritten', { skip: SKIP }, async () => {
   await scenario(async (c) => {

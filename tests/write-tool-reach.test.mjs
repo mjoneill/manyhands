@@ -36,6 +36,9 @@ const ADJUDICATED = [
   { tool: 'link_decide', path: '/api/links/${link}/decide', field: 'onBehalfOf', reason: 'NOT A DEPENDENCY OF THE TOOL\'S INPUT (#1851): the SERVER sets onBehalfOf when its auth rewrites a foreign `by` (#1569), and the handler reads it only to REFUSE that request (SEAT_NOT_SELF, rows H3/H9); a tool that could send it would defeat the refusal' },
   { tool: 'link_attach', path: '/api/links/attach', field: 'by', reason: 'NOT A DEPENDENCY OF THE TOOL\'S INPUT (#1905): the tool sends `by` itself, from boundSeatOf(extra), and has no seat or by argument, as link_decide; an attachment records who made it, so the model must not name it (row K3 in link-attach-tools-1905)' },
   { tool: 'link_attach', path: '/api/links/attach', field: 'onBehalfOf', reason: 'NOT A DEPENDENCY OF THE TOOL\'S INPUT (#1905): the SERVER sets onBehalfOf when its auth rewrites a foreign `by` (#1569), and the handler reads it only to REFUSE that request (SEAT_NOT_SELF, rows R4/R7 in knowledge-linking-attach-rest-1905)' },
+  // #449: the tool NAME is the direction. reaction_add sends on:true and reaction_remove sends on:false, composed by the tool
+  // itself; neither takes an `on` argument, so a model cannot send the wrong direction through the wrong verb.
+  ...['reaction_add', 'reaction_remove'].map((tool) => ({ tool, path: '/api/conversations/${encodeURIComponent(id)}/reactions', field: 'on', reason: 'NOT A DEPENDENCY OF THE TOOL\'S INPUT (#449): the tool composes `on` itself (true for reaction_add, false for reaction_remove); the direction is the tool you call, not an argument' })),
   // #1888: visible only once top-level helpers are followed. card_create's throttle (#755) records its own refusal through
   // the top-level reportRefusal(), composing every field itself: actor from args.createdBy, rule and reason from
   // decideThrottle's decision, entity/request/route fixed at the call site. Nothing in the body is a field the model sends.

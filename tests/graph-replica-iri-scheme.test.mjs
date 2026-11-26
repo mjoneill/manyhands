@@ -25,7 +25,7 @@ const ENCODED = 'https%3A%2F%2Fscrumboard.local%2Fagent%2Fguest';
 const call = (over = {}) => ({
   '@type': 'scrum:ModelCall',
   '@id': 'https://scrumboard.local/model-call/00000000-0000-4000-8000-000000001426',
-  'scrum:agent': 'bubbles',
+  'scrum:agent': 'otto',
   'scrum:wakeKind': 'channel',
   'scrum:calledAt': '2026-09-20T14:01:13.311Z',
   'scrum:ok': true,

@@ -65,3 +65,51 @@ test('#699 a seat entry with no name still matches on its key', () => {
   assert.deepEqual(extractMentions('@solo', { solo: {} }), ['solo'],
     'a roster entry missing a display name must not break key matching');
 });
+
+// #1954 — an @name inside code is QUOTED, not addressed. The extractor ran
+// `@(\w+)` over the raw body, so a post that quoted an earlier ask in
+// backticks was recorded as asking that seat, woke her as an ask, and showed
+// in her `mentions_me`. Same rule as the connector's own text classifier:
+// fenced blocks (``` or ~~~, to the closing fence or the end of the text) and
+// inline code spans are removed before matching.
+const CODE_SEATS = { ...SEATS, kit: { name: 'Kit' } };
+
+test('#1954 an @name inside an inline code span is not a mention', () => {
+  assert.deepEqual(extractMentions('`@kit`', CODE_SEATS), []);
+  assert.deepEqual(extractMentions('he asked ``@kit`` earlier', CODE_SEATS), [], 'a double-backtick span too');
+});
+
+test('#1954 an @name inside a fenced block is not a mention', () => {
+  assert.deepEqual(extractMentions('log:\n```\n@kit ping\n```\ndone', CODE_SEATS), []);
+  assert.deepEqual(extractMentions('log:\n~~~\n@kit ping\n~~~', CODE_SEATS), [], 'a tilde fence');
+  assert.deepEqual(extractMentions('log:\n```\n@kit never closed', CODE_SEATS), [], 'an unclosed fence runs to the end of the text');
+});
+
+test('#1954 POSITIVE CONTROL: an @name in prose is still a mention', () => {
+  assert.deepEqual(extractMentions('@kit can you look?', CODE_SEATS), ['kit']);
+});
+
+test('#1954 prose @name plus a code @name records ONLY the prose one', () => {
+  assert.deepEqual(extractMentions('@kit see what `@ada` said', CODE_SEATS), ['kit']);
+  assert.deepEqual(extractMentions('@kit\n```\n@ada\n```\n', CODE_SEATS), ['kit']);
+});
+
+test('#1954 a display-name form inside code is not a mention', () => {
+  assert.deepEqual(extractMentions('quoting `@Stardust` here', CODE_SEATS), []);
+  assert.deepEqual(extractMentions('```\n@Stardust\n```', CODE_SEATS), []);
+});
+
+test('#1954 LIVE: the post that woke a seat by quoting her ask in backticks records no mention', () => {
+  // Post 2fffc567 (2026-11-16), verbatim except the seat names, which are
+  // replaced with this file's neutral roster (the push gate refuses seat
+  // names in source): the quoted seat → kit, the others → ada / bex, the
+  // owner → Sam. The board stored mentions: [<the quoted seat>] for it.
+  const body = [
+    '**#1949 is done.** `c58bc95` has been live since 08:30Z.',
+    '- A prose mention of her (`a8bd532d`) became a quiet turn, with no notice.',
+    '- `@kit` (`55e77633`) got "15" back in 7 s, ACCEPTED.',
+    '',
+    'Thank you, bex and kit, for the reads tonight, and ada for most of the hard ones. The open thread, a deliberate `NO_REPLY` on a genuine ask surviving core\'s retry, is now **#1953**, kept separate as kit asked. #1951 (hung model call) waits on Sam\'s config decision.',
+  ].join('\n');
+  assert.deepEqual(extractMentions(body, CODE_SEATS), []);
+});

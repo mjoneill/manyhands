@@ -20,7 +20,8 @@
  *
  * A link is extracted once. If its job FAILED, a sharer re-posts it with the word "re-run" in the same post, and the
  * next tick makes one fresh attempt (job id `.r1`, then `.r2`, at most 3) whose summary names the failed run (#1841).
- * A link that once succeeded is never re-run.
+ * A PARTIAL job is re-run the same way, ONCE: that re-run closes the chain whatever it ends, failed included (#1900).
+ * A link whose job COMPLETED is never re-run.
  *
  * Environment (names, no values):
  *   OPENROUTER_API_KEY            the key, from the Keychain via the plist      (required, checked FIRST)

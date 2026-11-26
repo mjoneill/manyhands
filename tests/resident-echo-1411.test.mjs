@@ -38,49 +38,49 @@ function runOnce(env, seat) {
   });
 }
 
-const pairPosts = (posts) => posts.filter((p) => ['guest', 'bubbles'].includes(p.author) && !/reply cap reached/.test(p.body));
+const pairPosts = (posts) => posts.filter((p) => ['guest', 'otto'].includes(p.author) && !/reply cap reached/.test(p.body));
 const capLines = (posts) => posts.filter((p) => /reply cap reached/.test(p.body));
 const listPosts = async (base) => { const l = (await api(base, 'GET', '/api/conversations?limit=100')).body; return Array.isArray(l) ? l : l.conversations; };
 
 async function twoResidents({ cap }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cap-1411-'));
-  const sausage = await fakeOllama('REPLY: @bubbles just so nobody has to guess — we are separate seats.');
-  const bubbles = await fakeOllama('REPLY: @sausage and you are Sausage; the key is separate.');
+  const nell = await fakeOllama('REPLY: @otto just so nobody has to guess — we are separate seats.');
+  const otto = await fakeOllama('REPLY: @nell and you are Nell; the key is separate.');
   const s = await startRestServer({ board: makeBoardFixture({ cards: [], conversations: [] }) });
   const mk = (seatKey, name, baseUrl) => api(s.baseUrl, 'POST', '/api/agents', { seatKey, name, prompt: `You are ${name}.`, model: { model: 'fake', protocol: 'ollama-native', baseUrl }, residency: 'resident', deliveryMode: 'wake', wakeOn: ['mention'], by: 'ada' });
-  assert.equal((await mk('guest', 'Sausage', sausage.baseUrl)).status, 201);
-  assert.equal((await mk('bubbles', 'Bubbles', bubbles.baseUrl)).status, 201);
+  assert.equal((await mk('guest', 'Nell', nell.baseUrl)).status, 201);
+  assert.equal((await mk('otto', 'Otto', otto.baseUrl)).status, 201);
   if (cap !== undefined) {
     const c = await api(s.baseUrl, 'POST', '/api/config', { mode: 'soft', residents: { replyWakesPerPairPerHour: cap } });
     assert.equal(c.status, 200, JSON.stringify(c.body));
   }
   const env = (seat) => ({ SCRUM_BOARD_URL: s.baseUrl, SCRUM_GUEST_STATE_FILE: path.join(dir, `${seat}.state.json`) });
   const outs = [];
-  const tick = async () => { for (const seat of ['guest', 'bubbles']) { const r = await runOnce(env(seat), seat); assert.equal(r.code, 0, r.err + r.out); outs.push(`[${seat}] ${(r.out + r.err).trim().split('\n').pop()}`); } };
-  const stop = async () => { await s.stop(); await sausage.stop(); await bubbles.stop(); fs.rmSync(dir, { recursive: true, force: true }); };
+  const tick = async () => { for (const seat of ['guest', 'otto']) { const r = await runOnce(env(seat), seat); assert.equal(r.code, 0, r.err + r.out); outs.push(`[${seat}] ${(r.out + r.err).trim().split('\n').pop()}`); } };
+  const stop = async () => { await s.stop(); await nell.stop(); await otto.stop(); fs.rmSync(dir, { recursive: true, force: true }); };
   return { s, tick, outs, stop };
 }
 
 test('#1411 PAIR CAP (default 3): a human names one resident → the pair converses exactly three wakes and stops; the capped seat says so ONCE; a human naming one of them restarts her and only her', async () => {
   const t = await twoResidents({});
   try {
-    const human = await api(t.s.baseUrl, 'POST', '/api/conversations', { author: 'ada', body: '@sausage what was it like?' });
+    const human = await api(t.s.baseUrl, 'POST', '/api/conversations', { author: 'ada', body: '@nell what was it like?' });
     assert.deepEqual(human.body.mentions, ['guest']);
     for (let i = 0; i < 4; i++) await t.tick();
     let posts = await listPosts(t.s.baseUrl);
     const pair = pairPosts(posts);
     assert.equal(pair.length, 4, `human wake + 3 pair wakes = 4 resident replies (G B G B), then silence, not ${pair.length}:\n${t.outs.join('\n')}`);
-    assert.deepEqual(pair.map((p) => p.author), ['guest', 'bubbles', 'guest', 'bubbles']);
+    assert.deepEqual(pair.map((p) => p.author), ['guest', 'otto', 'guest', 'otto']);
     assert.equal(capLines(posts).length, 1, `the capped seat says so exactly once:\n${posts.map((p) => `${p.author}: ${p.body.slice(0, 60)}`).join('\n')}`);
     assert.equal(capLines(posts)[0].author, 'guest', 'guest is the one whose fourth wake was held (B2 named her at spend 3)');
     assert.deepEqual(capLines(posts)[0].mentions, [], 'the cap line names nobody, so it wakes nobody');
     // A human naming the OTHER resident restarts her — and her reply to guest is still held (the hour has not slid).
-    await api(t.s.baseUrl, 'POST', '/api/conversations', { author: 'ada', body: '@bubbles still there?' });
+    await api(t.s.baseUrl, 'POST', '/api/conversations', { author: 'ada', body: '@otto still there?' });
     for (let i = 0; i < 2; i++) await t.tick();
     posts = await listPosts(t.s.baseUrl);
     const pair2 = pairPosts(posts);
-    assert.equal(pair2.length, 5, `the human's second post woke bubbles once more; guest stayed capped:\n${t.outs.join('\n')}`);
-    assert.equal(pair2.at(-1).author, 'bubbles');
+    assert.equal(pair2.length, 5, `the human's second post woke otto once more; guest stayed capped:\n${t.outs.join('\n')}`);
+    assert.equal(pair2.at(-1).author, 'otto');
     assert.equal(capLines(posts).length, 1, 'said once per hour, not once per held mention');
   } finally { await t.stop(); }
 });
@@ -88,10 +88,10 @@ test('#1411 PAIR CAP (default 3): a human names one resident → the pair conver
 test('#1411 cap 0 is rule 1 exactly: a human names one → ONE reply, not a chain, and the held seat says so once', async () => {
   const t = await twoResidents({ cap: 0 });
   try {
-    await api(t.s.baseUrl, 'POST', '/api/conversations', { author: 'ada', body: '@sausage what was it like?' });
+    await api(t.s.baseUrl, 'POST', '/api/conversations', { author: 'ada', body: '@nell what was it like?' });
     for (let i = 0; i < 3; i++) await t.tick();
     const posts = await listPosts(t.s.baseUrl);
     assert.deepEqual(pairPosts(posts).map((p) => p.author), ['guest'], `one reply, no chain:\n${t.outs.join('\n')}`);
-    assert.equal(capLines(posts).length, 1); assert.equal(capLines(posts)[0].author, 'bubbles');
+    assert.equal(capLines(posts).length, 1); assert.equal(capLines(posts)[0].author, 'otto');
   } finally { await t.stop(); }
 });

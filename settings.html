@@ -1148,7 +1148,7 @@ function agentRow(a) {
   // #1268 — UNCHECKING EVERY BOX DOES NOT SILENCE THE SEAT, AND THE PAGE SAID
   // "Saved" ANYWAY.
   //
-  // The card asked for the opposite warning: @bubbles ruled that all-unchecked
+  // The card asked for the opposite warning: a resident seat ruled that all-unchecked
   // is "a retired seat wearing an invited one's clothes" and the page should
   // say UNREACHABLE out loud. Measuring it inverted the finding. There is no
   // unreachable state: the server coerces an empty wakeOn back to ['mention']
@@ -1393,19 +1393,29 @@ load();
     }, 250);
   };
 
+  // #1825 — a count is text beside its box. null is "not read": the kind could not be read, so there is no number, and 0
+  // would be a claim. A count taken without reading every row (deliveries and posts, PO 55038/55050) says so on hover, in
+  // words for the person reading the page, not ours (PO 55054).
+  const countText = (sp) => (sp.count === null ? 'not read' : `${sp.count}`);
+  const howCounted = (sp) => (sp.count !== null && (sp.countedBy === 'graph' || sp.countedBy === 'route-total')
+    ? 'Counted without reading each one, so this page opens quickly. The export itself reads every one.\n' : '');
   try {
-    const r = await fetch('/api/export/spaces');
+    // The boxes first, from the menu alone (?counts=0, nothing read), each saying "counting…"; then the counts, which read
+    // every kind from where it lives and take seconds on a large board.
+    const r = await fetch('/api/export/spaces?counts=0');
     const j = await r.json();
     kindsEl.replaceChildren();
+    const countEl = new Map();
     for (const sp of j.spaces) {
       const label = document.createElement('label');
       if (!sp.prose) label.className = 'machine';
       const box = document.createElement('input'); box.type = 'checkbox'; box.value = sp.space; box.checked = !!sp.defaultOn;
       const name = document.createElement('span'); name.textContent = sp.space;
-      const n = document.createElement('span'); n.className = 'n'; n.textContent = `${sp.count}`;
+      const n = document.createElement('span'); n.className = 'n'; n.textContent = 'counting…';
       label.title = `${sp.kind || sp.collection} — ${sp.definition}`.slice(0, 300);
       label.append(box, name, n);
       kindsEl.append(label);
+      countEl.set(sp.space, { n, label });
     }
     kindsEl.addEventListener('change', preview);
     preview();
@@ -1413,6 +1423,16 @@ load();
     unregEl.textContent = u.length
       ? `Present but unregistered — not exportable until registered (#1215): ${u.map((x) => `${x.type} ×${x.count}`).join(', ')}`
       : 'Every entity on this board belongs to a registered kind.';
+    try {
+      const full = await (await fetch('/api/export/spaces')).json();
+      for (const sp of full.spaces) {
+        const el = countEl.get(sp.space); if (!el) continue;
+        el.n.textContent = countText(sp);
+        el.label.title = (sp.unread ? `Not read: ${sp.unread}\n` : howCounted(sp)) + el.label.title;
+      }
+    } catch (e) {
+      for (const { n } of countEl.values()) n.textContent = 'not read';
+    }
   } catch (e) {
     kindsEl.textContent = `could not read the exportable kinds: ${e && e.message ? e.message : e}`;
   }

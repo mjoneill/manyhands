@@ -8,6 +8,7 @@
  *   R3  a claim carries its gist, its verbatim quote, its type, its verb (secondary), and the cards it may bear on
  *   R4  a dismissed link is listed on its claim but is not counted as a link the run has
  *   R5  a PDF's page comes from the kept text, only when that text hashes back to the source; a web article has no page
+ *   R5c a file whose kept text verifies but has no form feed (a .docx) is page-less: "none", not the "unavailable" fault (#1854)
  *   R6  runs are newest first, a run that never wrote a report is `unfinished`, and `truncated` is honest
  *   R7  every IRI in a query comes from LOGBORN_TERMS (a mistyped one silently returns zero rows)
  *   R8  reading.html: no innerHTML/outerHTML/insertAdjacentHTML/document.write, no external URL, links only for http(s)
@@ -127,6 +128,37 @@ test('R5b source.pages says "known", "unavailable" or "none": a file whose kept 
   assert.equal(shapeReading({ header: file, claimRows: rows, linkRows: [], cardOf: () => null, pageOf: null }).source.pages, 'unavailable');
   assert.equal(shapeReading({ header, claimRows: rows, linkRows: [], cardOf: () => null, pageOf: null }).source.pages, 'none', 'a web source has no pages and says so without alarm');
   assert.equal(shapeReading({ header, claimRows: rows, linkRows: [], cardOf: () => null }).source.pages, 'none');
+});
+
+test('R5c (#1854) a file whose kept text is found and verified but has no form feed is page-LESS ("none"), not a fault; missing or mismatched text stays "unavailable"; a paged PDF is unchanged', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kr1854-'));
+  try {
+    fs.mkdirSync(path.join(dir, 'sources'));
+    const keep = (text) => { const hex = crypto.createHash('sha256').update(text).digest('hex'); fs.writeFileSync(path.join(dir, 'sources', `${hex}.txt`), text); return hex; };
+    const fileUrl = 'urn:sha256:' + 'b'.repeat(64);
+    const read = (hex) => {
+      const sourceIri = `https://scrumboard.local/source/${hex}`;
+      const pageOf = pagesOf({ sourceIri, url: fileUrl, dataDir: dir });
+      return shapeReading({ header: { ...header, sourceIri, source: { ...header.source, url: fileUrl } }, claimRows: [claimRow('c', 2)], linkRows: [], cardOf: () => null, pageOf });
+    };
+    // a Word file: textutil's text, verified, no form feed anywhere
+    const docx = keep(['first paragraph', 'second paragraph', 'third paragraph'].join('\n'));
+    const d = read(docx);
+    assert.equal(d.source.pages, 'none', 'a page-less file is not a fault');
+    assert.equal(d.source.hasPages, false);
+    assert.equal(d.claims[0].page, null);
+    // the same file with its text tampered (no longer hashes to its name): a fault, as before
+    fs.writeFileSync(path.join(dir, 'sources', `${docx}.txt`), 'first paragraph tampered');
+    assert.equal(read(docx).source.pages, 'unavailable');
+    // no kept text on disk at all: a fault, as before
+    assert.equal(read('c'.repeat(64)).source.pages, 'unavailable');
+    // a paged PDF: unchanged
+    const pdf = keep(['alpha', 'beta', '\fgamma', 'delta'].join('\n'));
+    const p = read(pdf);
+    assert.equal(p.source.pages, 'known');
+    assert.equal(p.source.hasPages, true);
+    assert.equal(p.claims[0].page, 2);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('R6 runs are newest first, an unreported run is "unfinished", and truncated says when the list was cut', () => {

@@ -18,7 +18,7 @@
  *   V2 VERDICT DIFF flag-on vs flag-unset, FULL normalised lists: the ONLY differences are the NAMED ones; every other check, standing check and counter is equal. The named list:
  *                   (1) the executor-only probe: stale on the replica, holds on the executor (the proof the flag moved the reads);
  *                   (2) the standing check graph-store-meter (added 2026-10-18 for #1645 2d): flag-unset it measures the in-process copy as before (rows, not disabled);
- *                       flag-on it reports `disabled: true` with a reason that names #1645, and carries neither an error nor rows, because on the executor pass nothing
+ *                       flag-on it is NOT LISTED (#1979 retired it from that pass; before, it reported `disabled: true` naming #1645), because on the executor pass nothing
  *                       builds the copy for it to measure. Both sides of (2) are ASSERTED, not just excluded, so a meter that errors, or answers rows: [] ("nothing crossed")
  *                       for a copy that does not exist, is red here.
  *   V3 HAZARDS      on the executor leg the wildcard ASK holds; the cast compare holds; the uncast compare is an error (status only; the engines word their errors differently); the phantom-block standing check returns its row
@@ -132,7 +132,8 @@ function norm(payload) {
 const flat = (n) => Object.fromEntries(n.byCard.flatMap((c) => c.checks).map((c) => [c.claim, c]));
 const withoutProbe = (n) => ({ ...n, byCard: n.byCard.map((c) => ({ ...c, checks: c.checks.filter((r) => r.claim !== PROBE_CLAIM) })), counters: {} });
 const METER = 'graph-store-meter';   // V2's second named difference (#1645 2d)
-const withoutNamed = (n) => ({ ...withoutProbe(n), standing: n.standing.filter((s) => s.id !== METER) });
+const ROLE = 'role-expiry';   // V2's third named difference (#1885): without the log-born unit the executor pass pauses it rather than build the in-process copy
+const withoutNamed = (n) => ({ ...withoutProbe(n), standing: n.standing.filter((s) => s.id !== METER && s.id !== ROLE) });
 
 test('V0 CONTROL: two flag-unset REST processes agree on the whole normalised list, and the list holds every verdict kind and a non-empty standing row', { skip: SKIP, timeout: 900000 }, async () => {
   await world(async ({ A, start }) => {
@@ -165,8 +166,12 @@ test('V2 VERDICT DIFF: flag-on vs flag-unset, the FULL normalised lists are equa
     assert.equal(flat(na)[PROBE_CLAIM]?.status, 'stale', 'the named difference, replica side: stale'); assert.equal(flat(nb)[PROBE_CLAIM]?.status, 'holds', 'the named difference, executor side: holds (only the executor has the fact)');
     const [ma, mb] = [na.standing.find((s) => s.id === METER), nb.standing.find((s) => s.id === METER)];
     assert.ok(ma && Array.isArray(ma.rows) && !ma.disabled && !ma.error, `the second named difference, flag-unset side: the meter measures the in-process copy as before (${JSON.stringify(ma)})`);
-    assert.ok(mb && mb.disabled === true && typeof mb.reason === 'string' && /#1645/.test(mb.reason) && !mb.error && !('rows' in mb), `the second named difference, flag-on side: disabled with a reason naming #1645, no error and no rows (${JSON.stringify(mb)})`);
-    assert.deepEqual(withoutNamed(nb), withoutNamed(na), 'EVERY other verdict, standing check and counter is equal (the named list has two entries, and this is neither)');
+    // #1979 — RETIRED from the executor pass (#1885 option 2): it measures a copy that pass never builds, so the pass does not list it at all
+    assert.equal(mb, undefined, `the second named difference, flag-on side: the meter is not on the executor pass's standing list (retired, #1979), not even as disabled (${JSON.stringify(mb)})`);
+    const [ra, rb] = [na.standing.find((s) => s.id === ROLE), nb.standing.find((s) => s.id === ROLE)];
+    assert.ok(ra && Array.isArray(ra.rows) && !ra.disabled && !ra.error, `the third named difference (#1885), flag-unset side: role-expiry runs (${JSON.stringify(ra)})`);
+    assert.ok(rb && rb.disabled === true && /#1561/.test(rb.reason || '') && /#1645/.test(rb.reason || '') && !rb.error && !('rows' in rb), `the third named difference, flag-on side without log-born: paused with a reason naming #1561 and #1645 (${JSON.stringify(rb)})`);
+    assert.deepEqual(withoutNamed(nb), withoutNamed(na), 'EVERY other verdict, standing check and counter is equal (the named list has three entries, and this is none of them)');
     assert.equal(nb.counters.stale, na.counters.stale - 1, 'the one named difference is the only thing that moved the stale count'); assert.equal(nb.counters.errors, na.counters.errors);
   });
 });

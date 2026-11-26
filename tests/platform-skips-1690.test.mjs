@@ -390,22 +390,29 @@ test('#1690 (G5) FAILS CLOSED: a receipt missing its sha or manifest hash, or un
 
 // ------------------------------------------------------------------- the real manifest and the real workflow
 
-test('#1690 (W1) the checked-in manifest lists exactly the 25 platform-only tests (seven before #1634, plus its 18 APFS clone rows), each with a reason, in a file that exists and names it', () => {
+test('#1690 (W1) the checked-in manifest lists exactly the 27 platform-only tests (seven before #1634, its 18 APFS clone rows, and #1854\'s 2 textutil rows), each with a reason, in a file that exists and names it', () => {
   assert.ok(fs.existsSync(REAL_MANIFEST), 'tests/platform-only-manifest.json must exist');
   const m = JSON.parse(fs.readFileSync(REAL_MANIFEST, 'utf8'));
   // The census is EXACT on purpose: a new platform skip must change this row, in review, not slip into CI. #1634 added 18 clone rows that need APFS
   // (Linux CI has none). They are evidenced by macOS runs at named shas, NOT by CI. K0, K13b and K13u run in CI and must NOT appear here.
   const BEFORE_1634 = ['#1764', 'I1', 'I2', 'I3', 'I4', 'I5', 'RL'];
   const CLONE_1634 = ['K1o', 'K1', 'K2', 'K3', 'K4', 'K5', 'K6', 'K7', 'K8', 'K9', 'K10', 'K11', 'K12', 'K13', 'K13m', 'K14', 'K14p', 'K14q'];
-  assert.equal(m.length, BEFORE_1634.length + CLONE_1634.length, `25 entries today: I1 to I5, RL, #1764 B3, and #1634's 18 clone rows (got ${m.length})`);
+  // #1854 slice 3: the two rows that need a real .docx, made by macOS's textutil (Linux CI has none). D2 and D4 use a fake
+  // converter and run in CI, so they must NOT appear here.
+  const TEXTUTIL_1854 = ['D1', 'D3'];
+  assert.equal(m.length, BEFORE_1634.length + CLONE_1634.length + TEXTUTIL_1854.length, `27 entries today: I1 to I5, RL, #1764 B3, #1634's 18 clone rows and #1854's D1 and D3 (got ${m.length})`);
   const ids = m.map((e) => e.name.split(' ')[0]).sort();
-  assert.deepEqual(ids, [...BEFORE_1634, ...CLONE_1634].sort());
+  assert.deepEqual(ids, [...BEFORE_1634, ...CLONE_1634, ...TEXTUTIL_1854].sort());
   assert.equal(new Set(m.map((e) => e.name)).size, m.length, 'no test is listed twice');
   for (const e of m.filter((x) => CLONE_1634.includes(x.name.split(' ')[0]))) {
     assert.equal(e.file, 'tests/graph-store-backup-clone-1634.test.mjs', `${e.name.slice(0, 20)}: a #1634 clone row lives in the clone file`);
     assert.match(e.reason, /APFS/, `${e.name.slice(0, 20)}: its reason names the platform it needs`);
   }
-  for (const runs of ['K0', 'K13b', 'K13u']) assert.ok(!ids.includes(runs), `${runs} runs in CI, so it must not be listed as platform-only`);
+  for (const e of m.filter((x) => TEXTUTIL_1854.includes(x.name.split(' ')[0]))) {
+    assert.equal(e.file, 'tests/extract-file-1854.test.mjs', `${e.name.slice(0, 20)}: a #1854 textutil row lives in the file-extraction file`);
+    assert.match(e.reason, /textutil/, `${e.name.slice(0, 20)}: its reason names the tool it needs`);
+  }
+  for (const runs of ['K0', 'K13b', 'K13u', 'D2', 'D4']) assert.ok(!ids.includes(runs), `${runs} runs in CI, so it must not be listed as platform-only`);
   for (const e of m) {
     assert.ok(e.reason && /\S/.test(e.reason), `${e.name}: a reason`);
     const file = path.join(REPO, e.file);

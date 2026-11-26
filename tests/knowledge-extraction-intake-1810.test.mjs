@@ -24,7 +24,7 @@ import { startRestServer } from './helpers/harness.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { HAVE_PY, PY, startExecutor, killExecutor, tmpStore } from './helpers/graph-executor-proc.mjs';
 import { createExtractor } from '../core/knowledge-extraction.mjs';
-import { createIntake, linksOf } from '../core/knowledge-extraction-intake.mjs';
+import { createIntake, linksOf, MAX_RERUNS } from '../core/knowledge-extraction-intake.mjs';
 
 const SKIP = HAVE_PY ? false : `UNAVAILABLE: no python with pyoxigraph at ${PY}`;
 const RS = 'https://scrumboard.local/ns#';
@@ -212,4 +212,109 @@ test('#1841 R9l — a sharer\'s post saying "re-run" makes ONE fresh attempt at 
   assert.deepEqual(t4.started, [], 'a link whose re-run COMPLETED is not re-run again');
   assert.ok(t4.skipped.some((s) => s.url === U5 && /complete/.test(s.reason) && /only for a failed/.test(s.reason)), JSON.stringify(t4.skipped));
   assert.equal(calls, 2);
+});
+
+// ── #1900: a sharer's "re-run" also covers a PARTIAL job, ONCE ───────────────────────────────────────────────────────
+// A partial run (some items rejected) may be re-run once, on an explicit "re-run" post by a sharer, exactly as a failed
+// one. The partial's one re-run CLOSES the chain whatever it ends: partial again, failed, or complete, no further re-run
+// (the conservative reading: a failed re-run of a partial job does NOT open the failed budget). A complete job is never
+// re-run. The failed budget, MAX_RERUNS, is unchanged, and every re-run, a partial's included, is one of its slots.
+const GOOD_ITEM = { block: 1, type: 'definition', span: 'A harness is the layer between a model and the world.', subject: 'harness', predicate: 'scrum:relatedTo', object: 'model' };
+const BAD_TYPE = { block: 2, type: 'fact', span: 'Tools are how it acts.', subject: 'tools', predicate: 'scrum:relatedTo', object: 'acts' };   // rejected, no repair call
+const ANSWER = { complete: { items: [GOOD_ITEM] }, partial: { items: [GOOD_ITEM, BAD_TYPE] }, failed: { items: [] } };
+/** A model whose Nth call answers so that the Nth run ends with script[N]: 'complete' | 'partial' | 'failed'. */
+function scripted(script) {
+  return { bodies: [], async send(body) { this.bodies.push(body); const want = script[this.bodies.length - 1]; if (!want) throw new Error(`unscripted model call ${this.bodies.length}`); return { status: 200, json: ANSWER[want] }; } };
+}
+async function shareAndTick(intake, body) { await post('person-a', body); return intake.tick(); }
+
+test('#1900 R1 — a PARTIAL job is re-run ONCE on a sharer\'s "re-run" (.r1, naming the partial run); a plain repost is skipped; a re-run that ends partial again is not re-run a second time', { skip: SKIP }, async () => {
+  const URL1 = 'https://example.test/articles/partial-then-partial';
+  const base = `job-${sha256(URL1)}`;
+  const model = scripted(['partial', 'partial']);
+  const { intake } = intakeWith({ model, cursor: await cursorNow(), fetchSource: serves(URL1) });
+  const t1 = await shareAndTick(intake, `read ${URL1}`);
+  assert.equal(t1.started[0]?.outcome, 'partial', JSON.stringify(t1));
+  const partialRun = t1.started[0].runId;
+
+  const t2 = await shareAndTick(intake, `again ${URL1}`);
+  assert.deepEqual(t2.started, [], 'a plain repost of a partial link is still skipped');
+  assert.ok(t2.skipped.some((s) => s.url === URL1 && s.reason === 'known: partial'), JSON.stringify(t2.skipped));
+
+  const t3 = await shareAndTick(intake, `re-run ${URL1}, the extractor bug is fixed`);
+  assert.equal(t3.started.length, 1, `one fresh attempt at the partial link (${JSON.stringify(t3)})`);
+  assert.equal(t3.started[0].jobId, `${base}.r1`);
+  assert.equal(t3.started[0].rerunOf, partialRun, 'it names the partial run');
+  assert.equal(t3.started[0].outcome, 'partial');
+  assert.equal(model.bodies.length, 2);
+
+  const t4 = await shareAndTick(intake, `re-run ${URL1}`);
+  assert.deepEqual(t4.started, [], 'a partial job is re-run once, not twice');
+  assert.ok(t4.skipped.some((s) => s.url === URL1 && s.reason === 're-run refused: a partial job is re-run once, and its re-run ended partial'), JSON.stringify(t4.skipped));
+  assert.equal(model.bodies.length, 2, 'no paid call for the refused re-run');
+});
+
+test('#1900 R2 — a partial job\'s re-run that FAILS closes the chain: it does not open the failed budget', { skip: SKIP }, async () => {
+  const URL2 = 'https://example.test/articles/partial-then-failed';
+  const model = scripted(['partial', 'failed']);
+  const { intake } = intakeWith({ model, cursor: await cursorNow(), fetchSource: serves(URL2) });
+  await shareAndTick(intake, `read ${URL2}`);
+  const t2 = await shareAndTick(intake, `re-run ${URL2}`);
+  assert.equal(t2.started[0]?.outcome, 'failed', JSON.stringify(t2));
+  const t3 = await shareAndTick(intake, `re-run ${URL2}`);
+  assert.deepEqual(t3.started, [], 'the partial\'s one re-run is spent, whatever it ended');
+  assert.ok(t3.skipped.some((s) => s.url === URL2 && s.reason === 're-run refused: a partial job is re-run once, and its re-run ended failed'), JSON.stringify(t3.skipped));
+  assert.equal(model.bodies.length, 2);
+});
+
+test('#1900 R3 — a failed job whose re-run ends partial gets the partial\'s one re-run; a complete one is then refused with the same message shape', { skip: SKIP }, async () => {
+  const URL3 = 'https://example.test/articles/failed-partial-complete';
+  const base = `job-${sha256(URL3)}`;
+  const model = scripted(['failed', 'partial', 'complete']);
+  const { intake } = intakeWith({ model, cursor: await cursorNow(), fetchSource: serves(URL3) });
+  await shareAndTick(intake, `read ${URL3}`);
+  const t2 = await shareAndTick(intake, `re-run ${URL3}`);
+  assert.equal(t2.started[0]?.outcome, 'partial', JSON.stringify(t2));
+  const t3 = await shareAndTick(intake, `re-run ${URL3}`);
+  assert.equal(t3.started[0]?.jobId, `${base}.r2`, JSON.stringify(t3));
+  assert.equal(t3.started[0].rerunOf, t2.started[0].runId, 'it names the partial run, not the first failure');
+  assert.equal(t3.started[0].outcome, 'complete');
+  const t4 = await shareAndTick(intake, `re-run ${URL3}`);
+  assert.deepEqual(t4.started, []);
+  assert.ok(t4.skipped.some((s) => s.url === URL3 && s.reason === 'known: complete; a re-run is only for a failed job, or once for a partial job'), JSON.stringify(t4.skipped));
+  assert.equal(model.bodies.length, 3);
+});
+
+test('#1900 R4 — a COMPLETE job is never re-run: refused, no paid call', { skip: SKIP }, async () => {
+  const URL4 = 'https://example.test/articles/complete-first';
+  const model = scripted(['complete']);
+  const { intake } = intakeWith({ model, cursor: await cursorNow(), fetchSource: serves(URL4) });
+  await shareAndTick(intake, `read ${URL4}`);
+  const t2 = await shareAndTick(intake, `re-run ${URL4}`);
+  assert.deepEqual(t2.started, []);
+  assert.ok(t2.skipped.some((s) => s.url === URL4 && s.reason === 'known: complete; a re-run is only for a failed job, or once for a partial job'), JSON.stringify(t2.skipped));
+  assert.equal(model.bodies.length, 1);
+});
+
+test('#1900 R5 — the failed budget is unchanged: MAX_RERUNS failed re-runs and no more; a partial in the LAST slot has no slot left for its re-run', { skip: SKIP }, async () => {
+  assert.equal(MAX_RERUNS, 3);
+  const URLF = 'https://example.test/articles/always-fails';
+  const fails = scripted(Array(MAX_RERUNS + 1).fill('failed'));
+  const a = intakeWith({ model: fails, cursor: await cursorNow(), fetchSource: serves(URLF) });
+  await shareAndTick(a.intake, `read ${URLF}`);
+  for (let n = 1; n <= MAX_RERUNS; n += 1) assert.equal((await shareAndTick(a.intake, `re-run ${URLF}`)).started[0]?.jobId, `job-${sha256(URLF)}.r${n}`);
+  const tf = await shareAndTick(a.intake, `re-run ${URLF}`);
+  assert.deepEqual(tf.started, []);
+  assert.ok(tf.skipped.some((s) => s.url === URLF && s.reason === `re-run refused: ${MAX_RERUNS} re-runs already failed`), JSON.stringify(tf.skipped));
+  assert.equal(fails.bodies.length, MAX_RERUNS + 1);
+
+  const URLP = 'https://example.test/articles/partial-in-the-last-slot';
+  const late = scripted([...Array(MAX_RERUNS).fill('failed'), 'partial']);
+  const b = intakeWith({ model: late, cursor: await cursorNow(), fetchSource: serves(URLP) });
+  await shareAndTick(b.intake, `read ${URLP}`);
+  for (let n = 1; n <= MAX_RERUNS; n += 1) await shareAndTick(b.intake, `re-run ${URLP}`);
+  const tp = await shareAndTick(b.intake, `re-run ${URLP}`);
+  assert.deepEqual(tp.started, []);
+  assert.ok(tp.skipped.some((s) => s.url === URLP && s.reason === `re-run refused: all ${MAX_RERUNS} re-runs used`), JSON.stringify(tp.skipped));
+  assert.equal(late.bodies.length, MAX_RERUNS + 1);
 });

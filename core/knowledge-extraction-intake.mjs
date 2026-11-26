@@ -47,7 +47,12 @@ export function linksOf(text, { allowHttp = false } = {}) {
   return out;
 }
 export const jobIdFor = (url) => `job-${sha256(url)}`;
-/** #1841: a sharer's post saying "re-run" asks for ONE fresh attempt at a link whose job FAILED. Attempts are `.r1`, `.r2`, … */
+/**
+ * #1841: a sharer's post saying "re-run" asks for ONE fresh attempt at a link whose job FAILED. Attempts are `.r1`, `.r2`, …
+ * up to MAX_RERUNS. #1900: the same post also covers a PARTIAL job (some items rejected), ONCE: that re-run closes the
+ * chain whatever it ends, so a partial job's re-run that fails does NOT open the failed budget (the conservative reading:
+ * one paid call, not up to MAX_RERUNS). It takes one of the MAX_RERUNS slots like any re-run. A COMPLETE job is never re-run.
+ */
 export const RERUN_RE = /\bre-?run\b/i;
 export const MAX_RERUNS = 3;
 /**
@@ -318,15 +323,24 @@ export function createIntake({ boardUrl, token = null, stateFile, sourcesDir, fe
         let rerunOf = null;
         if (known.outcome && asksRerun) {
           // walk the attempts: the base job, then .r1, .r2 … The first attempt with no outcome is where this one goes,
-          // but only while every attempt before it FAILED. A link that once succeeded is never re-run.
-          let last = known; let target = null;
-          for (let n = 1; n <= MAX_RERUNS && last.outcome === 'failed'; n += 1) {
+          // but only while every attempt before it FAILED, or the one before it was PARTIAL and is the first partial in
+          // the chain (#1900: a partial job is re-run once, and that re-run closes the chain whatever it ends). A link
+          // that once COMPLETED is never re-run.
+          let last = known; let target = null; let partialRerun = false;
+          for (let n = 1; n <= MAX_RERUNS; n += 1) {
+            if (partialRerun) break;                          // the partial's one re-run is spent: partial again, or failed
+            if (last.outcome === 'partial') partialRerun = true;   // slot n is the partial's one re-run
+            else if (last.outcome !== 'failed') break;        // complete (or unknown): never re-run
             const k = await extractor.state({ jobId: `${jobIdFor(url)}.r${n}` });
             if (!k.outcome) { target = { jobId: `${jobIdFor(url)}.r${n}`, k }; break; }
             last = k;
           }
           if (!target) {
-            const why = last.outcome === 'failed' ? `re-run refused: ${MAX_RERUNS} re-runs already failed` : `known: ${last.outcome}; a re-run is only for a failed job`;
+            const why = last.outcome === 'complete' ? `known: complete; a re-run is only for a failed job, or once for a partial job`
+              : partialRerun ? `re-run refused: a partial job is re-run once, and its re-run ended ${last.outcome}`
+              : last.outcome === 'failed' ? `re-run refused: ${MAX_RERUNS} re-runs already failed`
+              : last.outcome === 'partial' ? `re-run refused: all ${MAX_RERUNS} re-runs used`
+              : `known: ${last.outcome}; a re-run is only for a failed job, or once for a partial job`;
             skipped.push({ url, jobId, reason: why }); continue;
           }
           rerunOf = last.runId; jobId = target.jobId; known = target.k; seenThisTick.add(jobId);

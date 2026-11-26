@@ -227,3 +227,56 @@ test('#1866 J-P2 an extractor that cannot name its prompt version is refused bef
   await assert.rejects(extractFile({ file: twoPagePdf(d), extractor: ex, sourcesDir: path.join(d, 'sources'), modelKey: 'm', prompt: 'p', askedIn: 'post-1' }), /promptVersion/);
   assert.equal(ex.runs.length, 0);
 });
+
+// ── #1854 slice 3: a Word file (.docx) converts on this machine ──
+// A .docx has no pages of its own (pagination is the renderer's), so no page number is ever given for one, even if the
+// converted text happens to hold a form feed. One paragraph is one line, so no rejoin is needed: a block IS a paragraph.
+// textutil is used here only to WRITE a fixture; it writes no heading styles, so these files have no sections (#1961's tests
+// cover sections).
+const haveTextutil = (() => { try { execFileSync('textutil', ['-help'], { stdio: 'ignore' }); return true; } catch (e) { return e?.status != null; } })();
+const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+/** A real .docx, written on this machine by textutil from HTML (no download, no fixture binary in the repo). */
+function writeDocx(dir) {
+  const html = path.join(dir, 'in.html');
+  fs.writeFileSync(html, '<html><body><h1>A heading</h1><p>The first paragraph says one thing plainly, at some length, so that a page would wrap it.</p>'
+    + '<p style="page-break-before:always">The second paragraph makes a different claim.</p></body></html>');
+  const out = path.join(dir, 'report.docx');
+  execFileSync('textutil', ['-convert', 'docx', html, '-output', out]);
+  return out;
+}
+
+test('D1 a real .docx converts on this machine, one paragraph per block, named by its versioned conversion', { skip: !haveTextutil && 'UNAVAILABLE: no textutil on this machine (a skip is not a pass)' }, () => {
+  const got = convertFile(writeDocx(tmp()));
+  assert.equal(got.converter, CONVERSION['.docx']);   // #1961: the .docx's XML is read now, not textutil's text
+  assert.equal(got.from, DOCX_MIME);
+  assert.equal(got.paged, false, 'a Word file has no pages of its own');
+  const blocks = got.text.split('\n').filter((l) => l.trim());
+  assert.deepEqual(blocks, ['A heading', 'The first paragraph says one thing plainly, at some length, so that a page would wrap it.', 'The second paragraph makes a different claim.']);
+});
+
+test('D2 a .docx\'s text never carries a form feed, so nothing downstream can count pages in it', () => {
+  // #1961: the converter reads word/document.xml; a form feed inside a run's text must still never reach the kept text
+  const exec = (cmd, args) => (args.at(-1) === 'word/document.xml' ? '<w:document><w:body><w:p><w:r><w:t>Before the break.\fAfter the break.</w:t></w:r></w:p></w:body></w:document>' : '');
+  const got = convertFile('/nowhere/x.docx', { exec });
+  assert.ok(!got.text.includes('\f'), JSON.stringify(got.text));
+  assert.match(got.text, /Before the break\.\s+After the break\./);
+});
+
+test('D3 a .docx run cites each claim by BLOCK only: no page in the summary, none in the finish post', { skip: !haveTextutil && 'UNAVAILABLE: no textutil on this machine (a skip is not a pass)' }, async () => {
+  const d = tmp(); const ex = fakeExtractor(); const { events, report } = recorder();
+  const f = writeDocx(d);
+  // the fake extractor publishes the block holding "second page"; give it one in this file's words
+  const ex2 = { ...ex, async run(a) { const r = await ex.run({ ...a, source: { ...a.source, blocks: a.source.blocks.map((b) => b.replace('second paragraph', 'second page')) } }); return r; } };
+  const out = await extractFile({ file: f, extractor: ex2, sourcesDir: d, modelKey: 'm', prompt: 'p', askedIn: 'post-1', report });
+  assert.equal(out.outcome, 'complete');
+  assert.equal(out.converter, CONVERSION['.docx']);
+  assert.ok(out.published.length > 0);
+  for (const p of out.published) assert.equal(p.page, undefined, `a .docx claim names no page: ${JSON.stringify(p)}`);
+  const body = finishBody(events.find((e) => e.kind === 'finish'));
+  assert.doesNotMatch(body, /page \d/, body);
+});
+
+test('D4 an empty .docx is refused before any model call, without blaming a missing OCR', () => {
+  assert.throws(() => convertFile('/nowhere/empty.docx', { exec: () => '  \n' }), (e) => /produced no text/.test(e.message) && !/OCR/.test(e.message));
+});

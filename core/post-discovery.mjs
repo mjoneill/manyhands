@@ -10,8 +10,26 @@
  *              BELOW B (imports included) in postSeq order under `gb1.<incarnation>.<epoch>.<B>.<lastPostSeq>.<scope>`.
  *              B bounds MEMBERSHIP: a post committed after B is never a bootstrap row, whatever its postSeq. The page
  *              that empties the snapshot answers phase 'live' with `gc1.<incarnation>.<epoch>.<B>.<scope>`.
- *   LIVE       posts committed AFTER the cursor, ascending commitSeq, imports excluded. The next cursor is the LAST
- *              DELIVERED commit, never the head: an empty page echoes the request's own cursor.
+ *   LIVE       posts committed AFTER the cursor, ascending commitSeq, imports excluded. The next cursor has two branches
+ *              (#1607, approved by this contract's owner 2026-11-24):
+ *                LIMIT-STOPPED  the page reached `limit`: the LAST DELIVERED commit (more may be owed).
+ *                EXHAUSTED      the scan ran out first: the larger of the last delivered commit (or, on an empty page,
+ *                               the request's own cursor) and the marker head this poll read BEFORE scanning. A cursor
+ *                               already above the head is kept.
+ *              WHY THE ADVANCE SKIPS NOTHING, and what it rests on: every operation this scan delivers (post.create for
+ *              announcements, post.write, post.redact) is a RECORD kind, and graph-compiler's compileRecord emits its
+ *              marker bump, its receipt and its data (the post node, or the redaction's tombstone) in ONE DELETE/INSERT,
+ *              which the executor applies as one store.update inside its single-writer update lock. So an operation at or
+ *              below a head a reader has seen is already complete when that head is read. That depends on the store
+ *              update being atomic to a concurrent query; it is the engine's property, observed rather than proved here
+ *              (tests/feed-cursor-visibility-1607.test.mjs V1/V2, posts and redactions under concurrent writes, with
+ *              controls V0/V0R showing the check catches a late node or tombstone). A NEW feed-visible kind that writes
+ *              its receipt and its data in separate updates breaks this, and must not be added to the scan's prefixes.
+ *              ⚠️ FOR CONSUMERS: "cursor unchanged ⇒ nothing happened" does NOT hold. An empty live page may return a
+ *              cursor above the request's (it crossed non-post commits). Audited 2026-11-24: no consumer relied on it
+ *              (an external channel plugin's pull loop, index.html and commons.html feeds, commons-panel, conversation-view,
+ *              knowledge-extraction-intake all store nextAfterCommit and stop on an empty live page). A new consumer
+ *              must not either.
  *   FILTERS    are applied before the limit; the cursor crosses an excluded row only after examining it for THIS
  *              filter, and the token carries the filter scope (sha256 of canonical JSON) so a filter change is refused.
  *   ELIGIBLE   an operation with an APPLIED receipt AND a queryable post node. An APPLIED operation whose node is gone
@@ -208,9 +226,10 @@ async function pageOf(client, tok, scope, m, { limit, filters = {}, snapshotClie
     // cursor AHEAD of the marker is not given this shortcut: it takes the ordinary path, unchanged.
     if (tok.commit === m.commit) return { conversations: [], phase: 'live', nextAfterCommit: formatLive(m.inc, m.epoch, tok.commit, scope) };
     const out = []; let scanned = tok.commit;
+    let exhausted = false;   // #1607 — the scan ran out of eligible operations before the page reached its limit
     while (out.length < want) {
       const batch = await opBatch(client, { prefixes: [...LIVE_POST_OPS, ...REDACT_POST_OPS], where: `?c > ${scanned}`, order: '?c', limit: BATCH });
-      if (!batch.length) break;
+      if (!batch.length) { exhausted = true; break; }
       const n = await nodes(client, batch.map((x) => x.iri));
       for (const x of batch) {
         scanned = x.commit;   // examined for THIS filter; an excluded row is crossed only by a later delivered one
@@ -220,10 +239,16 @@ async function pageOf(client, tok, scope, m, { limit, filters = {}, snapshotClie
         if (p && x.redact) { out.push(redactedShape(p, x.commit, 'redact')); if (out.length >= want) break; }
         else if (p && (p.redacted || matches(p, filters))) { out.push(shape(p, x.commit)); if (out.length >= want) break; }
       }
-      if (batch.length < BATCH) break;
+      if (out.length >= want) break;   // stopped by the limit: whatever is left is still owed
+      if (batch.length < BATCH) { exhausted = true; break; }
     }
-    // the LAST DELIVERED commit, never the head; an empty page echoes the request's own cursor
-    const next = out.length ? out.at(-1).commitSeq : tok.commit;
+    // LIMIT-STOPPED: the last delivered commit (or the request's own cursor). EXHAUSTED (#1607): at least the head `m` this
+    // poll read BEFORE scanning. Every operation committed at or below that head was visible to the scan (see the header:
+    // marker bump, receipt and post or tombstone are one update), and none of them was owed, so the commits between the
+    // last delivered one and the head were non-post work. Without this an idle cursor stays behind the head
+    // after any non-post commit and every poll repeats the full operation scan (2026-11-23, the read gate saturated).
+    const delivered = out.length ? out.at(-1).commitSeq : tok.commit;
+    const next = exhausted ? Math.max(delivered, m.commit) : delivered;
     return { conversations: out, phase: 'live', nextAfterCommit: formatLive(m.inc, m.epoch, next, scope) };
   }
 

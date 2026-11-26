@@ -36,6 +36,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runToolLoop } from './tool-loop.mjs';
 import { readWithheldState, writePending, clearPending, preservePending, handBackFromState, defaultWithheldStatePath, isBareDecline } from './withheld-state.mjs';   // #1428 — private per-seat withheld recovery
+import { appendWithheldLog } from './withheld-log.mjs';   // #1952 — bounded per-seat local record of every withheld reply
+import { stripCode } from './people.mjs';   // #1954 — the fallback regex ignores code, like the board's extractor
 
 /**
  * #1294 — add two usage blocks, keeping NULL when neither reported anything.
@@ -136,15 +138,15 @@ export function findMentions(messages = [], seatKey, { sinceId = null, since = n
   const re = new RegExp(`(^|[^A-Za-z0-9_])@${seatKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9_])`, 'i');
   // #1410 — THE BOARD ALREADY RESOLVED THE MENTION; READ IT, DON'T RE-PARSE.
   // `POST /api/conversations` records `mentions: [<seat key>…]` with display
-  // names canonicalised to keys (core/people.mjs: "@sausage" → `guest`). This
+  // names canonicalised to keys (core/people.mjs: "@nell" → `guest`). This
   // runner re-parsed the body against the seat KEY alone, so a seat addressed
-  // by the name the room gave her — "@sausage", three times on 2026-09-18 —
+  // by its display name — three times on 2026-09-18 —
   // read `nothing to wake for (mention)` while the board's own row said
   // `mentions: ['guest']`. Two parsers, one name. The board's field wins; the
   // regex is only the fallback for a row that predates the field.
   const mentioned = (m) => (Array.isArray(m.mentions)
     ? m.mentions.some((k) => String(k).toLowerCase() === seatKey.toLowerCase())
-    : re.test(m.body));
+    : re.test(stripCode(m.body)));
   const rows = (messages || []).filter((m) => m && typeof m.body === 'string'
     && String(m.author || '').toLowerCase() !== seatKey.toLowerCase()
     // #1237 — the board's own notices (claim/release/done lines carrying a card
@@ -527,7 +529,53 @@ export function findWakes({ agent, messages = [], cards = [], state = {}, now = 
   return out;
 }
 
-export function buildMessages({ agent, wake, changes = [], changesUnreadable = false, memories = [], rulings = [], refusedMemory = [], priorWithheld = [] }) {
+// #2029 — WHERE A GUEST'S REACTIONS WINDOW STARTS, and whose reactions it holds. `reactions.receive` on the agent is
+// 'all' (the default), 'own' (only those on the seat's own posts) or 'off' (none: returns null, nothing is read). An
+// unknown value is read as 'all': a typo must never silently deafen a seat. With no checkpoint yet, the last hour.
+export function reactionsWindow(state = {}, agent = {}, nowIso = new Date().toISOString()) {
+  const receive = agent?.reactions?.receive;
+  if (receive === 'off') return null;
+  const seen = typeof state?.reactionsSeenThrough === 'string' && !Number.isNaN(Date.parse(state.reactionsSeenThrough)) ? state.reactionsSeenThrough : null;
+  const since = seen ?? new Date(Date.parse(nowIso) - 3600_000).toISOString();
+  return { since, author: receive === 'own' ? (agent.seatKey ?? null) : null };
+}
+
+// #2029 — the checkpoint moves only past the newest reaction actually handed over (+1 ms, since `since` is inclusive).
+// A failed read, an empty one, or no read at all leaves it where it was, so the next settled wake sees what this one missed.
+// #2029 review (#269) — WHAT IS HANDED is one decision, made once: the OLDEST `REACTIONS_SHOWN_MAX` by time. The prompt
+// renders exactly these and the checkpoint advances past exactly these, so a reaction beyond the cap is never passed by
+// the cursor unshown; it is handed on the next wake. (Ordering own-posts-first is presentation, applied after the cut.)
+const REACTIONS_SHOWN_MAX = 20;
+export function reactionsHanded(read) {
+  if (!read || read.ok !== true || !Array.isArray(read.reactions)) return { handed: [], held: 0 };
+  const byTime = [...read.reactions].sort((a, b) => String(a?.at ?? '').localeCompare(String(b?.at ?? '')));
+  const handed = byTime.slice(0, REACTIONS_SHOWN_MAX);
+  return { handed, held: byTime.length - handed.length };
+}
+export function advanceReactionsCursor(state = {}, read = null) {
+  const { handed } = reactionsHanded(read);
+  if (!handed.length) return { ...state };
+  const newest = handed.map((r) => Date.parse(r?.at)).filter((t) => !Number.isNaN(t)).reduce((a, b) => Math.max(a, b), -Infinity);
+  if (newest === -Infinity) return { ...state };
+  const next = new Date(newest + 1).toISOString();
+  const cur = typeof state?.reactionsSeenThrough === 'string' ? state.reactionsSeenThrough : null;
+  return { ...state, reactionsSeenThrough: cur && cur > next ? cur : next };
+}
+
+function renderReactions(read, seatKey) {
+  if (!read) return '';
+  if (read.ok !== true) return 'Emoji reactions could not be read this wake (the board did not answer): do not conclude there were none. They will be shown on a later wake.';
+  const { handed, held: more } = reactionsHanded(read);
+  if (!handed.length) return '';
+  const shown = [...handed.filter((r) => r?.postAuthor === seatKey), ...handed.filter((r) => r?.postAuthor !== seatKey)];
+  const line = (r) => `- ${r.by} ${r.emoji} on ${r.postAuthor === seatKey ? 'YOUR post' : `${r.postAuthor}'s post`}: "${String(r.excerpt ?? '').slice(0, 80)}"`;
+  return 'Emoji reactions given in the room since your last wake (a reaction is a small signal, like a nod: it does not ask you to reply):\n'
+    + shown.map(line).join('\n')
+    + (more > 0 ? `\n(${more} more will be shown on your next wake)` : '')
+    + (read.truncated ? '\n(the board also cut reactions on some older posts)' : '');
+}
+
+export function buildMessages({ agent, wake, changes = [], changesUnreadable = false, memories = [], rulings = [], refusedMemory = [], priorWithheld = [], reactions = null }) {
   const policy = agent.contextPolicy || 'thread';
   const lines = [];
   lines.push(`You are ${agent.name || agent.seatKey}, a ${agent.residency === 'resident' ? 'resident' : 'guest'} seat on the manyhands board. Your seat key is "${agent.seatKey}".`);
@@ -691,6 +739,9 @@ export function buildMessages({ agent, wake, changes = [], changesUnreadable = f
       + 'If nothing about it has changed, you can quote the body verbatim and omit the sentinel line; the loop will not auto-replay it, you must answer again.');
   }
   ctx.push(wakeIntro(wake, agent?.seatKey ?? null));
+  // #2029 — reactions given since this seat's last settled wake ride along; a reaction never wakes a guest on its own.
+  const rxText = renderReactions(reactions, agent?.seatKey ?? null);
+  if (rxText) ctx.push(rxText);
   // #1436 — rulings that bind THIS seat ride into every wake, above the change
   // rows, so a settled fact about the seat's own standing does not depend on
   // still being among the last twenty changes. Decisions are the room's most
@@ -819,7 +870,13 @@ async function postFailureLine({ agent, wake, error, latencyMs, post, onError })
   // at-sign so the line wakes nobody) or a credential (scrub it — the same
   // shapes server.js redacts, #1217/#1343 — before it lands on the board).
   const why = scrubErrorText(error);
-  const body = `⚠️ ${name}: I was named but my model call failed${secs} (${why}) — no answer this time; name me again to retry.`;
+  // #1677 — a channel wake is a delivery, not a mention: "I was named" sent two seats looking for a self-wake loop, and
+  // naming a channel-mode seat wakes nothing, so the retry instruction was false too. Only a mention is a naming: an
+  // assignment or a scheduled check-in says what woke it.
+  const cause = { channel: 'a room post reached me', assignment: 'a card assigned to me woke me', schedule: 'my scheduled check-in woke me' }[wake?.kind];
+  const body = cause
+    ? `⚠️ ${name}: ${cause} but my model call failed${secs} (${why}) — no answer this time.`
+    : `⚠️ ${name}: I was named but my model call failed${secs} (${why}) — no answer this time; name me again to retry.`;
   const where = {
     ...(typeof wake?.attachedTo === 'string' && wake.attachedTo ? { attachedTo: wake.attachedTo } : {}),
     ...(replyTalkFor(wake, agent.seatKey) ? { conversation: replyTalkFor(wake, agent.seatKey) } : {}),   // #1446
@@ -838,7 +895,7 @@ async function postFailureLine({ agent, wake, error, latencyMs, post, onError })
  *   post       ({author, body}) => Promise<{id?}>
  *   ledgerFile where the pre-ledger row goes
  */
-export async function guestOnce({ agent, wake, changes = () => [], memories = null, rulings = null, priorRefusals = null, priorWithheld = null, withheldStateFile = null, writeMemory = null, claimCard = null, callModel, execute = null, maxHops = undefined, post, ledgerFile = ledgerFilePath(), ledgerSink = null, spentToday = null, now = () => new Date().toISOString(), log = () => {}, onError = () => {}, preparePost = null }) {
+export async function guestOnce({ agent, wake, changes = () => [], memories = null, rulings = null, reactions = null, priorRefusals = null, priorWithheld = null, withheldStateFile = null, withheldLogFile = null, writeMemory = null, claimCard = null, callModel, execute = null, maxHops = undefined, post, ledgerFile = ledgerFilePath(), ledgerSink = null, spentToday = null, now = () => new Date().toISOString(), log = () => {}, onError = () => {}, preparePost = null }) {
   if (!agent?.seatKey) throw new Error('guestOnce: agent.seatKey is required — a post with no seat is actor:null forever (#1193)');
   if (!agent?.model?.model || !agent?.model?.protocol) throw new Error('guestOnce: agent.model {model, protocol} is required');
   // #1202 — the budget gate, BEFORE any context is fetched or any call is made.
@@ -891,7 +948,11 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
       catch (e) { onError(`[#1428] prior withheld unreadable for ${agent.seatKey}; waking without them: ${e?.message ?? e}`); }
     }
   }
-  const messages = buildMessages({ agent, wake, changes: rows, changesUnreadable, memories: memState === 'unreadable' ? [{ body: '(your memory could not be read this wake — do not conclude it is empty)' }] : mem, rulings: rul, refusedMemory, priorWithheld: handedWithheld });
+  // #2029 — the reactions read is the runner's; a provider that throws is a FAILED read, said in the prompt, never "none".
+  let rx = null;
+  if (typeof reactions === 'function') { try { rx = await reactions(agent.seatKey); } catch (e) { rx = { ok: false, reactions: [] }; onError(`[#2029] reactions unreadable for ${agent.seatKey}; waking without them: ${e?.message ?? e}`); } }
+  else if (reactions && typeof reactions === 'object') rx = reactions;
+  const messages = buildMessages({ agent, wake, changes: rows, changesUnreadable, memories: memState === 'unreadable' ? [{ body: '(your memory could not be read this wake — do not conclude it is empty)' }] : mem, rulings: rul, refusedMemory, priorWithheld: handedWithheld, reactions: rx });
   const started = Date.now();
   const base = {
     ledger: 'pre-P6', agent: agent.seatKey, model: agent.model.model, protocol: agent.model.protocol,
@@ -1283,6 +1344,33 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
       const op = (declined && !bareDecline) ? 'retain' : (handedWithheld.length > 0 ? 'clear' : 'preserve');
       withheldStateOutcome = (declined && !bareDecline) ? 'retain-failed' : (handedWithheld.length > 0 ? 'clear-failed' : 'preserve-failed');
       onError(`[#1428] withheld-state ${op} failed for ${agent.seatKey}: ${e?.message ?? e}`);
+    }
+  }
+  // #1952 — THE RECORD BESIDE THE HAND-BACK. The #1428 file keeps only the
+  // newest withheld reply and is cleared after one hand-back, so a reply the
+  // seat wrote and withheld was gone after the next decline or the next wake.
+  // Every text the runner parks there (a non-bare decline, same condition as
+  // writePending above) is ALSO appended to a bounded per-seat local log
+  // (core/withheld-log.mjs): last 10, 7 days, 0600. It is appended whether or
+  // not the #1428 store landed, so a failed hand-back store still leaves the
+  // record. ⛔ The log never feeds the prompt and never rides the row; the
+  // lines below carry COUNTS and an error code only — never the text. ⛔ FAIL
+  // OPEN: a log failure never changes the wake's outcome, its row, or
+  // recoveryFailed (that flag is the hand-back's, not the record's).
+  if (agent.residency === 'resident' && withheldStateFile && withheldLogFile && declined && !bareDecline) {
+    try {
+      const at = now();
+      const out = appendWithheldLog(withheldLogFile, {
+        text, at, wakeId: wake?.id ?? null, wakeKind: wake?.kind || 'mention', reason: withheldReason,
+        tokens: result.usage?.completionTokens ?? null, model: agent.model?.model ?? null,
+      }, { now: Date.parse(at) });
+      if (out.skipped === 'unreadable') onError(`[#1952] withheld-log for ${agent.seatKey} unreadable (unreadable=1, code=${out.code}); left in place, not appended; the wake goes on`);
+      else {
+        if (out.corrupt) onError(`[#1952] withheld-log for ${agent.seatKey} was not a log (corrupt=1); moved aside, started fresh`);
+        log(`[#1952] ${agent.seatKey} withheld-log: ${out.kept} kept`);
+      }
+    } catch (e) {
+      onError(`[#1952] withheld-log append failed for ${agent.seatKey} (errors=1, code=${e?.code ?? 'unknown'}); the wake goes on`);
     }
   }
   // #1428 REVIEW — The runner's local `error` field on a SUCCESSFUL

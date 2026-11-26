@@ -259,3 +259,135 @@ for (const [pager, why] of [['no-next', /without its `next` cursor/], ['stuck', 
     } finally { await b.close(); }
   });
 }
+
+// ── P rows: the Settings picker counts what the exporter reads ────────────────
+// Observed 2026-11-18: the exporter, read from each kind's own route, wrote commons 55014, deliveries 25089, model calls 8488, wakes 16
+// and memories 2175, while GET /api/export/spaces (the counts beside the Settings checkboxes) said 0 for all five, because it counted
+// the document GET /api/board serves, which leaves those collections out under the graph units. A person deciding what to export
+// read those zeros. The picker now reads the same routes the exporter does, and a route it cannot read is "not read", never 0.
+const pickerCounts = async (base) => {
+  const r = await fetch(`${base}/api/export/spaces`);
+  assert.equal(r.status, 200, 'the menu answers');
+  return Object.fromEntries((await r.json()).spaces.map((x) => [x.space, x.count]));
+};
+
+test('#1825 P1: under the graph units the picker counts the posts and memories its routes serve, not the document\'s 0', T, async () => {
+  const w = await wholeBoardWorld({ logborn: true });
+  try {
+    const posts = await (await fetch(`${w.rest.baseUrl}/api/conversations`)).json();
+    const mems = await (await fetch(`${w.rest.baseUrl}/api/memories`)).json();
+    assert.equal(posts.length, 2, 'PRECONDITION: the route serves the 2 posts');
+    assert.equal(mems.memories.length, 1, 'PRECONDITION: the route serves the 1 memory');
+    const board = await (await fetch(`${w.rest.baseUrl}/api/board`)).json();
+    assert.equal(board.conversations, undefined, 'PRECONDITION: /api/board leaves the posts out (the shape that made the picker say 0)');
+    const c = await pickerCounts(w.rest.baseUrl);
+    assert.equal(c.commons, 2, `the picker counts the posts the route serves (got ${c.commons})`);
+    assert.equal(c.memories, 1, `the picker counts the memory the route serves (got ${c.memories})`);
+    // PO 55038: deliveries are counted by the graph COUNT (the exporter's own recount), not by walking ~51 pages, and say so.
+    const menu = await (await fetch(`${w.rest.baseUrl}/api/export/spaces`)).json();
+    const del = menu.spaces.find((x) => x.space === 'deliveries');
+    const delRoute = await (await fetch(`${w.rest.baseUrl}/api/deliveries?all=1&limit=500`)).json();
+    assert.equal(del.countedBy, 'graph', 'the deliveries count says it was counted in the graph');
+    assert.equal(del.count, delRoute.deliveries.length, `the graph count agrees with the route (${del.count} vs ${delRoute.deliveries.length})`);
+    assert.equal(menu.spaces.find((x) => x.space === 'memories').countedBy, 'route', 'a kind read in full says it was counted from its route');
+    // PO 55050: the posts are counted by the route's own X-Total-Count, so the picker never parses the whole room in REST.
+    const commons = menu.spaces.find((x) => x.space === 'commons');
+    assert.equal(commons.countedBy, 'route-total', 'the posts count says it is the route\'s total');
+    assert.equal(commons.count, posts.length, `the route's total agrees with what it serves (${commons.count} vs ${posts.length})`);
+  } finally { await w.stop(); }
+});
+
+test('#1825 P2: a route that cannot be read leaves its kind null ("not read") with the reason, never 0; the others still count', async () => {
+  const { readRouteSources } = await import('../core/export-spaces.mjs');
+  const answers = {
+    '/api/conversations': { status: 503, json: { error: 'graph down' } },
+    '/api/memories': { status: 200, json: { memories: [{ id: 'm1' }, { id: 'm2' }] } },
+  };
+  const fakeFetch = async (url) => {
+    const route = new URL(url).pathname;
+    const a = answers[route] || { status: 404, json: {} };
+    return { ok: a.status === 200, status: a.status, json: async () => a.json };
+  };
+  const r = await readRouteSources('http://x', ['commons', 'memories'], { fetch: fakeFetch });
+  assert.equal(r.overrides.memories.length, 2, 'the readable kind is read');
+  assert.equal(r.overrides.commons, undefined, 'the unreadable kind has no rows, not []');
+  assert.match(r.unread.commons, /\/api\/conversations answered 503/, `the reason names the route and status (got ${r.unread.commons})`);
+});
+
+test('#1825 P3: Settings shows "not read" beside a kind whose count is null, never "null" or 0', async () => {
+  const { withBrowserServer } = await import('./helpers/harness.mjs');
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await browser.newPage();
+    await page.setRequestInterception(true);
+    page.on('request', async (req) => {
+      if (!req.url().endsWith('/api/export/spaces')) return req.continue();
+      const real = await (await fetch(req.url())).json();
+      for (const sp of real.spaces) if (sp.space === 'commons') { sp.count = null; sp.unread = '/api/conversations answered 503'; }
+      req.respond({ status: 200, contentType: 'application/json', body: JSON.stringify(real) });
+    });
+    await page.goto(`${server.baseUrl}/settings.html`, { waitUntil: 'networkidle0' });
+    await page.waitForSelector('#export-panel [data-export-include] input[value=commons]', { timeout: 15000 });
+    const shown = await page.$eval('#export-panel [data-export-include] input[value=commons]', (i) => i.parentElement.querySelector('.n').textContent);
+    assert.equal(shown, 'not read', `Settings says it could not read the kind, not "${shown}"`);
+  }, { server: {}, launch: { headless: 'new', args: ['--no-sandbox'] } });
+});
+
+test('#1825 P4: ?counts=0 answers the menu without reading any kind, so Settings can draw the boxes first', async () => {
+  const { startRestServer } = await import('./helpers/harness.mjs');
+  const s = await startRestServer({});
+  try {
+    const j = await (await fetch(`${s.baseUrl}/api/export/spaces?counts=0`)).json();
+    assert.ok(j.spaces.length > 5, 'the menu lists the kinds');
+    assert.ok(j.spaces.every((x) => !('count' in x)), 'no kind carries a count: nothing was read, so nothing is claimed');
+  } finally { await s.stop(); }
+});
+
+test('#1825 P5: Settings shows "counting…" until the counts arrive, then a plain number, and says how it was counted on hover', async () => {
+  const { withBrowserServer } = await import('./helpers/harness.mjs');
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await browser.newPage();
+    await page.setRequestInterception(true);
+    let release; const gate = new Promise((r) => { release = r; });
+    page.on('request', async (req) => {
+      const u = req.url();
+      if (!/\/api\/export\/spaces$/.test(u)) return req.continue();
+      await gate;                                  // the full count is held until the test has seen the placeholder
+      const real = await (await fetch(u)).json();
+      req.respond({ status: 200, contentType: 'application/json', body: JSON.stringify(real) });
+    });
+    await page.goto(`${server.baseUrl}/settings.html`, { waitUntil: 'domcontentloaded' });
+    const sel = '#export-panel [data-export-include] input[value=deliveries]';
+    await page.waitForSelector(sel, { timeout: 15000 });
+    const before = await page.$eval(sel, (i) => i.parentElement.querySelector('.n').textContent);
+    assert.equal(before, 'counting…', `the box is drawn before its count, and says so (got "${before}")`);
+    release();
+    await page.waitForFunction((q) => document.querySelector(q).parentElement.querySelector('.n').textContent !== 'counting…', { timeout: 15000 }, sel);
+    const after = await page.$eval(sel, (i) => i.parentElement.querySelector('.n').textContent);
+    // PO 55054: the page is read by a person, not by us — the count is a plain number, and how it was counted is said in
+    // plain words on hover, never in our vocabulary ("route", "graph").
+    assert.match(after, /^\d+$/, `the deliveries count is a plain number (got "${after}")`);
+    const commonsShown = await page.$eval('#export-panel [data-export-include] input[value=commons]', (i) => i.parentElement.querySelector('.n').textContent);
+    assert.match(commonsShown, /^\d+$/, `the posts count is a plain number (got "${commonsShown}")`);
+    const hover = await page.$eval(sel, (i) => i.parentElement.title);
+    assert.match(hover, /^Counted without reading each one/, `the hover says how the count was taken, in plain words (got "${hover.slice(0, 80)}")`);
+    assert.doesNotMatch(hover.split('\n')[0], /route|graph/i, 'and without our vocabulary');
+  }, { server: {}, launch: { headless: 'new', args: ['--no-sandbox'] } });
+});
+
+test('#1825 P6: the picker never reads the posts in full: skip leaves a kind unread even when cards would pull it in', async () => {
+  const { readRouteSources } = await import('../core/export-spaces.mjs');
+  const asked = [];
+  const fakeFetch = async (url) => { asked.push(new URL(url).pathname); return { ok: true, status: 200, json: async () => [] }; };
+  const r = await readRouteSources('http://x', ['cards'], { fetch: fakeFetch, skip: ['commons'] });
+  assert.ok(!asked.includes('/api/conversations'), `the posts route was not read (asked: ${asked.join(', ')})`);
+  assert.equal(r.overrides.commons, undefined, 'and no rows are claimed for it');
+});
+
+test('#1825 P7: a route total is the X-Total-Count header as an integer; a missing or malformed header, or a failed call, is a reason, never a number', async () => {
+  const { routeTotalOf } = await import('../core/export-spaces.mjs');
+  const fake = (status, header) => async () => ({ ok: status === 200, status, headers: { get: (k) => (k.toLowerCase() === 'x-total-count' ? header : null) }, json: async () => [] });
+  assert.deepEqual(await routeTotalOf('http://x', '/api/conversations?limit=1', { fetch: fake(200, '55045') }), { n: 55045 });
+  assert.ok((await routeTotalOf('http://x', '/p', { fetch: fake(200, null) })).why, 'no header ⇒ a reason');
+  assert.ok((await routeTotalOf('http://x', '/p', { fetch: fake(200, '12abc') })).why, 'a malformed header ⇒ a reason');
+  assert.ok((await routeTotalOf('http://x', '/p', { fetch: fake(503, '9') })).why, 'a failed call ⇒ a reason, even with a header');
+});

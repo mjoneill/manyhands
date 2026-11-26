@@ -25,8 +25,9 @@ import { callModel } from '../core/model-adapter.mjs';
 import { deliveryStaleMs, isStaleDelivery } from '../core/delivery.mjs';   // #1346
 import { rowToBoard, refusalsSince } from '../core/model-call-row.mjs';
 import { handBackFromState, defaultWithheldStatePath } from '../core/withheld-state.mjs';   // #1428 — private per-seat withheld recovery
+import { defaultWithheldLogPath } from '../core/withheld-log.mjs';   // #1952 — bounded local record of every withheld reply
 import { annotateTalks } from '../core/guest-loop.mjs';   // #1446
-import { findMentions, findWakes, pairCapSuppressed, DEFAULT_PAIR_CAP_PER_HOUR, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, advanceScan, settlePending, sweepDue, sweepSince, captureSweep, withSweepAttempt, acquireLock, releaseLock, effectiveWakeOn, budgetCheck, deliveryOutcome, bindingRulings } from '../core/guest-loop.mjs';
+import { findMentions, findWakes, pairCapSuppressed, DEFAULT_PAIR_CAP_PER_HOUR, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, advanceScan, settlePending, sweepDue, sweepSince, captureSweep, withSweepAttempt, acquireLock, releaseLock, effectiveWakeOn, budgetCheck, deliveryOutcome, bindingRulings, reactionsWindow, advanceReactionsCursor } from '../core/guest-loop.mjs';
 import { makeExecutor } from '../core/board-tools.mjs';
 import { makeHandedCapture } from '../core/handed-dump.mjs';   // #1567 PC5
 const handedCapture = process.env.SCRUM_HANDED_DUMP
@@ -460,6 +461,9 @@ const priorWithheld = async (seat) => {
   return handBackFromState(file, { cap: 5 });
 };
 const withheldStateFile = defaultWithheldStatePath(stateFile);
+// #1952 — the bounded local record beside it (last 10 / 7 days, 0600). Read by the owner with
+// scripts/withheld-log.mjs; never fed to the prompt, never sent to the board.
+const withheldLogFile = defaultWithheldLogPath(stateFile);
 const memories = async (seat) => {
   // #1473 — a declared budget means the wake reads the ASSEMBLY: her
   // `agent-memory` memories, priority first then newest, inside the budget,
@@ -482,6 +486,7 @@ const claimCard = dry ? async (n, seat) => console.log(`[dry-run] would claim #$
   if (!r.ok) throw new Error(`claim #${n} → ${r.status}`);
 };
 
+let handedReactions = null;   // #2029 — what this wake was handed, for the checkpoint below
 const r = await guestOnce({
   // #1631 — a mention's reply is made durable BEFORE its POST: the exact payload and a requestId derived from the mention
   // go into the state file's outbox (atomic), so a run killed after or during the POST re-sends THIS payload (drained
@@ -495,7 +500,19 @@ const r = await guestOnce({
     writeStateAtomic(stateFile, state);
     return prepared;
   } : null,
-  agent, wake, changes: () => { if (changesError) throw changesError; return rows; }, ledgerSink, spentToday, memories, priorRefusals, priorWithheld, withheldStateFile, writeMemory, claimCard,
+  agent, wake, changes: () => { if (changesError) throw changesError; return rows; }, ledgerSink, spentToday, memories, priorRefusals, priorWithheld, withheldStateFile, withheldLogFile, writeMemory, claimCard,
+  // #2029 — the reactions given since this seat's last settled wake (its own checkpoint, its own receive setting). The read
+  // is kept in `handedReactions` so the checkpoint moves only past what this wake was actually handed.
+  reactions: async () => {
+    const w = reactionsWindow(state, agent);
+    if (!w) return null;
+    try {
+      const j = await get(`/api/reactions/recent?since=${encodeURIComponent(w.since)}${w.author ? `&author=${encodeURIComponent(w.author)}` : ''}`);
+      if (j && j.enabled === false) return null;   // the board has reactions off: nothing to say, nothing to move
+      handedReactions = Array.isArray(j?.reactions) ? { ok: true, reactions: j.reactions, truncated: !!j.truncated } : { ok: false, reactions: [] };
+    } catch { handedReactions = { ok: false, reactions: [] }; }
+    return handedReactions;
+  },
   // #1436 — the live decisions that name this seat, its held role, or its display name
   rulings: async (seatKey) => {
     const all = (await get('/api/decisions?live=1'));
@@ -583,6 +600,7 @@ if (!dry && shouldMarkAnswered(r)) {
   if (wake.kind === 'assignment') next.assignmentsSeen = [...new Set([...(state.assignmentsSeen || []), wake.cardId])].slice(-200);
   if (wake.kind === 'schedule') next.lastScheduledAt = wake.createdAt;
   if (wake.kind === 'channel') next.lastChannelDrainAt = new Date().toISOString();   // #1346
+  Object.assign(next, advanceReactionsCursor(next, handedReactions));   // #2029 — only past what was handed, only on a settled wake
   writeStateAtomic(stateFile, wake.kind === 'mention' ? { ...settlePending(next, wake.id, { at: wake.createdAt ?? null }), outbox: null } : next);   // #1631 — settled leaves pending; a confirmed or settled publication clears the outbox
 }
 else if (!dry) console.log(`[#1201] ${agent.seatKey}: mention ${wake.id} still owed (${r.reason ?? 'halted'}) — cursor not advanced`);

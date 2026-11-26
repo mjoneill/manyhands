@@ -244,6 +244,43 @@ export const BOARD_TOOLS = Object.freeze([
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      // #2029 - a guest's way to SEE reactions. Before this a guest had no read at all, so a reaction on its post could never
+      // reach it. `mine` is aimed at the bound seat, never at a model-given name.
+      name: 'reactions_recent',
+      description: 'See the emoji reactions people gave to commons posts since a moment in time: who reacted, with which emoji, on whose post, with a short excerpt of the post. '
+        + 'since is REQUIRED: a UTC time such as 2026-11-22T10:00:00Z. Set mine to true to see only the reactions on YOUR OWN posts. '
+        + 'A reaction is a small signal, like a nod: it does not ask you to reply.',
+      parameters: {
+        type: 'object',
+        properties: {
+          since: { type: 'string', description: 'a UTC time such as 2026-11-22T10:00:00Z; reactions given after it are shown' },
+          mine: { type: 'boolean', description: 'true = only reactions on your own posts' },
+        },
+        required: ['since'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      // #2029 - the seat's OWN reaction, the same class as link_decide: no seat parameter, the reactor is the wake's own seat.
+      name: 'reaction_add',
+      description: 'React to a commons post with one emoji, the way a person adds a thumbs up under a message. '
+        + 'id is the post id exactly as you were given it. emoji is exactly one emoji, such as 👍 ❤️ 😂 👀 or 🐊. '
+        + 'The reaction is recorded under YOUR own seat; you cannot react for another seat. Reacting again with the same emoji changes nothing.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'the post id exactly as given to you' },
+          emoji: { type: 'string', description: 'exactly one emoji, such as 👍' },
+        },
+        required: ['id', 'emoji'],
+      },
+    },
+  },
 ]);
 
 /** The opening sentence of a definition — orientation, not the whole register. */
@@ -331,6 +368,26 @@ export function makeExecutor({ get, post, put = null, del = null, patch = null, 
       // #1600 D1 - a READ of one post. The id is the model's, so it is trimmed, refused when empty, and refused when it is a
       // bare dot segment (`.`/`..` survive encodeURIComponent and a URL layer may normalise them into another route);
       // anything else is encoded into exactly one path segment. A failed read rejects: it is never shaped like a post.
+      // #2029 - a READ of the reactions given since an instant. `mine` is aimed at `by`, the seat the runner binds; a
+      // model-given author is never forwarded. A malformed since is refused before a request, in a sentence.
+      case 'reactions_recent': {
+        const since = typeof args?.since === 'string' ? args.since.trim() : '';
+        if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/.test(since) || Number.isNaN(Date.parse(since))) {
+          throw new Error('reactions_recent needs since: a UTC time such as 2026-11-22T10:00:00Z');
+        }
+        const q = `since=${encodeURIComponent(since)}${args?.mine === true ? `&author=${encodeURIComponent(by)}` : ''}`;
+        return get(`/api/reactions/recent?${q}`);
+      }
+      // #2029 - the seat's OWN reaction. The body is built here from the emoji and `by`; a smuggled seat, by or onBehalfOf
+      // never reaches the wire. The post id gets the same guard as conversation_get's.
+      case 'reaction_add': {
+        const id = typeof args?.id === 'string' ? args.id.trim() : '';
+        if (!id) throw new Error('reaction_add needs an id: the post id exactly as given to you');
+        if (id === '.' || id === '..') throw new Error(`reaction_add: ${JSON.stringify(id)} is not a post id`);
+        const emoji = typeof args?.emoji === 'string' ? args.emoji.trim() : '';
+        if (!emoji) throw new Error('reaction_add needs an emoji: exactly one, such as 👍');
+        return post(`/api/conversations/${encodeURIComponent(id)}/reactions`, { emoji, on: true, by });
+      }
       case 'conversation_get': {
         const id = typeof args?.id === 'string' ? args.id.trim() : '';
         if (!id) throw new Error('conversation_get needs an id: the post id exactly as given to you');

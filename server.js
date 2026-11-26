@@ -36,7 +36,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { isOpenDelivery, classifyDeliveries } from './core/delivery.mjs';   // #1346; classifyDeliveries: #1902's report
-import { exportableSpaces, resolveSpaces, describeExportSet } from './core/export-spaces.mjs';   // #1321
+import { exportableSpaces, resolveSpaces, describeExportSet, readRouteSources, graphCountOf, routeTotalOf } from './core/export-spaces.mjs';   // #1321
 import { loadDomain, loadDomainShared, saveDomain } from './core/store.mjs';
 import { validateCompare, evaluateCompareAsync } from './core/check-compare.mjs';   // #1610; #1643 one async form serves both sources
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -53,7 +53,8 @@ import {
   collapseIdentities, identitiesFromEvents, identityOf,
   Q_POSITION,   // #1643 — the executor's commit marker, read for the checks' stated currency
 } from './core/logborn-unit.mjs';
-import { createSmallkindsUnit, wakeCreateIntention, wakeIri } from './core/smallkinds-unit.mjs';   // #1624
+import { createSmallkindsUnit, wakeCreateIntention, wakeIri, REACTION_PALETTE, reactionIntention, reactionIri } from './core/smallkinds-unit.mjs';   // #1624, #449
+import { REACTION_BATCH_MAX, normalizeReactionEmoji, topEmoji, TOP_DAYS, TOP_DAYS_MAX } from './core/reaction-palette.mjs';   // #449, #2026
 import { BOARD_TOOLS } from './core/board-tools.mjs';
 import { resolveAttachedTo } from './core/attached-to.mjs'; // #761
 import { withAttachmentFence, FENCE_BUSY, DEFAULT_WAIT_MS as DEFAULT_FENCE_WAIT_MS } from './core/attachment-fence.mjs';   // #1648
@@ -81,8 +82,10 @@ import { moveFenceIds, moveFenceEntity } from './core/move-fences.mjs';   // #17
 import { labelAliasRows, labelAliasEntity, labelAliasIri } from './core/label-aliases.mjs';   // #1640
 import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, auditOutbox, modeProblem, legacyProof, postMatchesEntry, opIdFor, announcePostId, postCreateIntention, obligationIdOf } from './core/announce-outbox.mjs';   // #1574 C3a/C3b/C3c
 import * as U3 from './core/unit3-graph.mjs';   // #1582 — deliveries and model calls in the graph
+import * as CPG from './core/check-posts-graph.mjs';   // #1885 — the decision-makers' posts, from the graph
 import { seatIndex as seatInboxIndex, concernedSeats, createSeatInboxReconciler, createRetrievalMarker } from './core/seat-inbox.mjs';   // #1902 — every seat's inbox
 import { createGraphClient, setExecutorMeter } from './core/graph-client.mjs';   // #1574 C3b — the conversations unit's executor door
+import { BOOKKEEPING_GRAPH } from './core/graph-vocab.mjs';   // #1679 — already loaded through graph-client; no new dependency
 import { decideIntention as linkDecideIntention, attachIntention as linkAttachIntention, claimIriOf, spanKey as linkSpanKey, linkIri as linkIriOf, linkCountsQuery, countLinkUse, linkDecisionsQuery, decisionsOfRows, retiringDecision, dismissalCount } from './core/knowledge-linking.mjs';   // #1851, #1850, #1852
 import { deliveryQuery, linksOfDeliveryRows, selectDeliverySet, firstShowings, deliverySourcesQuery, sourcesOfRows, deliveryBlock, showIntention, DELIVERY_DEADLINE_MS } from './core/knowledge-delivery.mjs';   // #1852
 import * as READING from './core/knowledge-reading.mjs';   // #1894
@@ -6061,12 +6064,40 @@ function exportArgsFrom(body) {
 async function handleExportSpaces(req, res) {
   try {
     const data = readBoard();
-    let decisions = [];
-    try { decisions = await liveDecisions(); } catch { /* counted as 0 below; the exporter itself refuses if it cannot read them */ }
-    const d = describeExportSet(data, [], { decisions });
-    const spaces = exportableSpaces().map((sp) => {
+    const all = exportableSpaces();
+    const menuOf = (sp) => ({ space: sp.space, kind: sp.kind, collection: sp.collection, prose: sp.prose, aliases: sp.aliases, definition: sp.definition, defaultOn: sp.prose });
+    // #1825 — `?counts=0`: the menu alone, nothing read and so no count claimed. Settings draws the boxes from it, then asks again.
+    if (parseQuery(req.url).counts === '0') {
+      const d0 = describeExportSet(data, [], {}, { unreadIfAbsent: true });
+      return sendJSON(res, 200, { spaces: all.map(menuOf), unregistered: d0.unregistered });
+    }
+    // #1825 — every kind that lives outside the document is counted from its own route, by the exporter's own read, so the
+    // number beside a checkbox is the number the archive will hold. Under the graph units GET /api/board leaves those
+    // collections out, and counting the document said 0 for 55k posts. A route that cannot be read is null ("not read").
+    // Deliveries are the exception (PO 55038): walking their pages took 42.8 s on the live board, so they are counted by the
+    // graph COUNT the exporter recounts with, and say so (`countedBy: 'graph'`).
+    // The posts are the other exception (PO 55050): reading 55k of them in full, inside REST, stalled the event loop ~1.2 s,
+    // so they are counted by the route's own X-Total-Count over a one-row read, and say so (`countedBy: 'route-total'`).
+    const base = `http://127.0.0.1:${BOUND_PORT}`;
+    const BY_GRAPH = new Set(['deliveries']);
+    const BY_TOTAL = { commons: '/api/conversations?limit=1' };
+    const { overrides, unread } = await readRouteSources(base, all.map((x) => x.space), { skip: [...BY_GRAPH, ...Object.keys(BY_TOTAL)] });
+    const other = {};
+    for (const sp of all.filter((x) => BY_GRAPH.has(x.space))) {
+      const g = await graphCountOf(base, sp.kind);
+      if (g.why) unread[sp.space] = g.why; else other[sp.space] = { n: g.n, by: 'graph' };
+    }
+    for (const [space, path] of Object.entries(BY_TOTAL)) {
+      const t = await routeTotalOf(base, path);
+      if (t.why) unread[space] = t.why; else other[space] = { n: t.n, by: 'route-total' };
+    }
+    const d = describeExportSet(data, [], overrides, { unreadIfAbsent: true });
+    const spaces = all.map((sp) => {
       const row = d.excluded.find((x) => x.space === sp.space) || d.included.find((x) => x.space === sp.space);
-      return { space: sp.space, kind: sp.kind, collection: sp.collection, prose: sp.prose, aliases: sp.aliases, definition: sp.definition, count: row ? row.count : 0, defaultOn: sp.prose };
+      const o = other[sp.space];
+      const count = unread[sp.space] ? null : o ? o.n : row ? row.count : null;
+      const countedBy = o ? o.by : sp.source ? 'route' : 'document';
+      return { ...menuOf(sp), count, countedBy, ...(unread[sp.space] ? { unread: unread[sp.space] } : {}) };
     });
     sendJSON(res, 200, { spaces, unregistered: d.unregistered });
   } catch (e) {
@@ -7479,7 +7510,7 @@ async function handleAttachLink(req, res) {
 // The owner cannot query the graph, so until these routes a run's content reached him only when an agent pasted it into chat.
 // Read-only, behind the same door as GET /api/links, and reading.html is their one client. The reader is core/knowledge-reading.mjs.
 const READINGS_OFF = { error: 'readings live in the graph executor, and this server does not run the log-born unit (SCRUM_GRAPH_UNIT_LOGBORN)', code: 'READINGS_UNAVAILABLE' };
-const READINGS_MEANS = 'A reading is one run of the extractor over one source the room was asked to read. Each claim is the model\'s one-line gist and the verbatim quote it rests on, in the order they appear in the source; "bears on" links are machine proposals, not decisions. source.pages is "known" (claims carry page numbers), "unavailable" (an uploaded file whose kept text this server could not find, so no page numbers can be given) or "none" (a web source, which has no pages).';
+const READINGS_MEANS = 'A reading is one run of the extractor over one source the room was asked to read. Each claim is the model\'s one-line gist and the verbatim quote it rests on, in the order they appear in the source; "bears on" links are machine proposals, not decisions. source.pages is "known" (claims carry page numbers), "unavailable" (an uploaded file whose kept text this server could not find, so no page numbers can be given) or "none" (a web source, or a file with no pages such as a .docx; neither has page numbers to give).';
 async function handleListReadings(req, res) {
   try {
     if (!LOGBORN) return sendJSON(res, 503, READINGS_OFF);
@@ -8192,12 +8223,14 @@ const STANDING_CHECKS = [
     // only when some claim is old enough to be stale, and only from the
     // oldest such claim forward.
     id: 'stale-claims',
-    readsDocumentPosts: true,   // #1574 — disabled under the graph conversations unit (see the standing loop)
+    // #1885 — under the graph conversations unit a post may live only in the graph, so the holders' posts on their cards are
+    // read from it (the standing loop prefetches them into ctx.graphPosts). Unit off: the document's posts, unchanged.
+    postsFromGraph: 'holders',
     claim: `every held card has a write from its holder on it within the last ${STALE_CLAIM_HOURS} h — `
       + 'or the holder has said when the next one comes; a silent claim is asked about, never reclaimed (#455)',
-    run: (data) => staleClaims({
+    run: (data, ctx = {}) => staleClaims({
       cards: data.cards || [],
-      conversations: data.conversations || [],
+      conversations: ctx.graphPosts ?? data.conversations ?? [],
       events: (since) => readEvents(EVENT_LOG_DIR, { sinceDate: since }),
       now: new Date().toISOString(),
     }),
@@ -8208,13 +8241,14 @@ const STANDING_CHECKS = [
     // within 24 h; declarations that expired within 7 d whose holder has
     // posted since. A lapsed role nobody acts on is not a row — it ended.
     id: 'role-expiry',
-    readsDocumentPosts: true,   // #1574 — disabled under the graph conversations unit (see the standing loop)
+    // #1885 — under the unit, each lapsed holder's posts after the lapse are read from the graph (ctx.graphPosts).
+    postsFromGraph: 'lapsed',
     claim: 'no held role is within 24 h of lapsing unannounced, and no seat is acting on a role that lapsed in the last 7 days (#1400)',
     run: (data, ctx) => roleExpiryRows({
       // #1643 — on the executor pass the declarations come from liveSeatDecls() (the log-born reader when that unit is
       // on), prefetched by the caller because this runner is synchronous; on the old path, the replica as before.
       decls: ctx.seatDecls ?? seatDeclsFromGraph(ctx.queryGraphAll, ctx.store),
-      conversations: data.conversations || [],
+      conversations: ctx.graphPosts ?? data.conversations ?? [],
       now: new Date().toISOString(),
     }),
   },
@@ -8555,27 +8589,35 @@ async function evaluateChecks() {
     // because nobody would think to". Summing them would make `stale` mean two
     // things at once, which is the confusion this endpoint exists to refuse.
     const standing = [];
-    for (const c of STANDING_CHECKS) standing.push(await (async () => {
+    // #1979 (#1885 option 2) — a check that measures the in-process copy ITSELF is RETIRED from the executor pass, not paused:
+    // that pass never builds the copy, so the check cannot run there, and a check that cannot run on a pass isn't a check on
+    // it. Listing it as `disabled` put it on the digest's ⏸ line every day for something no one will ever re-enable there.
+    // The replica pass still runs it, and the hourly meter log line still records the copy's readings whenever one exists.
+    for (const c of STANDING_CHECKS) if (!(onExecutor && c.measuresReplica)) standing.push(await (async () => {
       // #1574 — A DECISION-MAKER THAT CANNOT SEE GRAPH POSTS IS SWITCHED OFF, SAYING SO. With the conversations unit on,
       // a seat may post only to the graph; a check that reads the document's posts would read it as silent and nudge it
       // (stale-claims) or act on its role (role-expiry). It answers `disabled` with the reason, never an empty "nothing
       // found" (#792), and its consumers treat that as unreadable: ask nothing, forget nothing. Unit off: unchanged.
-      if (c.readsDocumentPosts && ANNOUNCE_EXECUTOR) return { id: c.id, claim: c.claim, disabled: true, reason: DOC_POST_CHECK_DISABLED };
+      // #1885 — they are no longer switched off: under the unit they read the graph's posts instead (prefetched below, inside
+      // the try, so a failed read is an ERROR row, never an empty "nothing found").
       const t0 = performance.now();
       const priced = (row) => { const ms = Math.round(performance.now() - t0); return { ...row, ms, ...(ms > CHECK_CEILING_MS ? { slow: true } : {}) }; };   // #1404
       try {
         // #1643 — on the executor pass, role-expiry's declarations come from liveSeatDecls() (the log-born reader when
         // that unit is on), fetched once, here.
-        // #1645 2d — on the executor pass the meter that measures the old copy is NOT RUN: running it would mean building
-        // the copy it measures, and the copy is being retired. It answers `disabled` with the reason, never an error and
-        // never an empty "nothing crossed" (#792). Always, not "only when no copy exists": an answer that depended on which
-        // route happened to build the copy first would differ between two identical boards. The hourly meter log line
-        // still records the copy's readings whenever one exists.
-        if (onExecutor && c.measuresReplica) return { id: c.id, claim: c.claim, disabled: true, reason: REPLICA_NOT_MEASURED };
+        // #1885 — re-enabled, role-expiry reads the declarations through liveSeatDecls(), which without the log-born unit (#1561)
+        // WARMS THE IN-PROCESS COPY. On the executor pass that copy is being retired (#1645): the check says so instead of building
+        // it. Production runs log-born, so there it runs.
+        if (onExecutor && c.id === 'role-expiry' && !LOGBORN) return { id: c.id, claim: c.claim, disabled: true, reason: ROLE_DECLS_NEED_LOGBORN };
         if (onExecutor && c.id === 'role-expiry' && seatDecls === undefined) seatDecls = (await liveSeatDecls()).decls;
+        let graphPosts;
+        if (c.postsFromGraph && ANNOUNCE_EXECUTOR) graphPosts = await checkPostsFromGraph(c.postsFromGraph, {
+          cards: data.cards || [],
+          decls: c.postsFromGraph === 'lapsed' ? (seatDecls ?? seatDeclsFromGraph(queryGraphAll, store)) : [],
+        });
         // #1381 — a check may READ A FILE instead of the replica (`run`); same
         // shape out, same digest line, same "an error is not an empty result".
-        if (typeof c.run === 'function') return priced({ id: c.id, claim: c.claim, rows: c.run(data, { store, queryGraph, queryGraphAll, seatDecls }) ?? [] });   // #1400 — a check may read the replica too; #1405 — folds use queryGraphAll
+        if (typeof c.run === 'function') return priced({ id: c.id, claim: c.claim, rows: c.run(data, { store, queryGraph, queryGraphAll, seatDecls, graphPosts }) ?? [] });   // #1400 — a check may read the replica too; #1405 — folds use queryGraphAll
         const r = await runQuery(c.query);
         return priced({ id: c.id, claim: c.claim, query: c.query, rows: r.rows ?? [] });
       } catch (e) {
@@ -12391,8 +12433,19 @@ const POSTS_BULK_READ_TIMEOUT_MS = 10000;
 // ~47 s on the real board under load, so it gets its own long budget instead of the bulk reader's 10 s, which it never met.
 const POSTS_SNAPSHOT_READ_TIMEOUT_MS = 180000;
 let POSTS_SNAPSHOT_READER = null;
-const DOC_POST_CHECK_DISABLED = 'disabled under the graph conversations unit (#1574): it reads document posts and would misread a seat that posts only to the graph';
-const REPLICA_NOT_MEASURED = 'not measured on the executor pass (#1645 2d): it measures the in-process copy, which checks no longer build or read';
+const ROLE_DECLS_NEED_LOGBORN = 'not run on the executor pass without the log-born unit (#1561): reading the seat declarations would build the in-process copy (#1645)';
+// #1885 — the posts the two decision-makers read, from the graph (core/check-posts-graph.mjs). A failed read THROWS: the standing
+// loop reports it as an error row, never as "nothing found" (#792), and the stale-claim ask treats an error as unreadable.
+async function checkPostsFromGraph(kind, { cards, decls }) {
+  const reader = POSTS_BULK_READER || ANNOUNCE_EXECUTOR;
+  const sparql = kind === 'holders'
+    ? CPG.holderCardPostsQuery(CPG.heldPairs(cards))
+    : CPG.postsSinceQuery(CPG.lapsedSeats(decls, new Date().toISOString()));
+  if (sparql == null) return [];   // no held card / no lapsed role: nothing to ask
+  const q = await reader.query(sparql);
+  if (!q.ok) throw new Error(`the graph's posts could not be read for this check (${q.reason || 'unreadable'})`);
+  return kind === 'holders' ? CPG.holderCardPostsFrom(q.rows) : CPG.postsSinceFrom(q.rows);
+}
 
 function decidePublish(data, obligationId) {
   const { origins, entries } = outboxOf(data);
@@ -13672,7 +13725,17 @@ async function handleGetConversation(req, res, id) {
         if (_recall) setImmediate(() => recallForget([id]));
         return;
       }
-      if (g.post) { const shown = withRecall(g.post); sendJSON(res, 200, shown); noteSeatFetch(req, shown); return noteRecallRead(req, shown); }   // #1689, #1902
+      if (g.post) {
+        // #449 — a post's live reactions ride its read, and only when it has some: a post with none is byte-for-byte as before.
+        let post = g.post;
+        if (SMALLKINDS_UNIT) {
+          const r = await SMALLKINDS.readReactions([id]);
+          if (r.unavailable) return sendJSON(res, 503, { error: `the graph could not be read: ${r.unavailable}`, code: 'GRAPH_UNAVAILABLE' });
+          const chips = r.reactions.get(id);
+          if (chips?.length) post = { ...post, reactions: chips };
+        }
+        const shown = withRecall(post); sendJSON(res, 200, shown); noteSeatFetch(req, shown); return noteRecallRead(req, shown);   // #1689, #1902
+      }
     }
     const data = readBoard();
     const idx = findConversationIndex(data, id);
@@ -13684,6 +13747,139 @@ async function handleGetConversation(req, res, id) {
   } catch (e) {
     console.error('GET /api/conversations/:id:', e.message);
     sendJSON(res, 500, { error: 'Failed to read conversation' });
+  }
+}
+
+// ── #449 — REACT TO A POST ─────────────────────────────────────────────────────────────────────────────────────────────
+// POST /api/conversations/:id/reactions {by, emoji, on?} → 200 {id, reactions}. A reaction is never an edit of the post:
+// each toggle is its own append-only node in the graph (the small-kinds unit), and the answer is the post's reactions
+// folded AFTER the write. Adding a reaction that is already live, or removing one that is not, writes nothing and is a 200.
+// Graph-only: with the small-kinds unit off this is a 400 REACTIONS_NEED_GRAPH, never a silent no-op. `by` is declared,
+// not authenticated, like every seat field here.
+async function handleReactToConversation(req, res, id) {
+  try {
+    let body;
+    try { body = JSON.parse(await readBody(req)); } catch { return sendJSON(res, 400, { error: 'the body must be JSON: {by, emoji, on?}' }); }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return sendJSON(res, 400, { error: 'the body must be a JSON object: {by, emoji, on?}' });
+    const by = typeof body.by === 'string' ? body.by.trim() : '';
+    if (!by) return sendJSON(res, 400, { error: 'by is required: the seat (or person) reacting. Declared, not authenticated.', code: 'INVALID_REACTOR' });
+    // #2026 — any single emoji, not only the six; a bare symbol (❤) is held as the emoji form the picker sends (❤️)
+    const emoji = normalizeReactionEmoji(body.emoji);
+    if (!emoji) return sendJSON(res, 400, { error: 'emoji must be exactly one emoji, such as 👍 or 🐊', code: 'INVALID_EMOJI', palette: REACTION_PALETTE });
+    if (body.on !== undefined && typeof body.on !== 'boolean') return sendJSON(res, 400, { error: 'on must be true (react) or false (remove your reaction); omit it to react', code: 'INVALID_ON' });
+    const on = body.on !== false;
+    if (!SMALLKINDS_UNIT) return sendJSON(res, 400, { error: 'reactions are stored in the graph: they need the small-kinds unit on (SCRUM_GRAPH_UNIT_SMALLKINDS=1)', code: 'REACTIONS_NEED_GRAPH' });
+    const g = await readGraphPost(id);
+    if (g.unavailable) return sendJSON(res, 503, { error: `the graph could not be read: ${g.unavailable}`, code: 'GRAPH_UNAVAILABLE' });
+    if (g.redacted) return sendJSON(res, 409, { error: 'this post has been redacted; it cannot be reacted to', code: 'POST_REDACTED' });
+    if (!g.post) return sendJSON(res, 404, { error: `no post ${id} in the graph`, code: 'NO_SUCH_POST' });
+    const answer = async () => {
+      const r = await SMALLKINDS.readReactions([id]);
+      if (r.unavailable) return sendJSON(res, 503, { error: `the graph could not be read: ${r.unavailable}`, code: 'GRAPH_UNAVAILABLE' });
+      return sendJSON(res, 200, { id, reactions: r.reactions.get(id) ?? [] });
+    };
+    const now = await SMALLKINDS.readReactions([id]);
+    if (now.unavailable) return sendJSON(res, 503, { error: `the graph could not be read: ${now.unavailable}`, code: 'GRAPH_UNAVAILABLE' });
+    const live = !!(now.reactions.get(id) ?? []).find((c) => c.emoji === emoji)?.by.includes(by);
+    if (live === on) return sendJSON(res, 200, { id, reactions: now.reactions.get(id) ?? [] });
+    const w = await SMALLKINDS.writeReaction(reactionIntention({ actor: graphActor(by), iri: reactionIri(), postId: id, seat: by, emoji, state: on ? 'on' : 'off', at: new Date().toISOString() }));
+    if (w.status === 'APPLIED') {
+      // #2029 slice 2 — an ADD is pushed to the post's author (MCP reads the post; no text travels). Fire and forget: the
+      // reaction is already written, and the durable paths carry it whether or not this nudge lands.
+      if (on && MCP_NOTIFY_URL) fetch(MCP_NOTIFY_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ event: { kind: 'reaction', post: id, emoji, by } }), signal: AbortSignal.timeout(5000) }).catch(() => {});
+      return await answer();
+    }
+    if (w.status === 'PRECONDITION_FAILED') return sendJSON(res, 404, { error: `post ${id} is no longer a live post in the graph`, code: 'NO_SUCH_POST' });
+    if (w.status === 'UNAVAILABLE') return sendJSON(res, 503, { error: `the graph could not be written, so the reaction was refused: ${w.reason}`, code: 'GRAPH_UNAVAILABLE' });
+    return sendJSON(res, 500, { error: `the graph refused the reaction: ${w.reason ?? 'rejected'}` });
+  } catch (e) {
+    console.error('POST /api/conversations/:id/reactions:', e.message);
+    sendJSON(res, 500, { error: 'Failed to record the reaction' });
+  }
+}
+
+// #449 — GET /api/reactions?posts=a,b,… → 200 {enabled, reactions: {postId: [{emoji, by}]}}. The page reads the chips of every
+// loaded post in ONE call, and again on each poll, so a reaction on an OLD post shows without a new post arriving. A post
+// with no live reaction is absent. With the small-kinds unit off: {enabled: false, reactions: {}}, so the page offers no
+// button rather than one that always fails. An unreadable graph is a 503, never an empty map.
+async function handleBatchReactions(req, res) {
+  try {
+    const q = parseQuery(req.url);
+    const ids = typeof q.posts === 'string' ? [...new Set(q.posts.split(',').map((s) => s.trim()).filter(Boolean))] : [];
+    if (!ids.length) return sendJSON(res, 400, { error: 'posts is required: a comma-separated list of post ids', code: 'NO_POSTS' });
+    if (ids.length > REACTION_BATCH_MAX) return sendJSON(res, 400, { error: `at most ${REACTION_BATCH_MAX} posts per read (got ${ids.length})`, code: 'TOO_MANY_POSTS' });
+    if (!SMALLKINDS_UNIT) return sendJSON(res, 200, { enabled: false, reactions: {} });
+    const r = await SMALLKINDS.readReactions(ids);
+    if (r.unavailable) return sendJSON(res, 503, { error: `the graph could not be read: ${r.unavailable}`, code: 'GRAPH_UNAVAILABLE' });
+    const out = {};
+    for (const id of ids) { const chips = r.reactions.get(id); if (chips?.length) out[id] = chips; }
+    sendJSON(res, 200, { enabled: true, reactions: out });
+  } catch (e) {
+    console.error('GET /api/reactions:', e.message);
+    sendJSON(res, 500, { error: 'Failed to read reactions' });
+  }
+}
+
+// #2026 — GET /api/reactions/top[?days=N] → 200 {enabled, days, top: [{emoji, count}]}. The room's most-used emoji over a
+// rolling window (default 30 days; decided 2026-11-22): the picker's first row. Counts LIVE reactions whose last toggle
+// fell in the window, so a reaction taken back does not count. Most used first; a tie goes to the more recently used.
+// With the small-kinds unit off: {enabled: false, top: []}. An unreadable graph is a 503, never an empty list.
+async function handleTopReactions(req, res) {
+  try {
+    const q = parseQuery(req.url);
+    const days = q.days === undefined ? TOP_DAYS : (/^\d+$/.test(String(q.days)) ? Number(q.days) : NaN);
+    if (!Number.isInteger(days) || days < 1 || days > TOP_DAYS_MAX) {
+      return sendJSON(res, 400, { error: `days must be a whole number from 1 to ${TOP_DAYS_MAX}`, code: 'INVALID_DAYS' });
+    }
+    if (!SMALLKINDS_UNIT) return sendJSON(res, 200, { enabled: false, days, top: [] });
+    const since = new Date(Date.now() - days * 86400000).toISOString();
+    const r = await SMALLKINDS.readRecentReactions(since);
+    if (r.unavailable) return sendJSON(res, 503, { error: `the graph could not be read: ${r.unavailable}`, code: 'GRAPH_UNAVAILABLE' });
+    sendJSON(res, 200, { enabled: true, days, top: topEmoji(r.reactions, 6) });
+  } catch (e) {
+    console.error('GET /api/reactions/top:', e.message);
+    sendJSON(res, 500, { error: 'Failed to read the most-used reactions' });
+  }
+}
+
+// #449 — GET /api/reactions/recent?since=ISO[&author=seat] → 200 {enabled, reactions: [{post, postAuthor, excerpt, emoji, by, at}]}.
+// How a seat SEES the reactions it was given: the room update (or an MCP-only seat) asks what was reacted since it last
+// looked. Live reactions only, oldest first; `author` keeps the ones on that seat's posts. Posts are looked up for their
+// author and an excerpt: at most RECENT_POSTS_MAX distinct posts, the most recently reacted-to kept. A cut is said out loud
+// (`truncated`, `postsDropped`), never silent (#449 review). A redacted or missing post's reactions are dropped.
+const RECENT_POSTS_MAX = 50;
+const ISO_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/;
+async function handleRecentReactions(req, res) {
+  try {
+    const q = parseQuery(req.url);
+    if (typeof q.since !== 'string' || !ISO_INSTANT_RE.test(q.since) || Number.isNaN(Date.parse(q.since))) {
+      return sendJSON(res, 400, { error: 'since is required: an ISO-8601 timestamp such as 2026-11-21T17:00:00Z', code: 'INVALID_SINCE' });
+    }
+    if (!SMALLKINDS_UNIT) return sendJSON(res, 200, { enabled: false, reactions: [], truncated: false, postsDropped: 0 });
+    const since = new Date(q.since).toISOString();
+    const r = await SMALLKINDS.readRecentReactions(since);
+    if (r.unavailable) return sendJSON(res, 503, { error: `the graph could not be read: ${r.unavailable}`, code: 'GRAPH_UNAVAILABLE' });
+    const posts = new Map();
+    const reacted = [...new Set(r.reactions.map((x) => x.post))];
+    const kept = reacted.slice(-RECENT_POSTS_MAX);
+    const postsDropped = reacted.length - kept.length;
+    for (const id of kept) {
+      const g = await readGraphPost(id);
+      if (g.unavailable) return sendJSON(res, 503, { error: `the graph could not be read: ${g.unavailable}`, code: 'GRAPH_UNAVAILABLE' });
+      if (g.post) posts.set(id, g.post);
+    }
+    const excerpt = (body) => { const t = String(body || '').replace(/\s+/g, ' ').trim(); return t.length > 80 ? `${t.slice(0, 79)}…` : t; };
+    const author = typeof q.author === 'string' && q.author.trim() ? q.author.trim() : null;
+    const out = [];
+    for (const x of r.reactions) {
+      const p = posts.get(x.post);
+      if (!p || (author && p.author !== author)) continue;
+      out.push({ post: x.post, postAuthor: p.author, excerpt: excerpt(p.body), emoji: x.emoji, by: x.seat, at: x.at });
+    }
+    sendJSON(res, 200, { enabled: true, reactions: out, truncated: postsDropped > 0, postsDropped });
+  } catch (e) {
+    console.error('GET /api/reactions/recent:', e.message);
+    sendJSON(res, 500, { error: 'Failed to read recent reactions' });
   }
 }
 
@@ -15020,6 +15216,10 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/conversations$/,                fn: (req, res) => handleListConversations(req, res) },
   { method: 'POST',   re: /^\/api\/conversations$/,                fn: (req, res) => handleCreateConversation(req, res) },
   { method: 'GET',    re: /^\/api\/conversations\/([^\/]+)$/,      fn: (req, res, m) => handleGetConversation(req, res, m[1]) },
+  { method: 'POST',   re: /^\/api\/conversations\/([^\/]+)\/reactions$/, fn: (req, res, m) => handleReactToConversation(req, res, decodeURIComponent(m[1])) },   // #449
+  { method: 'GET',    re: /^\/api\/reactions$/,                  fn: (req, res) => handleBatchReactions(req, res) },   // #449
+  { method: 'GET',    re: /^\/api\/reactions\/recent$/,           fn: (req, res) => handleRecentReactions(req, res) },   // #449
+  { method: 'GET',    re: /^\/api\/reactions\/top$/,              fn: (req, res) => handleTopReactions(req, res) },   // #2026
   { method: 'POST',   re: /^\/api\/attachments$/,                  fn: (req, res) => handleCreateAttachment(req, res) },
   { method: 'GET',    re: /^\/api\/attachments\/([^\/]+)$/,        fn: (req, res, m) => serveAttachment(req, res, m[1]) },
   { method: 'GET',    re: /^\/api\/nodes$/,                        fn: (req, res) => handleListNodes(req, res) },
@@ -15088,7 +15288,7 @@ if (process.env.SCRUM_GRAPH_UNIT_CONVERSATIONS === '1') {
   POSTS_BULK_READER = gate.reader(raw, POSTS_BULK_READ_TIMEOUT_MS);
   POSTS_SNAPSHOT_READER = gate.reader(raw, POSTS_SNAPSHOT_READ_TIMEOUT_MS);   // #1779
   console.error(`${new Date().toISOString()} #1574 conversations unit ON: publisher-mode announcements go through the graph executor (lock released during the call)`);
-  console.error(`${new Date().toISOString()} #1574 conversations unit ON: standing checks stale-claims and role-expiry are DISABLED (${DOC_POST_CHECK_DISABLED})`);
+  console.error(`${new Date().toISOString()} #1574 conversations unit ON: standing checks stale-claims and role-expiry read their posts from the graph (#1885)`);
 }
 // #1582 C7′ — deliveries and model calls in the graph need the conversations unit: a delivery's "the post exists" check
 // and a model call's redaction guard read POSTS from the graph, so with that unit off there is no graph to read.
@@ -15245,8 +15445,49 @@ if (COLUMNS_UNIT) {
     process.exit(1);
   }
   if (!COLUMNS.snapshot().length) {
-    console.error('#1639 columns unit: the graph holds no columns — refusing to serve. Run scripts/migrate-columns-1639.mjs --apply (with the server stopped) first.');
-    process.exit(1);
+    // #1679 — a NEW dataset gets the default columns; anything else with no columns still refuses. "New" is the operator's
+    // choice, made at the executor's --create (a store without a dataset marker never serves), so the server only reads it:
+    // the dataset holds NOTHING outside the executor's bookkeeping graph. A store that lost its columns still holds its cards,
+    // and an interrupted import still holds what it imported; both refuse as before. A failed read refuses too (fail closed).
+    // The DOCUMENT counts too (columns-graph-c1 C10): a board whose document holds cards, or columns other than the defaults, is
+    // an unmigrated board, never a new one. No document file at all is a fresh clone; an unreadable one refuses. Not under
+    // read-off/off, where the document is never read (#1563).
+    let docHolds = null;   // null: nothing; otherwise why the document is not a new board's
+    if (DOCUMENT_READS && fs.existsSync(BOARD_DATA_FILE)) {
+      try {
+        const doc = domainToBoard(loadDomain(BOARD_DATA_FILE));
+        const defaultIds = new Set(DEFAULT_COLUMNS.map((c) => c.id));
+        if ((doc.cards || []).length) docHolds = `the document holds ${doc.cards.length} card(s)`;
+        else if ((doc.columns || []).some((c) => !defaultIds.has(c?.id))) docHolds = 'the document holds columns other than the defaults';
+      } catch (e) { docHolds = `the document could not be read (${e.message})`; }
+    }
+    const graphEmpty = await createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 30000, label: 'columns-fresh' })
+      .ask(`ASK { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } FILTER(?g != <${BOOKKEEPING_GRAPH}>) } }`)
+      .then((r) => (r.ok ? !r.boolean : null), () => null);
+    if (graphEmpty !== true || docHolds) {
+      const why = graphEmpty === null ? ' (#1679: whether the dataset is new could not be read.)' : docHolds ? ` (#1679: not a new board: ${docHolds}.)` : '';
+      console.error(`#1639 columns unit: the graph holds no columns — refusing to serve.${why} Run scripts/migrate-columns-1639.mjs --apply (with the server stopped) first.`);
+      process.exit(1);
+    }
+    try {
+      // one guarded write; the op id is the dataset's own, so two first boots racing on one new dataset write it once
+      await COLUMNS.commit(DEFAULT_COLUMNS.map((c) => ({ ...c })), { actor: 'board', opId: `urn:ex:op/columns/fresh-seed/${encodeURIComponent(process.env.SCRUM_GRAPH_DATASET_ID || 'unnamed')}` });
+    } catch (e) {
+      console.error(`#1679 columns unit: a new dataset's default columns could not be written — refusing to serve: ${e.message}`);
+      process.exit(1);
+    }
+    // review of a6d831b: on APPLIED the commit fills the cache from what it SENT, and a replayed op (a dataset seeded once, which
+    // has since lost everything outside bookkeeping) answers APPLIED without writing. So the graph, not the cache, says whether
+    // the seed landed: re-read it, and a dataset still without columns refuses (a receipt for this seed means it is not new).
+    try { await COLUMNS.load(); } catch (e) {
+      console.error(`#1679 columns unit: the seeded columns could not be read back — refusing to serve: ${e.message}`);
+      process.exit(1);
+    }
+    if (!COLUMNS.snapshot().length) {
+      console.error('#1679 columns unit: the seed wrote nothing (this dataset was seeded before, so it is not new) — refusing to serve. Run scripts/migrate-columns-1639.mjs --apply (with the server stopped) first.');
+      process.exit(1);
+    }
+    console.error(`${new Date().toISOString()} #1679 columns unit: a new dataset (nothing outside bookkeeping) — seeded the default columns: ${COLUMNS.snapshot().map((c) => c.name).join(', ')}`);
   }
   console.error(`${new Date().toISOString()} #1639 columns unit ON: columns are read from and written to the graph executor; the document's columns are not read or written`);
 }

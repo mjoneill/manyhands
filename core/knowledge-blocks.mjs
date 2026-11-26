@@ -21,3 +21,36 @@ export function pageOfBlock(blocks, i) {
   }
   return ff + 1;
 }
+
+/**
+ * #1961 — a Word file's kept text marks each heading as a line of "#" × its level, a space, then the heading's words (body lines
+ * that would look like one are escaped with a backslash). These two rules turn that text into an address a reader can find in
+ * the document, so the address, like a PDF's page, is derived from the kept text alone.
+ */
+const HEADING = /^(#{1,9}) (.*)$/;
+
+/**
+ * The section a block (a line) sits in: the heading path above it, and which paragraph of that heading it is (1-based, counting
+ * only non-blank body lines). A block that IS a heading has para null. Null when no heading line comes at or before the block.
+ */
+export function sectionOfBlock(blocks, i) {
+  if (!Number.isInteger(i) || i < 0 || i >= blocks.length) return null;
+  let stack = []; let para = 0; let seen = false;
+  for (let k = 0; k <= i; k += 1) {
+    const m = HEADING.exec(blocks[k]);
+    if (m) {
+      const level = m[1].length;
+      stack = [...stack.filter((h) => h.level < level), { level, text: m[2].trim() }];
+      para = 0; seen = true;
+      if (k === i) return { path: stack.map((h) => h.text), para: null };
+    } else if (String(blocks[k]).trim()) para += 1;
+  }
+  return seen ? { path: stack.map((h) => h.text), para } : null;
+}
+
+/** "Evaluation › Method ¶2": the heading path, then the paragraph. Null for no section. */
+export function addressOf(section) {
+  if (!section) return null;
+  const where = section.path.join(' › ');
+  return section.para == null ? where : (where ? `${where} ¶${section.para}` : `¶${section.para}`);
+}

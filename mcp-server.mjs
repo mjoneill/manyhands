@@ -31,6 +31,7 @@
  */
 
 import { unreachableMessage } from './core/rest-unreachable.mjs';   // #1442
+import { REACTION_PALETTE } from './core/reaction-palette.mjs';   // #449
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -1515,6 +1516,49 @@ function buildMcpServer() {
     return jsonResult(await apiCall('GET', `/api/wakes${qs ? '?' + qs : ''}`));
   });
 
+  // ── #449 — REACTIONS on a commons post ──────────────────────────────────
+  // #2026 — any single emoji; the server also accepts a bare symbol (❤) and stores its emoji form (❤️)
+  const REACTION_EMOJI = z.string().min(1).describe(`Exactly one emoji, for example ${REACTION_PALETTE.join(' ')} or 🐊`);
+  mcp.registerTool('reaction_add', {
+    description: 'React to a commons post with an emoji (#449), the way a reader does under a message. It never edits the post. '
+      + 'Adding a reaction you already gave is a no-op. Returns the post\'s reactions after the write, as [{emoji, by}]. '
+      + 'Read a post\'s reactions with conversation_get (the `reactions` field is absent when it has none).',
+    inputSchema: {
+      id: z.string().min(1).describe('The post id (conversation id)'),
+      emoji: REACTION_EMOJI,
+      by: z.string().min(1).describe('Your seat key. Declared, not authenticated.'),
+    },
+  }, async ({ id, emoji, by }) => {
+    return jsonResult(await apiCall('POST', `/api/conversations/${encodeURIComponent(id)}/reactions`, { by, emoji, on: true }));
+  });
+
+  mcp.registerTool('reaction_remove', {
+    description: 'Take back your emoji reaction on a commons post (#449). Removing one you never gave is a no-op. '
+      + 'Returns the post\'s reactions after the write.',
+    inputSchema: {
+      id: z.string().min(1).describe('The post id (conversation id)'),
+      emoji: REACTION_EMOJI,
+      by: z.string().min(1).describe('Your seat key. Declared, not authenticated.'),
+    },
+  }, async ({ id, emoji, by }) => {
+    return jsonResult(await apiCall('POST', `/api/conversations/${encodeURIComponent(id)}/reactions`, { by, emoji, on: false }));
+  });
+
+  mcp.registerTool('reactions_recent', {
+    description: 'What was reacted in the commons since a time (#449): live reactions, oldest first, each with the post, its author, '
+      + 'a short excerpt, the emoji, who reacted and when. Pass `author` = your seat key to see only the reactions on YOUR posts. '
+      + 'A reaction already live before `since` is not repeated. Returns {enabled, reactions, truncated, postsDropped}; enabled:false means '
+      + 'this board stores none, and truncated:true means only the 50 most recently reacted-to posts were included (ask again with a later `since`).',
+    inputSchema: {
+      since: z.string().min(1).describe('ISO-8601 timestamp, e.g. the last time you looked'),
+      author: z.string().optional().describe('Only reactions on this seat\'s posts (your own key, usually)'),
+    },
+  }, async ({ since, author }) => {
+    const q = new URLSearchParams({ since });
+    if (author) q.set('author', author);
+    return jsonResult(await apiCall('GET', `/api/reactions/recent?${q.toString()}`));
+  });
+
   mcp.registerTool('obligation_create', {
     description: 'Record an OBLIGATION — what a seat PROMISED, as a queryable node (#1118, born in the '
       + 'graph per Decision aaf1774b). A steward role, a review owed, a promise, a tripwire: things that '
@@ -2562,6 +2606,48 @@ async function routeHint(id) {
   } };
 }
 const hintContent = (id) => `New post ${id}: read it with conversation_get.`;
+
+// #2029 slice 2 — A REACTION ON YOUR POST IS PUSHED TO YOU, and to no one else. REST sends an id-only event (post, emoji,
+// by: no text, decision 3dc9df18's rule); this reads the post itself. Review conditions (#2029, 2026-11-22):
+//   1. STRAIGHT to the author's transports, never through channelScheduler/broadcastChannel: the scheduler keys its
+//      bookkeeping on meta.message_id and would mark the author's own post push-served, write a fanout delivery for a
+//      resident, and be held by an armed token ring. A direct send records nothing.
+//   2. never to a guest/resident author: their ride-along (guest-once) carries every reaction, and a guest holds no BOUND
+//      MCP stream, so the bound-session filter below already excludes it. Deliberately NOT decided by "has an agent
+//      record": slice 3 may give every seat one, and that test would silence the push for Claude Code seats (review).
+//   3. routeHint's refusals (redacted or unreadable = no one); the excerpt is one line, cut on a code-point boundary.
+//   4. no coalescing yet: un-react then re-react is a fresh note.
+// Only BOUND sessions (#703) with an open stream are aimed at: a declared author tag is not an identity. It is a nudge,
+// never the only copy: the room-update hook and the guest ride-along carry every reaction durably.
+export function reactionExcerpt(body, max = 60) {
+  const one = String(body ?? '').replace(/\s+/g, ' ').trim();
+  const cps = Array.from(one);
+  return cps.length > max ? `${cps.slice(0, max).join('').trimEnd()}…` : one;
+}
+async function routeReaction(ev) {
+  const post = typeof ev?.post === 'string' ? ev.post : '';
+  const emoji = typeof ev?.emoji === 'string' ? ev.emoji : '';
+  const by = typeof ev?.by === 'string' ? ev.by : '';
+  if (!post || !emoji || !by) return { skip: 'malformed reaction event' };
+  const r = await routeHint(post);
+  if (!r.route) return { skip: r.skip };
+  const author = r.route.author;
+  if (author === by) return { skip: 'a reaction on your own post' };
+  let body = '';
+  try { body = (await apiCall('GET', `/api/conversations/${encodeURIComponent(post)}`))?.body ?? ''; } catch { return { skip: 'the post could not be read' }; }
+  const targets = [...transports.entries()].filter(([sid]) => (sessionMeta.get(sid)?.openStreamCount ?? 0) > 0
+    && (seatRegistry.seatForSession(sid) ?? sessionMeta.get(sid)?.seat ?? null) === author);
+  const notification = {
+    jsonrpc: '2.0',
+    method: 'notifications/claude/channel',
+    params: {
+      content: `${by} reacted ${emoji} to your post: "${reactionExcerpt(body)}"`,
+      meta: { chat_id: 'commons', message_id: post, kind: 'reaction', post, emoji, by },   // scalars only (#206)
+    },
+  };
+  for (const [, t] of targets) Promise.resolve().then(() => t.send(notification)).catch((e) => console.error(`reaction push: send failed: ${e.message}`));
+  return { author, sent: targets.length };
+}
 
 const whisperTick = async () => {
   // Read once per tick, before the gate, so `lastActivityAt` is a pure getter
@@ -3944,6 +4030,13 @@ const httpServer = http.createServer(async (req, res) => {
       }
       let payload;
       try { payload = raw ? JSON.parse(raw) : {}; } catch { payload = {}; }
+      // #2029 slice 2 — a reaction event is not a post: it is handled here, before the post branch, and never fanned out.
+      if (payload && payload.event && payload.event.kind === 'reaction') {
+        const r = await routeReaction(payload.event);
+        console.log(r.skip ? `reaction push: skipped (${r.skip})` : `reaction push: ${payload.event.by} ${payload.event.emoji} on ${r.author}'s post -> ${r.sent} bound session(s)`);
+        res.writeHead(204);
+        return res.end();
+      }
       if (payload && payload.conversation && payload.conversation.id) {
         let target = payload.conversation;
         if (isIdOnlyHint(target)) {

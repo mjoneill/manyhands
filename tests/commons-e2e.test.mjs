@@ -60,6 +60,16 @@ test('commons.html (unscoped) renders the whole feed and posts a message', async
     );
     const after = await page.$$eval('.cv-msg-body', (els) => els.map((e) => e.textContent));
     assert.ok(after.some((b) => b.includes('posted from the full page')), 'posted message rendered: ' + after.join(' | '));
+
+    // #2026 — /shrug: typed in the composer and sent, the room shows the shrug, not the command
+    await page.evaluate(() => { document.querySelector('.cv-input').value = '/shrug no idea'; });
+    await page.click('.cv-send');
+    const shrug = 'no idea ¯\\_(ツ)_/¯';
+    await page.waitForFunction((want) => [...document.querySelectorAll('.cv-msg-body')].some((e) => e.textContent.trim() === want), { timeout: 5000 }, shrug);
+    const bodies2 = await page.$$eval('.cv-msg-body', (els) => els.map((e) => e.textContent));
+    assert.ok(!bodies2.some((t) => t.includes('/shrug')), '#2026: the command itself is never posted');
+    const stored = await (await fetch(`${server.baseUrl}/api/conversations`)).json();
+    assert.ok(stored.some((m) => m.body === shrug), '#2026: the server holds the shrug as typed into the room');
   }, { server: { board }, launch: { headless: 'new' } });
 });
 
@@ -768,9 +778,11 @@ test('#1689 commons.html: a post with recall carries one quiet aside; without it
     await page.waitForSelector('.cv-msg[data-id="p-with"]', { timeout: 5000 });
 
     const shape = await page.evaluate(() => Object.fromEntries([...document.querySelectorAll('.cv-msg')].map((m) => [m.dataset.id, [...m.children].map((c) => c.className)])));
-    assert.deepEqual(shape['p-none'], ['cv-msg-meta', 'cv-msg-body prose'], 'a post with no recall is drawn exactly as before: meta, body');
-    assert.deepEqual(shape['p-down'], ['cv-msg-meta', 'cv-msg-body prose'], 'an unavailable recall draws nothing in the room');
-    assert.deepEqual(shape['p-with'], ['cv-msg-meta', 'cv-msg-body prose', 'cv-recall'], 'the aside sits directly under the body');
+    // #449 — every post now ends with its reactions slot (empty until the post has reactions or the store offers them). It
+    // comes LAST, after anything the author sent and after the recall aside, so the recall rules below are unchanged.
+    assert.deepEqual(shape['p-none'], ['cv-msg-meta', 'cv-msg-body prose', 'cv-reactions-slot'], 'a post with no recall is drawn exactly as before: meta, body (then its reactions slot)');
+    assert.deepEqual(shape['p-down'], ['cv-msg-meta', 'cv-msg-body prose', 'cv-reactions-slot'], 'an unavailable recall draws nothing in the room');
+    assert.deepEqual(shape['p-with'], ['cv-msg-meta', 'cv-msg-body prose', 'cv-recall', 'cv-reactions-slot'], 'the aside sits directly under the body');
 
     const w = await page.$eval('.cv-msg[data-id="p-with"] .cv-recall', (box) => ({
       tag: box.tagName, label: box.getAttribute('aria-label'),

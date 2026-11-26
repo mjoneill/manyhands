@@ -78,9 +78,91 @@ export function askGh(sha, { gh = process.env.CI_VERDICT_GH || 'gh', cwd = REPO_
 
 const NAME = { 0: 'GREEN', 1: 'RED', 2: 'UNKNOWN', 3: 'NO RUN', 4: 'PENDING', 5: 'CANCELLED' };
 
+/**
+ * #2025 — `--explain`: say WHY a sha is red, from its failed logs and its diff (tools/ci-diagnose.mjs).
+ * The exit code is still the gate's, from the runs alone: explaining never turns a red into anything else.
+ * Read-only: gh run list / run view / api GET, and git diff / grep. It never pushes, reruns or deploys.
+ * The diff base is `base` if given, else the base of the PR that carries the sha; with neither, nothing is
+ * attributed to the diff, and the explanation says so.
+ */
+export async function explain(sha, { gh = process.env.CI_VERDICT_GH || 'gh', git = process.env.CI_VERDICT_GIT || 'git', cwd = REPO_ROOT, base = null } = {}) {
+  const { diagnose, formatDiagnosis, tokens } = await import('./ci-diagnose.mjs');
+  const run = (bin, args) => spawnSync(bin, args, { encoding: 'utf8', cwd, maxBuffer: 256 * 1024 * 1024 });
+  const notes = [];
+  if (!/^[0-9a-f]{40}$/.test(sha)) return { code: EXIT.UNKNOWN, text: `not a full 40-char sha: ${JSON.stringify(sha)}` };
+  const r = run(gh, ['run', 'list', '--commit', sha, '--limit', '10', '--json', 'databaseId,status,conclusion,workflowName,url,attempt,event']);
+  if (r.error || r.status !== 0) return { code: EXIT.UNKNOWN, text: `could not ask ${gh}: ${r.error?.message || (r.stderr || '').trim().split('\n')[0]}` };
+  let runs;
+  try { runs = JSON.parse(r.stdout); } catch (e) { return { code: EXIT.UNKNOWN, text: `${gh} output was not JSON: ${e.message}` }; }
+  const gate = verdict(runs);
+  const failedLogs = [];
+  let diffFiles = [];
+  let diffRead = false; // #2073: true only once git has actually read the diff
+  let newTokens = [];
+  // #2025 — `run list` shows only each run's LATEST attempt. A rerun that passed hides the red attempt before it, and
+  // that red-then-green is the commonest flake signal there is. So the earlier attempts are asked for by number.
+  const history = [];
+  if (gate.code === EXIT.RED || gate.code === EXIT.GREEN) {
+    for (const x of runs) {
+      for (let n = 1; n < (x.attempt ?? 1); n++) {
+        const v = run(gh, ['run', 'view', String(x.databaseId), '--attempt', String(n), '--json', 'status,conclusion,attempt']);
+        let at = null;
+        try { at = v.status === 0 ? JSON.parse(v.stdout) : null; } catch { at = null; }
+        if (!at) { notes.push(`could not read attempt ${n} of run ${x.databaseId}`); continue; }
+        history.push({ ...x, attempt: n, status: at.status, conclusion: at.conclusion });
+        if (at.status === 'completed' && at.conclusion === 'failure') {
+          const l = run(gh, ['run', 'view', String(x.databaseId), '--attempt', String(n), '--log-failed']);
+          if (l.status === 0) failedLogs.push({ runId: x.databaseId, attempt: n, text: l.stdout });
+          else notes.push(`could not read the failed log of run ${x.databaseId} attempt ${n}`);
+        }
+      }
+    }
+  }
+  if (gate.code === EXIT.RED || failedLogs.length) {
+    if (gate.code === EXIT.RED) for (const x of gate.runs) {
+      const l = run(gh, ['run', 'view', String(x.databaseId), '--log-failed']);
+      if (l.status === 0) failedLogs.push({ runId: x.databaseId, attempt: x.attempt ?? null, text: l.stdout });
+      else notes.push(`could not read the failed log of run ${x.databaseId}`);
+    }
+    if (!base) {
+      const p = run(gh, ['api', `repos/{owner}/{repo}/commits/${sha}/pulls`, '--jq', '.[0].base.sha // empty']);
+      base = p.status === 0 && /^[0-9a-f]{40}$/.test(p.stdout.trim()) ? p.stdout.trim() : null;
+    }
+    if (base) {
+      const names = run(git, ['diff', '--name-only', base, sha]);
+      const diff = run(git, ['diff', '-U0', base, sha]);
+      const tree = run(git, ['grep', '-h', '-I', '-e', '', base]);
+      if (names.status === 0 && diff.status === 0 && tree.status <= 1) {
+        diffFiles = names.stdout.split('\n').filter(Boolean);
+        diffRead = true;
+        const added = diff.stdout.split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++')).map((l) => l.slice(1)).join('\n');
+        const had = tokens(tree.stdout);
+        newTokens = [...tokens(added)].filter((t) => !had.has(t));
+      } else notes.push(`git could not diff ${base.slice(0, 7)}..${sha.slice(0, 7)} here (fetch both?), so nothing is attributed to the diff`);
+    } else notes.push('no PR carries this sha and no --base was given, so nothing is attributed to the diff');
+  }
+  // #2025 — a file that EXITED may run rows that live in a module it imports (#1760 split files). Its relative imports
+  // are read at the sha, so a row located in that module can explain the exit. Unreadable here ⇒ nothing is linked.
+  const { parseFailedLog } = await import('./ci-diagnose.mjs');
+  const importsOf = {};
+  for (const file of new Set(failedLogs.flatMap((l) => parseFailedLog(l.text).fileExited.map((e) => e.file)))) {
+    const shown = run(git, ['show', `${sha}:${file}`]);
+    if (shown.status !== 0) continue;
+    const dir = path.posix.dirname(file);
+    importsOf[file] = [...shown.stdout.matchAll(/^\s*(?:import|export)\b[^'"\n]*?(?:from\s*)?['"](\.{1,2}\/[^'"?]+)(?:\?[^'"]*)?['"]/gm)]
+      .map((m) => path.posix.normalize(path.posix.join(dir, m[1])));
+  }
+  const d = diagnose({ sha, base, runs: [...runs, ...history], failedLogs, diffFiles, diffRead, newTokens, importsOf });
+  return { code: gate.code, diagnosis: d, text: [formatDiagnosis(d), ...notes.map((n) => `(${n})`)].join('\n') };
+}
+
 function main(argv) {
   const sha = argv[2];
-  if (!sha) { process.stderr.write('usage: ci-verdict.mjs <full-sha>\n'); return EXIT.UNKNOWN; }
+  if (!sha) { process.stderr.write('usage: ci-verdict.mjs <full-sha> [--explain [--base <sha>]]\n'); return EXIT.UNKNOWN; }
+  if (argv.includes('--explain')) {
+    const i = argv.indexOf('--base');
+    return explain(sha, { base: i > 0 ? argv[i + 1] : null }).then((x) => { process.stdout.write(x.text + '\n'); return x.code; });
+  }
   const v = askGh(sha);
   const lines = [`   ci ${NAME[v.code]} — ${v.why}`];
   for (const run of v.runs || []) lines.push(`      ${run.workflowName || 'run'} ${run.status}/${run.conclusion || '—'} ${run.url || ''}`);
@@ -90,4 +172,4 @@ function main(argv) {
 
 import { realpathSync } from 'node:fs';
 const isMain = (() => { try { return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; } })();
-if (isMain) process.exit(main(process.argv));
+if (isMain) Promise.resolve(main(process.argv)).then((code) => process.exit(code));

@@ -8,7 +8,7 @@
  *                   disables graph-store-meter, #1645 2d). K1 compares the failing content as before and pins that one difference exactly.
  *   K1b KNOWN DIFFERENCE (characterisation, not a gate)  the digest prints rows in the order the store returned them and shows the first six, and the standing queries have no ORDER BY. The replica's
  *                   order is stable; the executor's is arbitrary and differs between runs (measured), so the printed order, and which six rows are shown, can differ with the source. The first-seen keys do not.
- *   K2  STALE ASK   with the graph conversations unit on (production's setting) the `stale-claims` standing check answers `disabled` with its reason on BOTH sources, which the MCP tick reads as
+ *   K2  STALE ASK   (#1885: now RUNS under the unit and gives the same rows on both sources; the text below is the row's history) with the graph conversations unit on (production's setting) the `stale-claims` standing check answers `disabled` with its reason on BOTH sources, which the MCP tick reads as
  *                   "ask nothing, forget nothing" (mcp-server.mjs, staleClaimAskOnce). So under #1643 the ask is neither started nor stopped by the source. NOTE: this also means the stale-claim ask does not
  *                   fire in production at all while that unit is on; that is #1574's doing, not #1643's.
  *   K3  STALE ASK   with the unit OFF, where the check is enabled, an old claim yields the same `stale-claims` rows on both sources and `staleClaimAskTick` posts the same asks from each
@@ -87,9 +87,14 @@ test('#1643 (K1) the digest rendered from the executor\'s standing checks has th
     assert.equal(db.items, da.items);
     const pausedIds = (fs0) => Object.keys(fs0).filter((k) => k.endsWith('|disabled')).map((k) => k.slice(0, -'|disabled'.length)).sort();
     const extra = pausedIds(db.firstSeen).filter((id) => !pausedIds(da.firstSeen).includes(id));
-    assert.deepEqual(extra, ['graph-store-meter'], `the ONLY check the executor pass does not run that the replica pass does is graph-store-meter (replica ⏸ ${pausedIds(da.firstSeen)}, executor ⏸ ${pausedIds(db.firstSeen)})`);
+    // #1885 — role-expiry now RUNS under the unit, but on the executor pass without the log-born unit (this world has none) it
+    // would build the in-process copy to read the declarations, so it is paused there with its own reason. Production runs log-born.
+    assert.deepEqual(extra.sort(), ['role-expiry'], `the ONLY check the executor pass pauses that the replica pass runs is (without log-born) role-expiry; graph-store-meter is retired from that pass, not paused (#1979) (replica ⏸ ${pausedIds(da.firstSeen)}, executor ⏸ ${pausedIds(db.firstSeen)})`);
     assert.ok(pausedIds(da.firstSeen).every((id) => pausedIds(db.firstSeen).includes(id)), 'and nothing the replica pass skips is run by the executor pass');
-    assert.match(db.body, /graph-store-meter \(not measured on the executor pass \(#1645 2d\)/, 'the executor digest says so, with its reason');
+    // #1979 — graph-store-meter is RETIRED from the executor pass: not on its standing list, so the digest's ⏸ line does not name it
+    assert.equal(b.standing.find((s) => s.id === 'graph-store-meter'), undefined, 'the executor pass does not list the retired meter');
+    assert.doesNotMatch(db.body, /graph-store-meter/, 'and the executor digest does not name it');
+    assert.ok(a.standing.some((s) => s.id === 'graph-store-meter' && !s.disabled), 'CONTROL: the replica pass still runs the meter');
   });
 });
 
@@ -104,19 +109,19 @@ test('#1643 (K1b, CHARACTERISATION) the digest\'s row order, and which six rows 
   assert.deepEqual(rev.firstSeen, fwd.firstSeen, 'the first-seen keys do not depend on the order: only the printed text does');
 });
 
-test('#1643 (K2) with the conversations unit on, stale-claims answers "disabled" on both sources, which the ask consumer reads as: ask nothing, forget nothing', T, async () => {
+test('#1643 (K2, #1885) with the conversations unit on, stale-claims RUNS on both sources and gives the same rows; it is no longer disabled', T, async () => {
+  // #1885 (Planning 2026-11-19) — this row used to pin `disabled` on both sources (#1574). The check now reads the graph's posts
+  // under the unit, so it runs; what #1643 still needs is that the SOURCE does not change its answer.
   await world({ conversations: true }, async ({ start }) => {
     const A = await start(); await seed(A); const B = await start({ SCRUM_GRAPH_CHECKS_SOURCE: 'executor' });
     const [a, b] = [await checksOf(A), await checksOf(B)];
     const sa = a.standing.find((s) => s.id === 'stale-claims'); const sb = b.standing.find((s) => s.id === 'stale-claims');
     assert.ok(sa && sb, 'PRECONDITION: both payloads carry a stale-claims entry');
-    assert.equal(sa.disabled, true, 'replica: disabled'); assert.equal(sb.disabled, true, 'executor: disabled');
-    assert.equal(sb.reason, sa.reason, 'with the same reason'); assert.ok(sa.reason && sa.reason.length > 10, 'and a reason is stated (never an empty "nothing found")');
-    assert.equal(Object.hasOwn(sb, 'rows') && sb.rows?.length > 0, false, 'no rows are offered to the ask consumer from either source');
-    // the consumer's contract for an entry that is not readable (mcp-server.mjs staleClaimAskOnce): rows = null, and staleClaimAskTick then does nothing
-    const posts = []; const r = await staleClaimAskTick({ now: NOW, rows: null, post: async (m) => posts.push(m), file: path.join(os.tmpdir(), `cc-ask-${process.pid}-k2.json`) });
-    assert.equal(r.asked, 0); assert.equal(posts.length, 0, 'CONTROL: unreadable rows post nothing');
-    fs.rmSync(path.join(os.tmpdir(), `cc-ask-${process.pid}-k2.json`), { force: true });
+    assert.equal(sa.disabled, undefined, `replica: runs: ${JSON.stringify(sa).slice(0, 200)}`); assert.equal(sb.disabled, undefined, `executor: runs: ${JSON.stringify(sb).slice(0, 200)}`);
+    assert.equal(sa.error, undefined, 'replica: no error'); assert.equal(sb.error, undefined, 'executor: no error');
+    assert.ok(Array.isArray(sa.rows) && Array.isArray(sb.rows), 'both answer with rows (an array), never an absent answer');
+    const strip = (rows) => rows.map(({ ms, slow, ...r }) => r);
+    assert.deepEqual(strip(sb.rows), strip(sa.rows), 'the same stale-claims rows from either source');
   });
 });
 

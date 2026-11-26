@@ -375,7 +375,9 @@ import { ATTACH_REASON_MAX, attachRequest, checkAttachInput, attachOutcome } fro
     const li = el('li', 'claim');
     const meta = el('div', 'cmeta');
     if (c.type) { const t = el('span', 'tag', c.type); t.dataset.type = c.type; meta.append(t); }
-    const where = [!grouped && Number.isInteger(c.page) ? 'page ' + c.page : null, Number.isInteger(c.block) ? 'block ' + c.block : null].filter(Boolean).join(' · ');
+    // #1961: a Word file's claim names its section (heading path and paragraph), which a reader can find in the document
+    const where = [!grouped && Number.isInteger(c.page) ? 'page ' + c.page : null, typeof c.section === 'string' && c.section ? '§ ' + c.section : null,
+      Number.isInteger(c.block) ? 'block ' + c.block : null].filter(Boolean).join(' · ');
     if (where) meta.append(el('span', null, where));
     if (c.verb) meta.append(el('span', 'verb', 'verb: ' + c.verb));
     if (meta.childNodes.length) li.append(meta);
