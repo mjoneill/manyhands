@@ -139,7 +139,7 @@ function matches(post, f) {
 }
 // #1574 R4a — a redacted post is served content-free: its slot and nothing it said (never "" and never the old text)
 const redactedShape = (p, commitSeq, op = null) => ({ ...(op ? { op } : {}), id: p.id, postSeq: p.postSeq, body: null, redacted: true, commitSeq });
-const shape = (p, commitSeq) => p.redacted ? redactedShape(p, commitSeq) : ({ id: p.id, body: p.body, author: p.author, createdAt: p.createdAt, postSeq: p.postSeq, commitSeq, mentions: p.mentions, ...(p.attachedTo ? { attachedTo: p.attachedTo } : {}) });
+const shape = (p, commitSeq) => p.redacted ? redactedShape(p, commitSeq) : ({ id: p.id, body: p.body, author: p.author, createdAt: p.createdAt, postSeq: p.postSeq, commitSeq, mentions: p.mentions, ...(p.attachedTo ? { attachedTo: p.attachedTo } : {}), ...(p.conversation ? { conversation: p.conversation } : {}) });
 
 /** One batch of eligible operations, each with its post node or null (INCONSISTENT). */
 async function opBatch(client, { prefixes, where, order, limit }) {
