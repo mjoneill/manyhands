@@ -62,6 +62,7 @@ import path from 'node:path';
 import { makeBoardFixture, startRestServer, startMcpServer, mcpSession, withBrowserServer } from './helpers/harness.mjs';
 import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-executor-proc.mjs';
 import { spawnSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { createGraphClient } from '../core/graph-client.mjs';
 
 const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)';
@@ -301,7 +302,10 @@ test('#1764 B3 — the real severance gate still REFUSES the old name after a re
   fs.mkdirSync(path.join(scan, 'tree'));
   const gate = (file, text) => {
     fs.writeFileSync(path.join(scan, 'tree', 'sample.mjs'), `export const author = ${JSON.stringify(text)};\n`);
-    const r = spawnSync(process.execPath, [GATE, path.join(scan, 'tree'), '--json'], { encoding: 'utf8', env: { ...process.env, SCRUM_ROSTER_FILE: file, SCRUM_EXPORT_TRANSFORMS: rules } });
+    // The gate also reads the LIVE roster (SCRUM_ROSTER_URL, default the running board's GET /api/roster) and refuses, exit 2,
+    // when a live seat is not guarded. Unset, this row read whatever board happened to be running on the host and failed on
+    // its seats, not on B3's. The row is about the FILE the refused save left, so the live roster is that same file.
+    const r = spawnSync(process.execPath, [GATE, path.join(scan, 'tree'), '--json'], { encoding: 'utf8', env: { ...process.env, SCRUM_ROSTER_FILE: file, SCRUM_ROSTER_URL: pathToFileURL(file).href, SCRUM_EXPORT_TRANSFORMS: rules } });
     assert.ok(r.status === 0 || r.status === 1, `the gate ran (exit ${r.status}: ${r.stderr.slice(0, 200)})`);
     return r.status;
   };
