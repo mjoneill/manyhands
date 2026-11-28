@@ -977,7 +977,7 @@ function buildMcpServer() {
 
   // ── Conversation tools (#93) ─────────────────────────────────────
   mcp.registerTool('conversation_post', {
-    description: 'Post a new conversation to the board commons. Body and author required. attachedTo is optional (UUID of a card to attach the conversation to, or omitted/null for the board-level chat — which is the v1 default surface).',
+    description: 'Post a new conversation to the board commons. Body and author required. attachedTo is optional (UUID of a card to attach the conversation to, or omitted/null for the board-level chat — which is the v1 default surface). If the post names exactly one real card (#NNN) and attaches to nothing, the answer carries attachNudge {card, cardId, hint}: the post was written as sent and nothing was attached. Attach the next post about that card, or ignore the nudge if the post is for the whole room (#695).',
     inputSchema: {
       body: z.string().min(1).describe('Message body (plain text; markdown not rendered in v1)'),
       author: z.string().min(1).describe(`Author key — ${seatKeys().join(', ')}. If your session is BOUND to a seat, that seat is the author and this value is ignored unless it differs, in which case it is recorded as onBehalfOf (a relay, not a claim about who you are). If your session is UNBOUND the board cannot verify this and takes your word for it (#125).`),

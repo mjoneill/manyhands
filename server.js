@@ -57,6 +57,7 @@ import { createSmallkindsUnit, wakeCreateIntention, wakeIri, REACTION_PALETTE, r
 import { REACTION_BATCH_MAX, normalizeReactionEmoji, topEmoji, TOP_DAYS, TOP_DAYS_MAX } from './core/reaction-palette.mjs';   // #449, #2026
 import { BOARD_TOOLS } from './core/board-tools.mjs';
 import { resolveAttachedTo } from './core/attached-to.mjs'; // #761
+import { attachNudge } from './core/attach-nudge.mjs'; // #695
 import { withAttachmentFence, FENCE_BUSY, DEFAULT_WAIT_MS as DEFAULT_FENCE_WAIT_MS } from './core/attachment-fence.mjs';   // #1648
 import { promptGrantConflict, promptGrantWarning } from './core/prompt-grants.mjs'; // #1242
 import { cardContentKey } from './core/card-content-key.mjs';
@@ -13906,11 +13907,13 @@ async function handleCreateConversation(req, res) {
     // answers inside it (#1409 norm). Without the partner, each receiver would
     // have to guess whose talk it is.
     let talkWith = null;
+    let nudge = null;   // #695 — advice for the ANSWER only, computed from the same snapshot the post is resolved against
     const created = await withWriteLock(async () => {
       const data = readBoard();
       assertPostSeqWritable(data);   // #1592 — a corrupt post sequence refuses the WHOLE write, before any change
       const ref = resolveAttachedTo(body.attachedTo, data.cards);
       if (!ref.ok) return { refused: ref.id };
+      nudge = attachNudge({ body: body.body, attachedTo: ref.value, cards: data.cards });
       const talk = resolveConversation(body.conversation, data);   // #1401
       if (!talk.ok) return { refusedTalk: talk.id, talkClosed: !!talk.closed };
       if (talk.value) talkWith = talksOf(data).find((e) => talkIdOf(e) === talk.value)?.['scrum:with'] ?? null;
@@ -13942,7 +13945,9 @@ async function handleCreateConversation(req, res) {
     // original silence went unnoticed. The stored record is NOT touched — the
     // diagnostic rides the response only.
     const ignoredFields = unconsumedConversationFields(body);
-    sendJSON(res, 201, ignoredFields.length ? { ...created, ignoredFields } : created);
+    // #695 — like #843's ignoredFields, the nudge rides the response and is absent when it has nothing to say.
+    const answer = ignoredFields.length ? { ...created, ignoredFields } : created;
+    sendJSON(res, 201, nudge ? { ...answer, attachNudge: nudge } : answer);
     recallAfterPost(created);   // #1689 — after the answer; it never touches it
   } catch (e) {
     if (e instanceof PostSeqStateCorrupt) return sendJSON(res, 500, e.body);   // #1592
@@ -13986,10 +13991,12 @@ async function createPostThroughGraph(res, body) {
   if (badSize >= 0) return sendJSON(res, 400, { error: `attachments[${badSize}].size must be a non-negative integer`, code: 'INVALID_ATTACHMENT_SIZE' });
   const postId = postWriteId(author, requestId);
   let talkWith = null;
+  let nudge = null;   // #695 — the answer's advice, from the same snapshot draft() resolves against; never stored
   // The post, minus its number and time, from exactly what the document path would store.
   const draft = (data) => {
     const ref = resolveAttachedTo(body.attachedTo, data.cards);
     if (!ref.ok) return { refused: ref.id };
+    nudge = attachNudge({ body: body.body, attachedTo: ref.value, cards: data.cards });
     const talk = resolveConversation(body.conversation, data);
     if (!talk.ok) return { refusedTalk: talk.id, talkClosed: !!talk.closed };
     if (talk.value) talkWith = talksOf(data).find((e) => talkIdOf(e) === talk.value)?.['scrum:with'] ?? null;
@@ -14138,7 +14145,7 @@ async function createPostThroughGraph(res, body) {
     if (!retry) notifyMcpOfPost({ id: post.id });
     const ignoredFields = unconsumedConversationFields(body).filter((k) => k !== 'requestId');
     const out = ignoredFields.length ? { ...post, ignoredFields } : post;
-    sendJSON(res, replay ? 200 : 201, out);
+    sendJSON(res, replay ? 200 : 201, nudge ? { ...out, attachNudge: nudge } : out);
     if (!retry) recallAfterPost(post);   // #1689 — after the answer, once per post (a retry or replay was decided by its first request)
     return;
   }
