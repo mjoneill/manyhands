@@ -30,7 +30,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { attachNudge } from '../core/attach-nudge.mjs';
 import { startRestServer, spawnBoardServer, makeBoardFixture } from './helpers/harness.mjs';
-import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-executor-proc.mjs';
+import { HAVE_PY, startExecutor, killExecutor } from './helpers/graph-executor-proc.mjs';
 
 // ── the rule, as a pure function ─────────────────────────────────────────
 
@@ -131,19 +131,23 @@ const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip i
 const DSID = 'attach-nudge-695';
 
 test('#695 REST (graph store): the same nudge on the graph post path, and the two-card control stays silent', { skip: SKIP }, async () => {
-  const store = tmpStore('an695-store-');
-  const exec = await startExecutor({ store, datasetId: DSID, create: true });
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'an695-'));
-  const file = path.join(dir, 'board.json');
+  // #1672: everything this test makes lives under ONE folder, removed in `finally`. The first version left three
+  // folders behind and the runner failed the run for it (CI run 46091387159), which the local run had also reported.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'an695-'));
+  let exec = null; let srv = null;
+  try {
+  const store = fs.mkdtempSync(path.join(root, 'store-'));
+  exec = await startExecutor({ store, datasetId: DSID, create: true });
+  const file = path.join(root, 'board.json');
   fs.writeFileSync(file, JSON.stringify(makeBoardFixture({ cards: [], conversations: [] }), null, 2));
-  const srv = await spawnBoardServer({
+  const attachDir = fs.mkdtempSync(path.join(root, 'att-'));
+  srv = await spawnBoardServer({
     readyTimeoutMs: 15000, label: 'attach-nudge-695 server',
     env: (port) => ({ ...process.env, SCRUM_BOARD_FILE: file, SCRUM_MCP_NOTIFY_URL: '',
-      SCRUM_ATTACHMENTS_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'an695-att-')),
-      SCRUM_CHANNEL_CONFIG_FILE: path.join(os.tmpdir(), `an695-chan-${process.pid}-${port}.json`),
+      SCRUM_ATTACHMENTS_DIR: attachDir,
+      SCRUM_CHANNEL_CONFIG_FILE: path.join(root, `chan-${port}.json`),
       SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: exec.baseUrl, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1' }),
   });
-  try {
     const card = await newCard(srv.baseUrl, 'graph card');
     const other = await newCard(srv.baseUrl, 'graph card two');
     const one = await post(srv.baseUrl, { author: 'ada', body: `done with #${card.shortId}` });
@@ -153,5 +157,9 @@ test('#695 REST (graph store): the same nudge on the graph post path, and the tw
     assert.equal(b1.attachedTo ?? null, null, 'never auto-attaches');
     const two = await (await post(srv.baseUrl, { author: 'ada', body: `done with #${card.shortId} and #${other.shortId}` })).json();
     assert.equal(two.attachNudge, undefined, 'two cards → silent on the graph path');
-  } finally { srv.stop(); await killExecutor(exec); }
+  } finally {
+    if (srv) srv.stop();
+    if (exec) await killExecutor(exec);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
